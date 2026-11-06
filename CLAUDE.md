@@ -43,6 +43,9 @@ and final storage on HTTPS/localhost, while allowing other conversations to run.
 Ordinary HTTP keeps transactional saves/per-tab ownership; protected continuation
 requires a secure context. Retain ordered local edits across database-open failure.
 Foreign deletion/reassignment requires explicit selection and retains the draft.
+Keep conversation model identity immutable even while empty; substantive field
+writes compare it too. Reverify recovered receipts against refreshed public
+history under conversation writer ownership before acknowledging them.
 Refresh committed
 history before send; a stale subscriber must never replace a pending nonce.
 Require preparation acknowledgment for continuation/documents, retain drafts on

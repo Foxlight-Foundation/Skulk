@@ -161,20 +161,10 @@ const slice = createSlice({
       const currentConvo = currentId ? state.conversations[currentId] : null;
 
       // Same model + active conversation: no-op.
-      if (modelId === state.selectedModelId && currentId) return;
+      if (modelId === state.selectedModelId && currentConvo?.modelId === modelId) return;
 
-      // Empty current conversation — re-assign it to the new model rather
-      // than leaving an unused conversation behind.
-      if (currentConvo && !currentConvo.continuation && currentConvo.messages.length === 0 && !state.conversations[state.modelToConversationId[modelId]]) {
-        if (state.modelToConversationId[currentConvo.modelId] === currentConvo.id) {
-          delete state.modelToConversationId[currentConvo.modelId];
-        }
-        currentConvo.modelId = modelId;
-        currentConvo.updatedAt = now;
-        state.modelToConversationId[modelId] = currentConvo.id;
-        state.selectedModelId = modelId;
-        return;
-      }
+      // A conversation ID permanently identifies its processing destination,
+      // even while empty: another tab may already be preparing its first send.
 
       // Save the existing conversation's updatedAt, then switch.
       if (currentConvo) {
@@ -183,7 +173,7 @@ const slice = createSlice({
 
       // Find or create the new model's conversation.
       const existingId = state.modelToConversationId[modelId];
-      if (existingId && state.conversations[existingId]) {
+      if (existingId && state.conversations[existingId]?.modelId === modelId) {
         state.activeConversationId = existingId;
         state.selectedModelId = modelId;
       } else {
@@ -455,9 +445,13 @@ export async function persistChatContinuation(chat: ChatState, conversationId: s
       ? conversation.messages.map(existing => existing.id === message.id ? message : existing)
       : [...conversation.messages, message]
     : conversation.messages;
-  await writeChatStorage(chatStorageChanges(durableChatState(chat), durableChatState({ ...chat,
+  const changes = chatStorageChanges(durableChatState(chat), durableChatState({ ...chat,
     conversations: { ...chat.conversations, [conversationId]: { ...conversation, continuation, messages } },
-  })));
+  }));
+  // Receipt-only acknowledgment must still compare the verified transcript:
+  // ordinary message edits can commit without the long-lived writer lock.
+  if (continuation?.receipt && !message) changes.push({ path: ['conversations', conversationId, 'messages'], before: messages, after: messages });
+  await writeChatStorage(changes);
 }
 
 let refreshCommittedChat: (() => Promise<void>) | undefined;

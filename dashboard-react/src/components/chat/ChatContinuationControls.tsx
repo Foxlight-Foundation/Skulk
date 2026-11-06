@@ -45,12 +45,18 @@ export function ChatContinuationControls({ conversationId, target, disabled }: {
   const [publicKey, setPublicKey] = useState(''), [enrollment, setEnrollment] = useState('');
   const [message, setMessage] = useState(''), [busy, setBusy] = useState(false);
   const save = async (continuation?: ChatContinuation) => {
-    const expected = store.getState().chat.conversations[conversationId]?.continuation;
+    const expectedConversation = store.getState().chat.conversations[conversationId];
+    const expected = expectedConversation?.continuation;
     const release = await acquireChatConversation(conversationId);
     try {
       await synchronizeChatPersistence();
-      if (JSON.stringify(store.getState().chat.conversations[conversationId]?.continuation) !== JSON.stringify(expected)) throw new Error('The conversation changed. Review its refreshed recovery state first.');
-      await persistChatContinuation(store.getState().chat, conversationId, continuation);
+      const refreshedChat = store.getState().chat;
+      const current = refreshedChat.conversations[conversationId];
+      if (!current || current.modelId !== expectedConversation?.modelId || JSON.stringify(current.continuation) !== JSON.stringify(expected)) throw new Error('The conversation changed. Review its refreshed recovery state first.');
+      // The optimistic lookup check precedes writer acquisition. Synchronizing
+      // can adopt newer public messages with the same pending authority.
+      if (continuation?.receipt) await verifyContinuationHistory(continuation, buildApiMessages(await hydrateChatDocuments(current.messages), { text: true, pdf: true }));
+      await persistChatContinuation(refreshedChat, conversationId, continuation);
       dispatch(chatActions.setConversationContinuation({ conversationId, continuation }));
     } finally { await release(); }
   };

@@ -6613,6 +6613,10 @@ closed-tab ownership is detected without retrying inference. Temporary database
 failures retain ordinary edits in the current tab until they can be saved. If
 another tab deletes the active conversation or changes its model, sending pauses
 until you explicitly choose or start a conversation; your draft is retained.
+Switching models selects or creates a separate conversation even when the old
+one is empty. A conversation ID retains its original model. Receipt recovery
+checks public history again after acquiring ownership and refreshing storage;
+it cannot acknowledge a receipt against newly changed history.
 
 Recovery/reset controls remain visible for retained continuation state even after
 a destination withdraws its advertisement. New enrollment still requires a current

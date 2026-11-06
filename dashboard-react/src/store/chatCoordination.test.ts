@@ -89,6 +89,16 @@ describe('authoritative browser transactions', () => {
     expect(enrolled.conversations.a.modelId).toBe('model-a');
   });
 
+  it('refuses a stale field append after the context was reassigned to another model', () => {
+    const before = { conversations: { a: { id: 'a', modelId: 'model-a', messages: [], updatedAt: 1 } } };
+    const appended = { conversations: { a: { ...before.conversations.a, messages: ['model-a prompt'], updatedAt: 3 } } };
+    const reassigned = { conversations: { a: { ...before.conversations.a, modelId: 'model-b' } } };
+    expect(() => applyChatStorageChanges(reassigned, chatStorageChanges(before, appended))).toThrow('changed in another tab');
+    expect(reassigned.conversations.a.messages).toEqual([]);
+    const timestampOnly = { conversations: { a: { ...before.conversations.a, updatedAt: 3 } } };
+    expect(applyChatStorageChanges(reassigned, chatStorageChanges(before, timestampOnly)).conversations).toEqual({ a: { ...reassigned.conversations.a, updatedAt: 3 } });
+  });
+
   it.each(['open', 'transaction'])('retains ordered ordinary edits across %s failures and commits them after recovery', async failureAt => {
     const before = await readCommittedChatStorage(), id = crypto.randomUUID();
     const created = { ...before, conversations: { ...(before.conversations as Record<string, unknown>), [id]: { id, name: 'New', messages: [] } } };

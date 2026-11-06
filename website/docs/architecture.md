@@ -3660,7 +3660,7 @@ uncertainty requires explicit recovery or abandonment. No management-session
 cookie or private key crosses between Chat and a capability surface.
 
 `store/chatCoordination.ts` serializes changed-field snapshot writes with a
-transactional IndexedDB compare-and-swap checks and, where available, a
+transactional IndexedDB compare-and-swap check and, where available, a
 same-origin Web Lock.
 `skulk-chat-history-v2` owns canonical public history/receipts and committed
 revisions; `skulk-chat-v2` localStorage is only a bootstrap cache, isolating
@@ -3675,6 +3675,9 @@ Ordinary edits survive temporary database-open/transaction failures in process;
 foreign deletion or model reassignment requires explicit selection and preserves
 the draft. Cancellation before HTTP dispatch restores the preceding attempt,
 while failure to restore retains the pending fence.
+Conversation IDs keep their original model even when empty; substantive field
+writes also compare that model identity. Receipt recovery rechecks the refreshed
+public transcript while holding writer ownership before acknowledging custody.
 
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`

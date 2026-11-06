@@ -6,7 +6,7 @@ import { ThemeProvider } from 'styled-components';
 import { userEvent } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { store } from '../../store';
-import { chatActions, chatSliceReducer } from '../../store/slices/chatSlice';
+import { chatActions, chatSliceReducer, synchronizeChatPersistence } from '../../store/slices/chatSlice';
 import { canonicalContinuationJSON, publicHistoryFingerprint } from '../../store/chatContinuation';
 import { darkTheme } from '../../theme/theme';
 import { ChatView } from './ChatView';
@@ -57,7 +57,11 @@ async function renderAndEnroll(features: Array<'image_input' | 'function_tools' 
 
 async function send(text: string): Promise<void> {
   await act(async () => { await userEvent.fill(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!, text); });
-  await settle(() => !container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.disabled);
+  // Public history may commit before the turn restores its Send control.
+  await settle(() => {
+    const button = container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]');
+    return button !== null && !button.disabled;
+  });
   await act(async () => { await userEvent.click(container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!); });
 }
 
@@ -350,6 +354,74 @@ describe('Chat client continuation', () => {
     expect(next.conversations[id].modelId).toBe(model);
     expect(next.conversations[id].continuation).toEqual(chat.conversations[id].continuation);
     expect(next.conversations[next.activeConversationId!].continuation).toBeUndefined();
+  });
+
+  it('keeps even an unenrolled empty conversation bound to its original model', () => {
+    const chat = chatSliceReducer(store.getState().chat, chatActions.selectModel(model));
+    const id = chat.activeConversationId!;
+    const next = chatSliceReducer(chat, chatActions.selectModel('independent/other-model'));
+    expect(next.activeConversationId).not.toBe(id);
+    expect(next.conversations[id].modelId).toBe(model);
+    expect(next.conversations[id].messages).toEqual([]);
+    expect(chatSliceReducer(next, chatActions.selectModel(model)).activeConversationId).toBe(id);
+  });
+
+  it.each([1, 4])('refuses recovery when history changes during fingerprint operation %s', async changeAt => {
+    let calls = 0, receipt: Record<string, unknown> | undefined;
+    const assistant = { role: 'assistant', content: 'complete public answer' };
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/v1/chat/continuation/receipt') return new Response(JSON.stringify({ receipt, error: null }));
+      if (String(input) !== '/v1/chat/completions') return new Response(JSON.stringify({ enabled: false }));
+      calls++;
+      const header = new Headers(init?.headers).get('Skulk-Continuation-Proof')!;
+      const proof = JSON.parse(atob(header.replaceAll('-', '+').replaceAll('_', '/'))) as { request: Record<string, unknown> };
+      const body = JSON.parse(String(init?.body)) as { messages: Record<string, unknown>[] };
+      receipt = { contract: 'chat.continuation@0.1.0', conversation_id: proof.request.conversation_id, request_nonce: proof.request.nonce, handle: 'ct1_' + 'd'.repeat(64), history: await publicHistoryFingerprint([...body.messages, assistant]), expires_at: Date.now() / 1000 + 300 };
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: assistant }] })}\n\n`);
+    }));
+    await renderAndEnroll(); await send('Original prompt');
+    const id = store.getState().chat.activeConversationId!;
+    await settle(() => store.getState().chat.conversations[id].continuation?.phase === 'uncertain' && store.getState().chat.conversations[id].messages.length === 2 && !!container!.querySelector('[aria-label="Send message"]'));
+    await flushChatStorage();
+    await navigator.locks.request('skulk-chat-conversation-v2:' + id, () => {});
+    const originalDigest = crypto.subtle.digest.bind(crypto.subtle);
+    let changed = false, digestCalls = 0;
+    vi.spyOn(crypto.subtle, 'digest').mockImplementation(async (algorithm, data) => {
+      const result = await originalDigest(algorithm, data);
+      if (++digestCalls === changeAt) {
+        changed = true;
+        // Edit during either optimistic or owned verification, without a
+        // notification that would refresh the tab prematurely.
+        await new Promise<void>((resolve, reject) => {
+          const opening = indexedDB.open('skulk-chat-history-v2');
+          opening.onerror = () => reject(opening.error);
+          opening.onsuccess = () => {
+            const database = opening.result, transaction = database.transaction('snapshot', 'readwrite');
+            const request = transaction.objectStore('snapshot').get('current');
+            request.onsuccess = () => {
+              const record = request.result as { version: number; revision: number; state: { conversations: Record<string, { messages: Array<{ content: string }> }> } };
+              record.state.conversations[id].messages[0].content = 'Changed after lookup';
+              record.revision++;
+              transaction.objectStore('snapshot').put(record, 'current');
+            };
+            transaction.oncomplete = () => { database.close(); resolve(); };
+            transaction.onabort = () => { database.close(); reject(transaction.error); };
+          };
+        });
+      }
+      return result;
+    });
+    await click('Recover receipt');
+    await settle(() => container!.textContent!.includes(changeAt === 1 ? 'committed public history is missing or changed' : 'changed in another tab'));
+    expect(changed).toBe(true);
+    const canonical = (await readCommittedChatStorage()).conversations as Record<string, { messages: Array<{ content: string }>; continuation: { phase: string } }>;
+    expect(canonical[id].messages[0].content).toBe('Changed after lookup');
+    expect(canonical[id].continuation.phase).toBe('uncertain');
+    expect(store.getState().chat.conversations[id].continuation?.phase).toBe('uncertain');
+    expect(calls).toBe(1);
+    // The synthetic foreign edit deliberately sent no notification. Adopt it
+    // before ordinary teardown so deletion compares the current transcript.
+    await act(async () => { await synchronizeChatPersistence(); });
   });
 
   it('keeps reset controls when the destination withdraws continuation', async () => {

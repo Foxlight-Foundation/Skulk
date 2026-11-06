@@ -164,7 +164,11 @@ export function chatStorageChanges(before: ChatStorageObject, after: ChatStorage
         // concurrent enrollment that did not change modelId itself.
         if (key === 'conversations' && left[id] !== undefined && right[id] !== undefined && equal(object(left[id]).modelId, object(right[id]).modelId)) {
           const previous = object(left[id]), next = object(right[id]);
-          for (const field of new Set([...Object.keys(previous), ...Object.keys(next)])) difference([key, id, field], previous[field], next[field]);
+          const fields = [...new Set([...Object.keys(previous), ...Object.keys(next)])].filter(field => !equal(previous[field], next[field]));
+          // Field-level CAS must not graft an old model's public history or
+          // authority onto a context reassigned by an older renderer.
+          if (fields.some(field => field !== 'updatedAt')) changes.push({ path: [key, id, 'modelId'], before: previous.modelId, after: previous.modelId });
+          for (const field of fields) difference([key, id, field], previous[field], next[field]);
         } else difference([key, id], left[id], right[id]);
       }
     } else difference([key], before[key], after[key]);

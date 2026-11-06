@@ -45,7 +45,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   the preceding attempt after successful storage; failed restoration retains the
   pending fence. Ordinary database-open failures retain ordered local edits.
   Foreign deletion/reassignment requires explicit selection while retaining the
-  draft. Withdrawal retains reset/recovery UI.
+  draft. Conversation model identity is immutable after creation, with an
+  additional model precondition on substantive field writes. Recovery verifies
+  refreshed public history under writer ownership before persisting a receipt.
+  Withdrawal retains reset/recovery UI.
 
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`

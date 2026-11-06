@@ -15,7 +15,9 @@ This project records release notes here and mirrors public-facing notes in
   disappears, and keep the last submitted attempt when stopped during a tool.
   Keep ordinary private-network HTTP chat working, retain local edits across
   temporary database failures, and require an explicit selection after another
-  tab deletes the active conversation or changes its model.
+  tab deletes the active conversation or changes its model. Keep conversation
+  model identity stable even while empty and recheck receipt recovery against
+  the history refreshed under writer ownership.
 
 
 ### Offline model availability
