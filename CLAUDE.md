@@ -610,6 +610,9 @@ exact-runtime revalidation supplies a private bootstrap context; weights resolve
 only at LoadModel. Separator resolution passes the exact card to the shared
 resolver, which can authenticate a contained canonical Store-index location
 when staging is disabled; bundle-qualified names do not require a copied alias.
+The Worker applies that lookup at its Store-direct separator preflight before
+dispatch. Default/staging fallbacks with an expected signed card repeat the
+same installed-identity check; a stale fallback cannot undo a search refusal.
 Deleted aliases, mismatched installed cards and paths outside the Store do not
 gain eligibility from the index. Recovered unowned native jobs fail without automatic replay.
 `worker/separation_output.py` retains four result sets through bounded verification,

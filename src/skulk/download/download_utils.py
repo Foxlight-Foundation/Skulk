@@ -1106,6 +1106,21 @@ def resolve_artifact_file(
     return candidate
 
 
+def _matches_requested_registry_card(
+    directory: Path, expected_card: ModelCard | None
+) -> bool:
+    """Keep every fallback behind the requested signed installed-card identity."""
+    if expected_card is None or expected_card.registry_card_id is None:
+        return True
+    from skulk.store.installed_cards import require_registry_installed_artifact
+
+    try:
+        require_registry_installed_artifact(directory, expected_card)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def build_model_path(
     model_id: ModelId,
     source_revision: str | None = None,
@@ -1165,6 +1180,7 @@ def build_model_path(
         and default_load_root.is_dir()
         and _rooted_bundle_is_complete(default, default_load_root)
         and _source_revision_matches(default, source_revision)
+        and _matches_requested_registry_card(default, expected_card)
     ):
         return _apply_artifact_root(default, artifact_root)
     # Fallback: check the default staging directory directly.
@@ -1181,6 +1197,7 @@ def build_model_path(
         and staging_load_root.is_dir()
         and _rooted_bundle_is_complete(staging_fallback, staging_load_root)
         and _source_revision_matches(staging_fallback, source_revision)
+        and _matches_requested_registry_card(staging_fallback, expected_card)
     ):
         return _apply_artifact_root(staging_fallback, artifact_root)
     raise FileNotFoundError(

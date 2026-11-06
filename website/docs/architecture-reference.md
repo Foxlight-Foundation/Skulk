@@ -181,6 +181,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   contained, installed-card-matched canonical Store-index location when staging
   is disabled, including bundle-qualified directory names. Tombstoned aliases,
   mismatched cards and escaping index paths do not gain a candidate.
+  Worker Store-direct separator preflight passes the same exact card before
+  runner dispatch. Signed identity checks also guard default/staging fallbacks;
+  staged Worker metadata adoption retains its existing current-catalog proof.
 
 - **Native result producer (initiative):** `worker/separation_output.py` verifies
   fixed private WAVs and emits bounded four-role OUTPUT_MEDIA frames. At most

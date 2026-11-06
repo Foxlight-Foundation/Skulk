@@ -1356,6 +1356,10 @@ With staging disabled, the Store index supplies a contained path hint for the
 bundle-qualified generation; a duplicate conventional alias is unnecessary.
 An index cannot admit a deleted alias, a different installed card or a path
 outside its Store root.
+The Worker's Store-direct separator preflight uses the same card-aware lookup
+before dispatching LoadModel. Default/staging fallbacks repeat the expected
+signed-card check, so they cannot undo a refused search result. Staged loading
+retains its existing current-catalog metadata-adoption transaction.
 
 `shared/models/separation.py` defines immutable native separator card metadata.
 `AudioSeparation` and `[separation]` must agree, selecting one exact safetensors

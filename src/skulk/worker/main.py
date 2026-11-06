@@ -4976,10 +4976,25 @@ class Worker:
                         shard.model_card,
                         self.state,
                     )
-                    model_directory = build_model_path(
-                        shard.model_card.model_id,
-                        shard.model_card.source_revision,
-                    )
+                    if (
+                        shard.model_card.separation is not None
+                        and self._staging_config is not None
+                        and not self._staging_config.enabled
+                    ):
+                        # The separator can load directly from a canonical
+                        # bundle generation; preflight must resolve the same
+                        # exact card as its deferred runner loader. Staged
+                        # copies retain the current-catalog adoption below.
+                        model_directory = build_model_path(
+                            shard.model_card.model_id,
+                            shard.model_card.source_revision,
+                            expected_card=shard.model_card,
+                        )
+                    else:
+                        model_directory = build_model_path(
+                            shard.model_card.model_id,
+                            shard.model_card.source_revision,
+                        )
                     await _require_installed_artifact_for_load(
                         model_directory,
                         shard.model_card,
