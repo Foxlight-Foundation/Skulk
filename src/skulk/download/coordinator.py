@@ -149,7 +149,8 @@ class DownloadCoordinator:
                 return True
             staging_root = self.shard_downloader.staging_cache_path
         resolved = directory.expanduser().resolve()
-        if resolved == Path(self._model_dir(model_id)).resolve():
+        default_root = Path(self._model_dir(model_id)).resolve()
+        if resolved == default_root or resolved.is_relative_to(default_root):
             return False
         if staging_root is not None:
             root = staging_root.expanduser().resolve()

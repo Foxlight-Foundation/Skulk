@@ -1357,7 +1357,7 @@ bundle-qualified generation; a duplicate conventional alias is unnecessary.
 An index cannot admit a deleted alias, a different installed card or a path
 outside its Store root.
 Canonical Store paths remain read-only in download discovery and completion.
-Cache deletion independently permits only the default model directory or a
+Cache deletion independently permits only the default model directory and its descendants or a
 descendant of the actual downloader's node cache, even for an older writable
 status. Local Store ownership always overrides cache classification. Shared
 Store and other external search roots remain protected on non-Store workers

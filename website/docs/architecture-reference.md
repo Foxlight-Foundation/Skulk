@@ -182,7 +182,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   is disabled, including bundle-qualified directory names. Tombstoned aliases,
   mismatched cards and escaping index paths do not gain a candidate.
   Store-owned paths are read-only in completion/discovery. Download cache
-  deletion independently permits only the default model directory or an actual
+  deletion independently permits only the default model directory and its descendants or an actual
   downloader node-cache descendant, even for a stale writable status. Local
   Store ownership always overrides cache classification; shared/external roots
   stay protected on non-Store workers. Canonical removal belongs to the indexed
