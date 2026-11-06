@@ -1356,6 +1356,13 @@ With staging disabled, the Store index supplies a contained path hint for the
 bundle-qualified generation; a duplicate conventional alias is unnecessary.
 An index cannot admit a deleted alias, a different installed card or a path
 outside its Store root.
+Canonical Store paths remain read-only in download discovery and completion.
+Cache deletion independently permits only the default model directory or a
+descendant of the actual downloader's node cache, even for an older writable
+status. Local Store ownership always overrides cache classification. Shared
+Store and other external search roots remain protected on non-Store workers
+too. Canonical removal uses the indexed Store lifecycle; ordinary default and
+staged caches remain deletable.
 The Worker's Store-direct separator preflight uses the same card-aware lookup
 before dispatching LoadModel. Default/staging fallbacks repeat the expected
 signed-card check, so they cannot undo a refused search result. Staged loading

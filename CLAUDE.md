@@ -621,6 +621,12 @@ Startup-completion candidates must also be loader-discoverable or use that
 Store-direct policy; byte completeness alone cannot bypass staging.
 Deleted aliases, mismatched installed cards and paths outside the Store do not
 gain eligibility from the index. Recovered unowned native jobs fail without automatic replay.
+Store-owned paths are read-only in discovery/completion; download deletion
+independently permits only the default model directory or an actual downloader
+node-cache descendant even for an older writable status. Local Store ownership
+always overrides cache classification; shared/external roots stay protected on
+non-Store workers. Canonical removal belongs to the Store lifecycle;
+default/staged cache deletion remains available.
 `worker/separation_output.py` retains four result sets through bounded verification,
 OUTPUT_MEDIA delivery, exact reverse ACKs and joined sender/file cleanup.
 Each role waits for its own ACK before the next role is emitted.

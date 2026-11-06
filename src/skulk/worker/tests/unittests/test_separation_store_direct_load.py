@@ -5,7 +5,7 @@ import shutil
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
@@ -42,17 +42,18 @@ from skulk.worker.runner.demucs.tests.test_model import fixture
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 
 
+@pytest.mark.parametrize("store_is_local", [False, True])
 @pytest.mark.parametrize("staging_enabled", [False, True])
 @pytest.mark.parametrize("offline", [False, True])
 @pytest.mark.parametrize("startup_candidate", [False, True])
 async def test_worker_dispatches_store_direct_separator_through_deferred_load(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staging_enabled: bool, offline: bool,
-    startup_candidate: bool,
+    startup_candidate: bool, store_is_local: bool,
 ) -> None:
     """Configured discovery reaches staged or Store-direct deferred loading.
 
-    File custody, path resolution, Worker dispatch and deferred model binding are
-    real. Staging transfer and native effects are injected; this is not inference.
+    Local or shared Store custody, path resolution, Worker dispatch and deferred
+    model binding are real. Staging transfer and native effects are injected; this is not inference.
     """
     actual, factory, _, _ = fixture(tmp_path)
     bound = actual.bound
@@ -89,7 +90,7 @@ async def test_worker_dispatches_store_direct_separator_through_deferred_load(
     staging_configuration = StagingNodeConfig(
         enabled=staging_enabled, node_cache_path=str(staging)
     )
-    store_client = ModelStoreClient(store_host="store.invalid", local_store_path=store)
+    store_client = ModelStoreClient(store_host="store.invalid", local_store_path=store if store_is_local else None)
     inner = ResumableShardDownloader(offline=offline)
     downloader = ModelStoreDownloader(inner, store_client, staging_configuration)
     _, download_receiver = channel[ForwarderDownloadCommand]()
@@ -136,6 +137,9 @@ async def test_worker_dispatches_store_direct_separator_through_deferred_load(
     assert isinstance(
         coordinator.download_status.get(card.model_id), DownloadCompleted
     ) == (not staging_enabled)
+    discovered = coordinator.download_status.get(card.model_id)
+    if isinstance(discovered, DownloadCompleted):
+        assert discovered.read_only, "Canonical Store custody is never a deletable cache"
     expected_directory = canonical
     if staging_enabled:
         # The transfer effect is injected; real discovery must demand this
@@ -220,3 +224,83 @@ async def test_worker_dispatches_store_direct_separator_through_deferred_load(
     finally:
         model.close()
         fence.close()
+
+
+@pytest.mark.parametrize("store_is_local", [False, True])
+@pytest.mark.parametrize("staging_enabled", [False, True])
+@pytest.mark.parametrize("location", ["canonical", "staged", "default"])
+async def test_download_delete_preserves_store_custody_and_removes_only_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staging_enabled: bool,
+    location: Literal["canonical", "staged", "default"], store_is_local: bool,
+) -> None:
+    """A stale writable status cannot delete canonical weights or their index.
+
+    The filesystem, Store wrapper and coordinator deletion path are real. Both
+    staging modes retain local/shared custody while ordinary cache deletion works.
+    """
+    actual, _, _, _ = fixture(tmp_path)
+    bound = actual.bound
+    card = bound.bound_shard.model_card
+    store = tmp_path / "store"
+    store.mkdir()
+    canonical = store / "registered-canonical-bundle"
+    (tmp_path / "model").rename(canonical)
+    record = build_installed_card_record(canonical, card)
+    write_installed_card(canonical, record)
+    entry = StoreModelEntry(
+        model_id=str(card.model_id), store_path=canonical.name,
+        source_repository=str(card.artifact_repository),
+        source_revision=card.source_revision,
+        files=[item.path for item in record.files],
+        downloaded_at="2026-11-06T00:00:00+00:00",
+        total_bytes=sum(item.size_bytes for item in record.files),
+    )
+    index_path = store / "registry.json"
+    index_path.write_text(
+        StoreRegistryIndex(entries={str(card.model_id): entry}).model_dump_json()
+    )
+    index_before = index_path.read_bytes()
+    default_root = tmp_path / "downloads"
+    default = default_root / card.model_id.normalize()
+    staged_root = tmp_path / "staging"
+    staged = staged_root / card.model_id.normalize()
+    shutil.copytree(canonical, default)
+    shutil.copytree(canonical, staged)
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", default_root)
+    monkeypatch.setattr(coordinator_module, "SKULK_MODELS_DIR", default_root)
+    unregistered: list[object] = []
+    monkeypatch.setattr(
+        coordinator_module, "unregister_installed_card_record", unregistered.append
+    )
+    configuration = StagingNodeConfig(
+        enabled=staging_enabled, node_cache_path=str(staged_root)
+    )
+    downloader = ModelStoreDownloader(
+        ResumableShardDownloader(offline=True),
+        ModelStoreClient(store_host="store.invalid", local_store_path=store if store_is_local else None),
+        configuration,
+    )
+    _, commands = channel[ForwarderDownloadCommand]()
+    events, _ = channel[Event]()
+    telemetry, _ = channel[NodeTelemetry]()
+    coordinator = DownloadCoordinator(
+        node_id=bound.bound_node_id, shard_downloader=downloader,
+        download_command_receiver=commands, event_sender=events,
+        telemetry_sender=telemetry, staging_cache_path=staged_root,
+    )
+    directory = {"canonical": canonical, "staged": staged, "default": default}[location]
+    coordinator.download_status[card.model_id] = DownloadCompleted(
+        node_id=bound.bound_node_id, shard_metadata=bound.bound_shard,
+        total=card.storage_size, model_directory=str(directory), read_only=False,
+    )
+    await coordinator._delete_download(card.model_id)
+    assert canonical.is_dir() and (canonical / "955717e8.safetensors").is_file()
+    assert index_path.read_bytes() == index_before
+    if location == "canonical":
+        assert default.is_dir() and staged.is_dir()
+        assert card.model_id in coordinator.download_status
+        assert not unregistered
+    else:
+        assert not directory.exists() and not default.exists()
+        assert card.model_id not in coordinator.download_status
+        assert unregistered == [card.model_id]

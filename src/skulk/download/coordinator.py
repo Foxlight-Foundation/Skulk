@@ -141,6 +141,24 @@ class DownloadCoordinator:
             and not self.shard_downloader.staging_enabled
         )
 
+    def _is_read_only_path(self, model_id: ModelId, directory: Path) -> bool:
+        """Permit cache deletion only inside actual node cache custody."""
+        staging_root = self.staging_cache_path
+        if isinstance(self.shard_downloader, ModelStoreDownloader):
+            if self.shard_downloader.is_store_owned_path(directory):
+                return True
+            staging_root = self.shard_downloader.staging_cache_path
+        resolved = directory.expanduser().resolve()
+        if resolved == Path(self._model_dir(model_id)).resolve():
+            return False
+        if staging_root is not None:
+            root = staging_root.expanduser().resolve()
+            if resolved != root and resolved.is_relative_to(root):
+                return False
+        # A shared Store or other SKULK_MODELS_PATH root is external custody,
+        # even on a worker whose Store client has no local authoritative root.
+        return True
+
     async def _resolve_or_refresh_complete_artifact(
         self,
         shard: ShardMetadata,
@@ -803,6 +821,7 @@ class DownloadCoordinator:
                 node_id=self.node_id,
                 total=initial_progress.total,
                 model_directory=str(completed_path),
+                read_only=self._is_read_only_path(model_id, completed_path),
             )
             await self._emit_status(completed)
             return
@@ -860,6 +879,7 @@ class DownloadCoordinator:
                         node_id=self.node_id,
                         total=shard.model_card.storage_size,
                         model_directory=str(path.parent if path.is_file() else path),
+                        read_only=self._is_read_only_path(model_id, path),
                     )
                     await self._emit_status(completed)
                     self._reset_progress_throttle(model_id)
@@ -891,12 +911,16 @@ class DownloadCoordinator:
         # waiting for cancellation cleanup to release task ownership.
         self._pending_download_starts.pop(model_id, None)
 
-        # Protect read-only models (from SKULK_MODELS_PATH) from deletion
+        # A retained status can predate custody classification. Never let cache
+        # deletion bypass the authoritative Store's indexed removal lifecycle.
         if model_id in self.download_status:
             current = self.download_status[model_id]
-            if isinstance(current, DownloadCompleted) and current.read_only:
+            if isinstance(current, DownloadCompleted) and (
+                current.read_only
+                or self._is_read_only_path(model_id, Path(current.model_directory))
+            ):
                 logger.warning(
-                    f"Refusing to delete read-only model {model_id} (from SKULK_MODELS_PATH)"
+                    f"Refusing to delete read-only or Store-owned model {model_id}"
                 )
                 return
 
@@ -992,6 +1016,9 @@ class DownloadCoordinator:
                                     shard_metadata=progress.shard,
                                     total=progress.total,
                                     model_directory=str(completed_path),
+                                    read_only=self._is_read_only_path(
+                                        model_id, completed_path
+                                    ),
                                 )
                             else:
                                 status = DownloadPending(
