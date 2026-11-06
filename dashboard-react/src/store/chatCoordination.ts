@@ -11,10 +11,21 @@ const conversationPrefix = 'skulk-chat-conversation-v2:';
 const owned = new Set<string>();
 let queue: Promise<unknown> = Promise.resolve();
 let unsaved: { before: ChatStorageObject; after: ChatStorageObject } | undefined;
+let unopenedChanges: ChatStorageChange[] = [];
+
+function retainUnopenedChanges(changes: ChatStorageChange[]): void {
+  for (const change of changes) {
+    const index = unopenedChanges.findLastIndex(previous => equal(previous.path, change.path));
+    const overlaps = (left: string[], right: string[]) => left.every((part, i) => right[i] === part) || right.every((part, i) => left[i] === part);
+    if (index >= 0 && !unopenedChanges.slice(index + 1).some(previous => overlaps(previous.path, change.path))) {
+      unopenedChanges[index] = { ...change, before: unopenedChanges[index].before };
+    } else unopenedChanges.push(change);
+  }
+}
 /** Ordinary save failure retains local intent without claiming durable custody. */
 export class ChatStorageUnavailable extends Error {}
 /** Whether local edits still require a successful durable write. */
-export function hasUnsavedChatChanges(): boolean { return unsaved !== undefined; }
+export function hasUnsavedChatChanges(): boolean { return unsaved !== undefined || unopenedChanges.length > 0; }
 
 function object(value: unknown): ChatStorageObject {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as ChatStorageObject : {};
@@ -87,10 +98,19 @@ export async function readCommittedChatStorage(): Promise<ChatStorageObject> {
 }
 
 async function commitChatStorage(changes: ChatStorageChange[], pendingChanges: ChatStorageChange[], retainOrdinaryEdits: boolean): Promise<ChatStorageObject> {
-  const database = await historyDatabase();
+  let database: IDBDatabase;
+  try { database = await historyDatabase(); }
+  catch (error) {
+    // No transaction exists yet, but these ordinary edits are still local
+    // intent. Keep their CAS preconditions so a later read cannot discard them.
+    if (retainOrdinaryEdits) retainUnopenedChanges(changes);
+    throw error;
+  }
+  let transactionStarted = false;
   try {
     return await new Promise((resolve, reject) => {
       const transaction = database.transaction('snapshot', 'readwrite', { durability: 'strict' });
+      transactionStarted = true;
       const store = transaction.objectStore('snapshot'), request = store.get('current');
       let current: ChatStorageObject | undefined, next: ChatStorageObject | undefined;
       let refusal: unknown;
@@ -99,7 +119,11 @@ async function commitChatStorage(changes: ChatStorageChange[], pendingChanges: C
         try {
           const encoded = request.result as unknown;
           current = encoded === undefined ? readChatStorage() : storedState(encoded);
-          next = applyChatStorageChanges(applyChatStorageChanges(current, pendingChanges), changes);
+          // Failed local actions may depend on an earlier unsaved creation.
+          // Validate their ordered edits in memory; the database commits the
+          // entire result only after every precondition has passed.
+          const retained = pendingChanges.reduce((state, change) => applyChatStorageChanges(state, [change]), current);
+          next = applyChatStorageChanges(retained, changes);
           revision = storedRevision(encoded) + 1;
         } catch (error) { refusal = error; transaction.abort(); return; }
         try { store.put({ state: next, version: 2, revision }, 'current'); }
@@ -107,11 +131,12 @@ async function commitChatStorage(changes: ChatStorageChange[], pendingChanges: C
       };
       transaction.onabort = () => {
         if (refusal !== undefined) { reject(refusal); return; }
-        if (retainOrdinaryEdits && current && next) unsaved = { before: current, after: next };
+        if (retainOrdinaryEdits && current && next) { unsaved = { before: current, after: next }; unopenedChanges = []; }
         reject(new ChatStorageUnavailable('Could not save conversation history in this browser. Free browser storage and try again.'));
       };
       transaction.oncomplete = () => {
         unsaved = undefined;
+        unopenedChanges = [];
         // This mirror is optional. A quota failure cannot undo or misreport an
         // authoritative transaction, and legacy writers cannot replace it.
         try { localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({ state: next, version: 2, revision })); } catch { /* Hydrate from IndexedDB on next load. */ }
@@ -119,6 +144,9 @@ async function commitChatStorage(changes: ChatStorageChange[], pendingChanges: C
         resolve(next!);
       };
     });
+  } catch (error) {
+    if (retainOrdinaryEdits && !transactionStarted) retainUnopenedChanges(changes);
+    throw error;
   } finally { database.close(); }
 }
 
@@ -132,7 +160,9 @@ export function chatStorageChanges(before: ChatStorageObject, after: ChatStorage
     if (key === 'conversations' || key === 'modelToConversationId') {
       const left = object(before[key]), right = object(after[key]);
       for (const id of new Set([...Object.keys(left), ...Object.keys(right)])) {
-        if (key === 'conversations' && left[id] !== undefined && right[id] !== undefined) {
+        // A destination change must compare the whole context, including a
+        // concurrent enrollment that did not change modelId itself.
+        if (key === 'conversations' && left[id] !== undefined && right[id] !== undefined && equal(object(left[id]).modelId, object(right[id]).modelId)) {
           const previous = object(left[id]), next = object(right[id]);
           for (const field of new Set([...Object.keys(previous), ...Object.keys(next)])) difference([key, id, field], previous[field], next[field]);
         } else difference([key, id], left[id], right[id]);
@@ -176,7 +206,7 @@ function locks(): LockManager {
 
 async function withConversationLocks<T>(ids: string[], work: () => Promise<T>): Promise<T> {
   const [id, ...rest] = ids;
-  if (id === undefined) return work();
+  if (id === undefined || !navigator.locks) return work();
   if (owned.has(id)) return withConversationLocks(rest, work);
   return locks().request(conversationPrefix + id, { ifAvailable: true }, lock => {
     if (!lock) throw new Error('This conversation is active in another tab. Its history was preserved.');
@@ -184,13 +214,18 @@ async function withConversationLocks<T>(ids: string[], work: () => Promise<T>): 
   });
 }
 
-/** Serialize local writes and atomically merge field changes under a cross-tab mutex. */
+/** Serialize local writes and atomically merge fields, using shared locks where available. */
 export async function writeChatStorage(changes: ChatStorageChange[], retainOrdinaryEdits = false): Promise<ChatStorageObject> {
-  const pending = queue.catch(() => {}).then(() => locks().request(storageLock, async () => {
-    const pendingChanges = unsaved ? chatStorageChanges(unsaved.before, unsaved.after) : [];
-    const ids = [...new Set([...pendingChanges, ...changes].filter(change => change.path[0] === 'conversations' && !(change.path.length === 3 && change.path[2] === 'updatedAt')).map(change => change.path[1]))].sort();
-    return withConversationLocks(ids, () => commitChatStorage(changes, pendingChanges, retainOrdinaryEdits));
-  }));
+  const pending = queue.catch(() => {}).then(async () => {
+    const commit = async () => {
+      const pendingChanges = [...(unsaved ? chatStorageChanges(unsaved.before, unsaved.after) : []), ...unopenedChanges];
+      const ids = [...new Set([...pendingChanges, ...changes].filter(change => change.path[0] === 'conversations' && !(change.path.length === 3 && change.path[2] === 'updatedAt')).map(change => change.path[1]))].sort();
+      return withConversationLocks(ids, () => commitChatStorage(changes, pendingChanges, retainOrdinaryEdits));
+    };
+    // IndexedDB transactions still serialize ordinary HTTP clients. Shared
+    // long-lived writer ownership is available only in secure browser contexts.
+    return await (navigator.locks ? locks().request(storageLock, commit) : commit());
+  });
   queue = pending;
   return pending;
 }
@@ -204,6 +239,10 @@ export async function acquireChatConversation(id: string): Promise<() => Promise
   // before attempting ownership, rather than mistaking them for another tab.
   await flushChatStorage().catch(() => {});
   if (owned.has(id)) throw new Error('This conversation is already active in this tab.');
+  if (!navigator.locks) {
+    owned.add(id);
+    return async () => { owned.delete(id); };
+  }
   let finishRelease!: () => void;
   const released = new Promise<void>(resolve => { finishRelease = resolve; });
   return new Promise((resolve, reject) => {

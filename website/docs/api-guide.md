@@ -6589,8 +6589,11 @@ continuation and starts a fresh provider context on the next request. Editing or
 deleting committed messages likewise requires an explicit new context.
 
 Chat coordinates same-origin tabs using browser Web Locks on HTTPS or localhost.
-One tab owns a conversation through preparation, streaming, client tools and final
-persistence; other conversations can proceed independently. Another tab shows
+In secure contexts, one tab owns a conversation through preparation, streaming,
+client tools and final persistence; other conversations can proceed independently.
+Ordinary chat over private-network HTTP remains supported with transactional
+persistence and per-tab submission ownership. Protected continuation and shared
+cross-tab writer ownership require HTTPS or localhost. Another tab shows
 that ownership and retains its draft. All durable saves atomically merge changed fields in an IndexedDB transaction,
 refusing stale history or receipt changes. Before sending,
 a tab adopts current saved state. Continuation and document preparation must be
@@ -6606,12 +6609,18 @@ all tabs after upgrading to share current history. Migration does not delete the
 legacy snapshot. Authoritative storage failure is visible and preserves the last
 saved transaction; new durable preparation is refused until it succeeds. Browser
 storage quota still applies. Committed revisions fence out-of-order refreshes;
-closed-tab ownership is detected without retrying inference.
+closed-tab ownership is detected without retrying inference. Temporary database
+failures retain ordinary edits in the current tab until they can be saved. If
+another tab deletes the active conversation or changes its model, sending pauses
+until you explicitly choose or start a conversation; your draft is retained.
 
 Recovery/reset controls remain visible for retained continuation state even after
 a destination withdraws its advertisement. New enrollment still requires a current
 advertisement. Stop during a client tool preserves the last submitted attempt;
-no following model nonce is published for an already canceled request.
+no following model nonce is published for an already canceled request. If Stop
+occurs during pending storage before HTTP dispatch, Chat restores the preceding
+attempt. A failed restoration preserves the pending fence rather than claiming
+the request is safe to repeat.
 
 
 **GET** `/v1/inference/gateway` returns `contract: chat.completions@0.1.0`

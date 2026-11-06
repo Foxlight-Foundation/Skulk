@@ -49,6 +49,8 @@ export interface ChatState {
   conversations: Record<string, Conversation>;
   /** Visible persistence conflict/failure; no successful save is implied. */
   persistenceError?: string;
+  /** Per-tab explicit selection required after a foreign deletion or model reassignment. */
+  selectionNeedsReview?: boolean;
   activeConversationId: string | null;
   selectedModelId: string | null;
   selectedTranscriptionModelId: string | null;
@@ -73,6 +75,7 @@ interface PersistedDurable {
 }
 
 interface PersistedSession {
+  selectionNeedsReview?: boolean;
   activeConversationId?: string | null;
   selectedModelId?: string | null;
   selectedTranscriptionModelId?: string | null;
@@ -107,6 +110,7 @@ function initialState(): ChatState {
     conversations: durable.conversations ?? {},
     modelToConversationId: durable.modelToConversationId ?? {},
     activeConversationId: session.activeConversationId ?? null,
+    selectionNeedsReview: session.selectionNeedsReview ?? false,
     selectedModelId: session.selectedModelId ?? null,
     selectedTranscriptionModelId: session.selectedTranscriptionModelId ?? null,
     selectedSpeechModelId: session.selectedSpeechModelId ?? null,
@@ -138,11 +142,18 @@ const slice = createSlice({
       state.narrateCodeBlocks = durable.narrateCodeBlocks ?? true;
       state.realtimeVoiceEnabled = durable.realtimeVoiceEnabled ?? true;
       state.autoSubmitVoice = durable.autoSubmitVoice ?? false;
-      if (state.activeConversationId && !state.conversations[state.activeConversationId]) state.activeConversationId = null;
+      const active = state.activeConversationId ? state.conversations[state.activeConversationId] : undefined;
+      if (state.activeConversationId && (!active || active.modelId !== state.selectedModelId)) {
+        // Retain this tab's chosen processing destination. Silently following
+        // another tab's reassignment could send its draft to a different model.
+        state.activeConversationId = null;
+        state.selectionNeedsReview = true;
+      }
     },
     /** Surface failed custody without losing the saved browser snapshot. */
     setPersistenceError(state, action: PayloadAction<string | undefined>) { state.persistenceError = action.payload; },
     selectModel(state, action: PayloadAction<string>) {
+      state.selectionNeedsReview = false;
       const modelId = action.payload;
       const now = Date.now();
 
@@ -280,6 +291,7 @@ const slice = createSlice({
      */
     newConversation: {
       reducer(state, action: PayloadAction<{ id: string; modelId: string }>) {
+        state.selectionNeedsReview = false;
         const { id, modelId } = action.payload;
         const now = Date.now();
         state.conversations[id] = {
@@ -349,6 +361,7 @@ const slice = createSlice({
     selectConversation(state, action: PayloadAction<string>) {
       const convo = state.conversations[action.payload];
       if (!convo) return;
+      state.selectionNeedsReview = false;
       state.activeConversationId = action.payload;
       state.selectedModelId = convo.modelId;
       state.modelToConversationId[convo.modelId] = action.payload;
@@ -513,7 +526,7 @@ export function subscribeChatPersistence(
       });
     }
     const sessionJson = JSON.stringify({ state: {
-      activeConversationId: chat.activeConversationId, selectedModelId: chat.selectedModelId,
+      activeConversationId: chat.activeConversationId, selectedModelId: chat.selectedModelId, selectionNeedsReview: chat.selectionNeedsReview,
       selectedTranscriptionModelId: chat.selectedTranscriptionModelId, selectedSpeechModelId: chat.selectedSpeechModelId,
     }, version: 1 });
     if (sessionJson !== lastSessionJson) {

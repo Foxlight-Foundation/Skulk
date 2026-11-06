@@ -11,6 +11,7 @@ import { v4 as uuidv4 } from 'uuid';
 import styled from 'styled-components';
 import { ChatMessages } from '../chat/ChatMessages';
 import { ChatForm } from '../chat/ChatForm';
+import { Button } from '../common/Button';
 import type {
   AudioResponseFormat,
   ChatMessage,
@@ -525,6 +526,7 @@ export function ChatView({
   const autoSubmitVoice = useAppSelector((s) => s.chat.autoSubmitVoice);
   const activeConversationId = useAppSelector((s) => s.chat.activeConversationId);
   const persistenceError = useAppSelector((s) => s.chat.persistenceError);
+  const selectionNeedsReview = useAppSelector(s => s.chat.selectionNeedsReview);
   const activeContinuation = useAppSelector(s => s.chat.activeConversationId ? s.chat.conversations[s.chat.activeConversationId]?.continuation : undefined);
   const [conversationBusyElsewhere, setConversationBusyElsewhere] = useState(false);
   useEffect(() => {
@@ -720,14 +722,14 @@ export function ChatView({
 
   // Keep a saved capability conversation while its first catalog is loading.
   useEffect(() => {
-    if (activeContinuation || (selectedModelId?.startsWith('capability/') && !modelCatalogLoaded)) return;
+    if (selectionNeedsReview || activeContinuation || (selectedModelId?.startsWith('capability/') && !modelCatalogLoaded)) return;
     if (
       readyModels.length > 0
       && (!selectedModelId || !readyModels.some((model) => model.modelId === selectedModelId))
     ) {
       selectModel(readyModels[0].modelId);
     }
-  }, [selectedModelId, readyModels, selectModel, modelCatalogLoaded, activeContinuation]);
+  }, [selectedModelId, readyModels, selectModel, modelCatalogLoaded, activeContinuation, selectionNeedsReview]);
 
   useEffect(() => {
     if (readyTranscriptionModels.length === 0) {
@@ -808,7 +810,7 @@ export function ChatView({
   const selectedImageProfile = selectedModelId ? modelCatalogById[selectedModelId]?.image : null;
   const nativeImageSelected = readyRunnableInstances.some((instance) => instance.modelId === selectedModelId && instance.engine === 'stable_diffusion_cpp');
   const canSendMessages = Boolean(
-    selectedModelId && readyModels.some((model) => model.modelId === selectedModelId) && (!nativeImageSelected || selectedImageProfile),
+    !selectionNeedsReview && selectedModelId && readyModels.some((model) => model.modelId === selectedModelId) && (!nativeImageSelected || selectedImageProfile),
   );
 
   const stopSpeechPlayback = useCallback(() => {
@@ -1091,12 +1093,12 @@ export function ChatView({
   useEffect(() => stopSpeechPlayback, [stopSpeechPlayback]);
 
   const handleSend = useCallback(async (text: string, files: ChatUploadedFile[]) => {
-    if (!selectedModelId || !canSendMessages || isLoading) return;
+    if (!selectedModelId || !canSendMessages || isLoading) throw new Error('The conversation is not ready to send. Your draft was retained.');
     stopSpeechPlayback();
     // Async conversion and streaming may outlive the selected model or this view.
     // Pin both messages to their origin; deleted conversations stay deleted.
     const conversationId = store.getState().chat.activeConversationId;
-    if (!conversationId) return;
+    if (!conversationId) throw new Error('Choose or start a conversation before sending. Your draft was retained.');
 
     // Convert image files to base64 data URLs for the API and message history
     const imageAttachments: { dataUrl: string; file: ChatUploadedFile }[] = [];
@@ -1125,10 +1127,11 @@ export function ChatView({
     try {
     await synchronizeChatPersistence();
     const currentChat = store.getState().chat;
-    if (currentChat.activeConversationId !== conversationId || currentChat.selectedModelId !== selectedModelId) {
+    if (currentChat.selectionNeedsReview || currentChat.activeConversationId !== conversationId || currentChat.selectedModelId !== selectedModelId || currentChat.conversations[conversationId]?.modelId !== selectedModelId) {
       throw new Error('The conversation changed while preparing attachments. Your draft was retained.');
     }
     const retainedContinuation = currentChat.conversations[conversationId]?.continuation;
+    if (retainedContinuation && !navigator.locks) throw new Error('Protected continuation requires HTTPS or localhost. Use full history instead to continue ordinary chat. Your draft was retained.');
     if (retainedContinuation && retainedContinuation.phase !== 'ready') throw new Error('Recover this conversation’s receipt or explicitly use full history before sending. Your draft was retained.');
     if (retainedContinuation && !modelCatalogById[selectedModelId]?.inference_capability?.continuation) throw new Error('This destination no longer advertises continuation. Use the continuity controls to recover or start a new context. Your draft was retained.');
     if (documentAttachments.length || retainedContinuation) await persistDocumentMessage(currentChat, conversationId, userMsg);
@@ -1323,8 +1326,11 @@ export function ChatView({
         }
         let continuationHeader: string | undefined;
         if (continuation && continuationDestination) {
+          const submittedContinuation = continuation;
           await verifyContinuationHistory(continuation, apiMessages);
+          controller.signal.throwIfAborted();
           const prepared = await prepareContinuationRequest(continuation, continuationDestination, requestBody);
+          controller.signal.throwIfAborted();
           const priorAssistant = store.getState().chat.conversations[conversationId]?.messages.find(message => message.id === continuationAssistantId);
           if (continuationMessages.length && !priorAssistant) throw new Error('The committed assistant history is no longer available.');
           const pendingMessage = priorAssistant ? { ...priorAssistant, continuationMessages: [...continuationMessages] } : undefined;
@@ -1335,7 +1341,17 @@ export function ChatView({
           else dispatch(chatActions.setConversationContinuation({ conversationId, continuation: prepared.pending }));
           continuation = prepared.pending;
           continuationHeader = prepared.header;
+          if (controller.signal.aborted) {
+            // No HTTP invocation has begun. Restore the preceding submitted
+            // attempt rather than strand recovery on a nonce the provider
+            // cannot know. Failed restoration keeps the durable pending fence.
+            await persistChatContinuation(store.getState().chat, conversationId, submittedContinuation, pendingMessage);
+            if (pendingMessage) dispatch(chatActions.saveContinuationMessage({ conversationId, continuation: submittedContinuation, message: pendingMessage }));
+            else dispatch(chatActions.setConversationContinuation({ conversationId, continuation: submittedContinuation }));
+            continuation = submittedContinuation;
+          }
         }
+        controller.signal.throwIfAborted();
         const res = await operatorSession.fetch('/v1/chat/completions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Skulk-Dashboard': 'pairing-v1', ...(continuationHeader ? { 'Skulk-Continuation-Proof': continuationHeader } : {}) },
@@ -1772,7 +1788,7 @@ export function ChatView({
     void handleSend(text.trim(), []).catch(error => setSpeechError(error instanceof Error ? error.message : 'Conversation submission was refused.'));
   }, [autoSubmitVoice, canSendMessages, handleSend]);
 
-  if (!activeContinuation && messages.length === 0 && !stewardStatus?.enabled && readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
+  if (!selectionNeedsReview && !activeContinuation && messages.length === 0 && !stewardStatus?.enabled && readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
     return (
       <NoModels>
         {t(
@@ -1808,6 +1824,10 @@ export function ChatView({
       </MessagesScroll>
       <InputArea>
         {persistenceError && <p role="alert">{persistenceError}</p>}
+        {selectionNeedsReview && <>
+          <p role="alert">{t('chat.selection.changedElsewhere', 'This conversation was removed or changed to another model in another tab. Choose a conversation or explicitly start a new one. Your draft was retained.')}</p>
+          <Button size="sm" disabled={!selectedModelId || !readyModels.some(model => model.modelId === selectedModelId)} onClick={() => { if (selectedModelId) dispatch(chatActions.newConversation(selectedModelId)); }}>{t('chat.selection.newConversation', 'Start a new conversation')}</Button>
+        </>}
         {conversationBusyElsewhere && <p role="status">{t('chat.continuation.otherTab', 'This conversation is active in another tab. Its saved history will refresh when that turn finishes.')}</p>}
         {activeConversationId && (modelCatalogById[selectedModelId ?? '']?.inference_capability?.continuation || activeContinuation) && <ChatContinuationControls
           key={activeConversationId}

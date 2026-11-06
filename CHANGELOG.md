@@ -13,6 +13,9 @@ This project records release notes here and mirrors public-facing notes in
   pending attempts and receipts through transactional browser storage. Preserve
   drafts on refused submission, retain recovery/reset controls after a model
   disappears, and keep the last submitted attempt when stopped during a tool.
+  Keep ordinary private-network HTTP chat working, retain local edits across
+  temporary database failures, and require an explicit selection after another
+  tab deletes the active conversation or changes its model.
 
 
 ### Offline model availability

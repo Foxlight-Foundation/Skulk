@@ -3660,14 +3660,21 @@ uncertainty requires explicit recovery or abandonment. No management-session
 cookie or private key crosses between Chat and a capability surface.
 
 `store/chatCoordination.ts` serializes changed-field snapshot writes with a
-same-origin Web Lock and transactional IndexedDB compare-and-swap checks.
+transactional IndexedDB compare-and-swap checks and, where available, a
+same-origin Web Lock.
 `skulk-chat-history-v2` owns canonical public history/receipts and committed
 revisions; `skulk-chat-v2` localStorage is only a bootstrap cache, isolating
 current history from legacy whole-snapshot writers. A separate per-conversation lock spans
-preparation, generation, client tools and final persistence; brief writes and long
-writer presence are distinguished. Storage events adopt committed data after
+preparation, generation, client tools and final persistence on HTTPS/localhost;
+brief writes and long writer presence are distinguished. Ordinary private-network
+HTTP retains transactional saves and per-tab ownership. Protected continuation
+requires a secure browser context. Storage events adopt committed data after
 pending local changes settle. Draft acknowledgment and recovery/reset controls
 preserve explicit continuation custody across refusal and advertisement withdrawal.
+Ordinary edits survive temporary database-open/transaction failures in process;
+foreign deletion or model reassignment requires explicit selection and preserves
+the draft. Cancellation before HTTP dispatch restores the preceding attempt,
+while failure to restore retains the pending fence.
 
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`

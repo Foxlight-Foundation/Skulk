@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { applyChatStorageChanges, chatStorageChanges, writeChatStorage, readCommittedChatStorage, CHAT_STORAGE_KEY, type ChatStorageObject } from './chatCoordination';
+import { applyChatStorageChanges, chatStorageChanges, writeChatStorage, readCommittedChatStorage, hasUnsavedChatChanges, acquireChatConversation, CHAT_STORAGE_KEY, type ChatStorageObject } from './chatCoordination';
 
 const base: ChatStorageObject = {
   conversations: { a: { id: 'a', name: 'One', messages: [], continuation: { phase: 'ready', nonce: '1' }, updatedAt: 1 }, b: { id: 'b', name: 'Two', messages: [], updatedAt: 1 } },
@@ -81,4 +81,44 @@ describe('authoritative browser transactions', () => {
       expect((await readCommittedChatStorage()).conversations).toEqual(next.conversations);
     } finally { mirror.mockRestore(); }
   });
+  it('refuses a stale model reassignment when another tab enrolled the empty context', () => {
+    const before = { conversations: { a: { id: 'a', modelId: 'model-a', messages: [] } } };
+    const next = { conversations: { a: { ...before.conversations.a, modelId: 'model-b' } } };
+    const enrolled = { conversations: { a: { ...before.conversations.a, continuation: { model: 'model-a', phase: 'ready' } } } };
+    expect(() => applyChatStorageChanges(enrolled, chatStorageChanges(before, next))).toThrow('changed in another tab');
+    expect(enrolled.conversations.a.modelId).toBe('model-a');
+  });
+
+  it.each(['open', 'transaction'])('retains ordered ordinary edits across %s failures and commits them after recovery', async failureAt => {
+    const before = await readCommittedChatStorage(), id = crypto.randomUUID();
+    const created = { ...before, conversations: { ...(before.conversations as Record<string, unknown>), [id]: { id, name: 'New', messages: [] } } };
+    const edited = { ...created, conversations: { ...created.conversations, [id]: { id, name: 'Named', messages: ['local history'] } } };
+    const fail = () => { throw new DOMException('Synthetic database outage', 'InvalidStateError'); };
+    const unavailable = failureAt === 'open' ? vi.spyOn(IDBFactory.prototype, 'open').mockImplementation(fail) : vi.spyOn(IDBDatabase.prototype, 'transaction').mockImplementation(fail);
+    try {
+      await expect(writeChatStorage(chatStorageChanges(before, created), true)).rejects.toThrow('Synthetic database outage');
+      await expect(writeChatStorage(chatStorageChanges(created, edited), true)).rejects.toThrow('Synthetic database outage');
+      expect(hasUnsavedChatChanges()).toBe(true);
+    } finally { unavailable.mockRestore(); }
+    await writeChatStorage([]);
+    expect((await readCommittedChatStorage()).conversations).toEqual(edited.conversations);
+    expect(hasUnsavedChatChanges()).toBe(false);
+  });
+
+  it('preserves ordinary transactional storage and local ownership without secure-context Web Locks', async () => {
+    const original = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: undefined });
+    try {
+      const before = await readCommittedChatStorage(), id = crypto.randomUUID();
+      const next = { ...before, conversations: { ...(before.conversations as Record<string, unknown>), [id]: { id, messages: ['ordinary HTTP chat'] } } };
+      const release = await acquireChatConversation(id);
+      await writeChatStorage(chatStorageChanges(before, next));
+      await release();
+      expect((await readCommittedChatStorage()).conversations).toEqual(next.conversations);
+    } finally {
+      if (original) Object.defineProperty(navigator, 'locks', original);
+      else Reflect.deleteProperty(navigator, 'locks');
+    }
+  });
+
 });

@@ -35,15 +35,21 @@ and whitespace separately from display content; verify committed fingerprints.
 Never silently recover missing assistant text or restart an uncertain request.
 
 All ordinary/acknowledged chat saves share `store/chatCoordination.ts`: changed-field
-CAS under a Web Lock and authoritative versioned IndexedDB
+CAS in authoritative versioned IndexedDB
 `skulk-chat-history-v2` snapshots. `skulk-chat-v2` localStorage is only a bootstrap
 cache; first migration imports legacy history. Fence asynchronous adoption by
 committed revision. Preserve per-conversation writer ownership through tools
-and final storage, while allowing other conversations to run. Refresh committed
+and final storage on HTTPS/localhost, while allowing other conversations to run.
+Ordinary HTTP keeps transactional saves/per-tab ownership; protected continuation
+requires a secure context. Retain ordered local edits across database-open failure.
+Foreign deletion/reassignment requires explicit selection and retains the draft.
+Refresh committed
 history before send; a stale subscriber must never replace a pending nonce.
 Require preparation acknowledgment for continuation/documents, retain drafts on
 refusal, keep reset controls after withdrawal, and check cancellation before
-creating another model attempt. Native image input keeps its existing bounds.
+creating another model attempt. Restore the preceding attempt if canceled before
+HTTP invocation; failed restoration keeps the pending fence. Native image input
+keeps its existing bounds.
 
 
 Native installed preservation lives in `store/preservation_export.py`; complete

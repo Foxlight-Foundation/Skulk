@@ -1,4 +1,4 @@
-import { flushChatStorage } from '../../store/chatCoordination';
+import { flushChatStorage, readCommittedChatStorage } from '../../store/chatCoordination';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
@@ -283,6 +283,63 @@ describe('Chat client continuation', () => {
     write.mockRestore(); await click('Recover receipt');
     await settle(() => store.getState().chat.conversations[id].continuation?.phase === 'ready');
     expect(calls).toBe(1);
+  });
+
+  it('restores the preceding attempt when Stop occurs during pending storage before HTTP dispatch', async () => {
+    let calls = 0, canceled = false;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/v1/chat/completions') calls++;
+      return new Response(JSON.stringify({ enabled: false }));
+    }));
+    await renderAndEnroll();
+    const original = IDBObjectStore.prototype.put;
+    const storage = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+      const request = original.call(this, value, key!);
+      const snapshot = value as { state?: { conversations?: Record<string, { continuation?: { phase: string } }> } };
+      if (!canceled && this.name === 'snapshot' && Object.values(snapshot.state?.conversations ?? {}).some(conversation => conversation.continuation?.phase === 'pending')) queueMicrotask(() => {
+        const stop = container!.querySelector<HTMLButtonElement>('[aria-label="Cancel generation"]');
+        if (stop) { canceled = true; stop.click(); }
+      });
+      return request;
+    });
+    await send('Stop before submission');
+    await settle(() => canceled && !!container!.querySelector('[aria-label="Send message"]'));
+    storage.mockRestore();
+    const id = store.getState().chat.activeConversationId!;
+    expect(calls).toBe(0);
+    expect(store.getState().chat.conversations[id].continuation?.phase).toBe('ready');
+    expect(store.getState().chat.conversations[id].continuation?.request_nonce).toBeUndefined();
+    const canonical = (await readCommittedChatStorage()).conversations as Record<string, { continuation: { phase: string; request_nonce?: string } }>;
+    expect(canonical[id].continuation.phase).toBe('ready');
+    expect(canonical[id].continuation.request_nonce).toBeUndefined();
+  });
+
+  it.each(['reassigned', 'removed'])('requires an explicit selection after the active conversation is %s elsewhere', async change => {
+    await renderAndEnroll();
+    const chat = store.getState().chat, id = chat.activeConversationId!;
+    const conversations = change === 'removed' ? {} : { [id]: { ...chat.conversations[id], modelId: 'independent/other-model' } };
+    const adopted = chatSliceReducer(chat, chatActions.refreshDurable({ conversations }));
+    expect(adopted.activeConversationId).toBeNull();
+    expect(adopted.selectedModelId).toBe(model);
+    expect(adopted.selectionNeedsReview).toBe(true);
+    const chosen = chatSliceReducer(adopted, chatActions.newConversation(model));
+    expect(chosen.selectionNeedsReview).toBe(false);
+    expect(chosen.conversations[chosen.activeConversationId!].modelId).toBe(model);
+  });
+
+  it('retains a draft after foreign deletion and explicitly starts a new context with its selected model', async () => {
+    await renderAndEnroll();
+    const id = store.getState().chat.activeConversationId!;
+    await act(async () => { await userEvent.fill(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!, 'Keep this private draft.'); });
+    await act(async () => { store.dispatch(chatActions.refreshDurable({ conversations: {} })); });
+    await settle(() => container!.textContent!.includes('removed or changed to another model'));
+    expect(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!.value).toBe('Keep this private draft.');
+    expect(container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.disabled).toBe(true);
+    await click('Start a new conversation');
+    await settle(() => !!store.getState().chat.activeConversationId);
+    expect(store.getState().chat.activeConversationId).not.toBe(id);
+    expect(store.getState().chat.selectedModelId).toBe(model);
+    expect(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!.value).toBe('Keep this private draft.');
   });
 
   it('creates a separate conversation instead of reassigning an enrolled empty context', async () => {
