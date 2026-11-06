@@ -362,12 +362,55 @@ def _commit_replacement_model_dir(replacement_dir: Path, target_dir: Path) -> No
 
 
 def _artifact_candidates(
-    root: Path, model_id: ModelId, source_revision: str | None
+    root: Path,
+    model_id: ModelId,
+    source_revision: str | None,
+    *,
+    expected_card: ModelCard | None = None,
 ) -> list[Path]:
-    from skulk.store.installed_cards import indexed_recovery_artifact
+    from skulk.store.installed_cards import (
+        indexed_recovery_artifact,
+        installed_card_matches,
+    )
+    from skulk.store.model_store import (
+        StoreRegistryIndex,
+        read_reconciliation_tombstones,
+    )
 
     recovered = indexed_recovery_artifact(root, model_id)
     result = [recovered] if recovered is not None else []
+    if expected_card is not None:
+        try:
+            if str(model_id) in read_reconciliation_tombstones(root):
+                return []
+        except (OSError, ValueError):
+            return []
+        try:
+            index = StoreRegistryIndex.model_validate_json(
+                (root / "registry.json").read_bytes()
+            )
+            entry = index.entries.get(str(model_id))
+            if (
+                entry is not None
+                and entry.model_id == str(model_id)
+                and entry.source_revision == source_revision
+                and (entry.source_repository or entry.model_id)
+                == str(expected_card.artifact_repository)
+            ):
+                candidate = (root / entry.store_path).resolve()
+                resolved_root = root.resolve()
+                # The index is a location hint, not authority to select another
+                # card, escape the Store, or skip installed-artifact checks.
+                if (
+                    candidate != resolved_root
+                    and candidate.is_relative_to(resolved_root)
+                    and installed_card_matches(candidate, expected_card)
+                ):
+                    result.append(candidate)
+        except (OSError, ValueError):
+            # An absent/damaged index cannot grant a new candidate. Existing
+            # revision-qualified and staged locations remain independent.
+            pass
     result.append(root / model_id.normalize())
     if source_revision is not None:
         result.append(root / f"{model_id.normalize()}--revision-{source_revision}")
@@ -384,7 +427,9 @@ def resolve_model_in_path(
     """Search SKULK_MODELS_PATH directories for a pre-existing model.
 
     Checks each directory for the normalized name (org--model) and, for pinned
-    artifacts, the store's revision-qualified sibling name. A candidate is only
+    artifacts, the store's revision-qualified sibling name. An exact card also
+    permits a contained Store-index location with matching installed identity,
+    including bundle-qualified names when staging is disabled. A candidate is only
     returned if ``is_model_directory_complete`` confirms all weight files are
     present and its revision marker matches. When ``expected_card`` is a signed
     registry card, the installed-card sidecar must also prove that exact card
@@ -410,7 +455,9 @@ def resolve_model_in_path(
 
     search_path: tuple[Path, ...] = _constants.SKULK_MODELS_PATH or ()
     for search_dir in search_path:
-        for candidate in _artifact_candidates(search_dir, model_id, source_revision):
+        for candidate in _artifact_candidates(
+            search_dir, model_id, source_revision, expected_card=expected_card
+        ):
             load_candidate = (
                 candidate / artifact_root if artifact_root is not None else candidate
             )
@@ -1063,6 +1110,8 @@ def build_model_path(
     model_id: ModelId,
     source_revision: str | None = None,
     artifact_root: str | None = None,
+    *,
+    expected_card: ModelCard | None = None,
 ) -> Path:
     """Resolve a local filesystem path for *model_id*.
 
@@ -1077,6 +1126,8 @@ def build_model_path(
             or ``None`` for an unpinned mutable-main cache.
         artifact_root: Optional repository-relative working directory declared
             by a bundle-aware card.
+        expected_card: Optional exact card permitting an authenticated canonical
+            Store index location, including bundle-qualified directory names.
 
     Returns:
         The complete local model directory.
@@ -1084,13 +1135,21 @@ def build_model_path(
     Raises:
         FileNotFoundError: If no complete revision-matching directory exists.
     """
-    found = (
-        resolve_model_in_path(model_id, source_revision)
-        if artifact_root is None
-        else resolve_model_in_path(
-            model_id, source_revision, artifact_root=artifact_root
+    if expected_card is not None:
+        found = resolve_model_in_path(
+            model_id,
+            source_revision,
+            artifact_root=artifact_root,
+            expected_card=expected_card,
         )
-    )
+    else:
+        found = (
+            resolve_model_in_path(model_id, source_revision)
+            if artifact_root is None
+            else resolve_model_in_path(
+                model_id, source_revision, artifact_root=artifact_root
+            )
+        )
     if found is not None:
         return _apply_artifact_root(found, artifact_root)
     # A safetensors/MLX repo is identified by its config.json; a bare GGUF repo

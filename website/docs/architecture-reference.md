@@ -177,7 +177,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   cancellation, without retroactively failing a verified complete render.
   Private bootstrap context and background exact-runtime revalidation connect
   this adapter to Worker supervisors without blocking unrelated planning.
-  First-mount staged weights resolve only at LoadModel.
+  First-mount weights resolve only at LoadModel. The exact card permits a
+  contained, installed-card-matched canonical Store-index location when staging
+  is disabled, including bundle-qualified directory names. Tombstoned aliases,
+  mismatched cards and escaping index paths do not gain a candidate.
 
 - **Native result producer (initiative):** `worker/separation_output.py` verifies
   fixed private WAVs and emits bounded four-role OUTPUT_MEDIA frames. At most

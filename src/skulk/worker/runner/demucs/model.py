@@ -109,7 +109,8 @@ class SeparationModel:
         Args:
             bound: Authoritative complete single-host rank-zero placement.
             runtime: Worker-prepared exact package/device receipt, not caller data.
-            load_directory: Worker-staged loader directory for the exact artifact.
+            load_directory: Worker-resolved staged or canonical Store loader
+                directory for the exact artifact.
             root: Exclusive private model lifetime/result root.
             source_root: Owner-verified input root with command-private WAVs.
             create_resident: Injectable process effect; production uses the real supervisor.

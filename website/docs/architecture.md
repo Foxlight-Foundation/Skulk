@@ -1350,6 +1350,13 @@ Protected runtime file/lock helpers live in `utils/runtime_files.py`; the old
 preparation can use them without loading the plugin subsystem. There is no new
 engine plugin ABI or activation framework.
 
+Native separator load waits for the normal download gate and resolves the exact
+card against staged data or an installed-card-matched canonical Store location.
+With staging disabled, the Store index supplies a contained path hint for the
+bundle-qualified generation; a duplicate conventional alias is unnecessary.
+An index cannot admit a deleted alias, a different installed card or a path
+outside its Store root.
+
 `shared/models/separation.py` defines immutable native separator card metadata.
 `AudioSeparation` and `[separation]` must agree, selecting one exact safetensors
 object and real transformer geometry, with speech and music sections excluded.

@@ -607,7 +607,11 @@ remain separate activation work; constructing this adapter starts no model.
 The initiative Worker lazily admits source custody from actual local tasks and
 routes raw source packets to the acknowledged-input planner gate. Background
 exact-runtime revalidation supplies a private bootstrap context; weights resolve
-only at LoadModel. Recovered unowned native jobs fail without automatic replay.
+only at LoadModel. Separator resolution passes the exact card to the shared
+resolver, which can authenticate a contained canonical Store-index location
+when staging is disabled; bundle-qualified names do not require a copied alias.
+Deleted aliases, mismatched installed cards and paths outside the Store do not
+gain eligibility from the index. Recovered unowned native jobs fail without automatic replay.
 `worker/separation_output.py` retains four result sets through bounded verification,
 OUTPUT_MEDIA delivery, exact reverse ACKs and joined sender/file cleanup.
 Each role waits for its own ACK before the next role is emitted.

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.types.worker.instances import BoundInstance
 from skulk.utils.runtime_files import RuntimeLock
 from skulk.worker.runner.demucs import context as module
@@ -32,7 +32,10 @@ def test_idle_context_does_not_resolve_weights_before_download_gate(
         model_id: ModelId,
         source_revision: str | None = None,
         artifact_root: str | None = None,
+        *,
+        expected_card: ModelCard | None = None,
     ) -> Path:
+        assert expected_card == actual.bound.bound_shard.model_card
         calls.append(model_id)
         if not staged[0]:
             raise FileNotFoundError("not downloaded yet")
