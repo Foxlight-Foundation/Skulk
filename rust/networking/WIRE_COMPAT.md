@@ -33,6 +33,14 @@ bindings while `versionStatus` reported "consistent".
 
 ## Entries (newest first)
 
+- **wire-neutral** (2026-11-06): persistent telemetry publication failures with
+  authenticated connected peers now emit a bounded local warning after 30
+  seconds, then at most once per minute. The warning reads negotiated protocol,
+  subscription and mesh counts without changing publications, subscriptions,
+  protocol identifiers, framing, key derivation or behaviour composition.
+  `NETWORK_VERSION` remains v0.0.3. Bindings advance to 0.2.8 so ordinary
+  upgrades rebuild the wheel and acquire the diagnostics on their first restart.
+
 - **wire-neutral** (2026-10-10): the lockfile moves to security-fixed
   patch releases. `libp2p-gossipsub` 0.49.2 to 0.49.5 ignores invalid and
   bounds remote PRUNE backoff values, caps subscriptions at 2,000 topics per
