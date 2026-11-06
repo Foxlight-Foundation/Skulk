@@ -23,6 +23,7 @@ from skulk.download.shard_downloader import ShardDownloader
 from skulk.routing.router import TelemetrySender
 from skulk.shared.constants import SKULK_MODELS_DIR
 from skulk.shared.models.model_cards import (
+    ModelCard,
     ModelId,
     get_model_cards,
     register_installed_card_record,
@@ -57,6 +58,7 @@ from skulk.store.config import resolve_config_path, update_skulk_config_atomic
 from skulk.store.installed_cards import (
     refresh_registry_installed_card_if_same_artifact,
 )
+from skulk.store.model_store_client import ModelStoreDownloader
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.task_group import TaskGroup
 
@@ -131,6 +133,14 @@ class DownloadCoordinator:
     def _model_dir(self, model_id: ModelId) -> str:
         return str(SKULK_MODELS_DIR / model_id.normalize())
 
+    def _can_reuse_canonical_separator(self, card: ModelCard) -> bool:
+        """Permit index shortcuts only when the separator loads without staging."""
+        return (
+            card.separation is not None
+            and isinstance(self.shard_downloader, ModelStoreDownloader)
+            and not self.shard_downloader.staging_enabled
+        )
+
     async def _resolve_or_refresh_complete_artifact(
         self,
         shard: ShardMetadata,
@@ -182,6 +192,7 @@ class DownloadCoordinator:
             card.model_id,
             card.source_revision,
             expected_card=card,
+            include_store_index=self._can_reuse_canonical_separator(card),
             artifact_root=(
                 card.artifact_bundle.root if card.artifact_bundle is not None else None
             ),
@@ -190,8 +201,6 @@ class DownloadCoordinator:
             return exact
 
         candidates: list[Path] = []
-        if candidate is not None:
-            candidates.append(candidate.parent if candidate.is_file() else candidate)
         retained_path = resolve_model_in_path(
             card.model_id,
             card.source_revision,
@@ -199,6 +208,19 @@ class DownloadCoordinator:
                 card.artifact_bundle.root if card.artifact_bundle is not None else None
             ),
         )
+        if candidate is not None:
+            directory = candidate.parent if candidate.is_file() else candidate
+            # A byte-complete startup probe is not proof that a cardless loader
+            # can find this copy. Store-direct canonical copies must pass the
+            # exact index lookup above; a supplied path cannot replace it.
+            if (
+                directory.resolve() == Path(self._model_dir(card.model_id)).resolve()
+                or (
+                    retained_path is not None
+                    and directory.resolve() == retained_path.resolve()
+                )
+            ):
+                candidates.append(directory)
         if retained_path is not None:
             candidates.append(retained_path)
         if card.registry_card_id is not None:
@@ -1029,6 +1051,7 @@ class DownloadCoordinator:
                         mid,
                         card.source_revision,
                         expected_card=card,
+                        include_store_index=self._can_reuse_canonical_separator(card),
                         artifact_root=(
                             card.artifact_bundle.root
                             if card.artifact_bundle is not None

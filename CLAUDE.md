@@ -613,9 +613,12 @@ when staging is disabled; bundle-qualified names do not require a copied alias.
 The Worker applies that lookup at its Store-direct separator preflight before
 dispatch. Default/staging fallbacks with an expected signed card repeat the
 same installed-identity check; a stale fallback cannot undo a search refusal.
-The already-installed download shortcut excludes canonical index hints, keeping
-cardless consumers on the configured staging transaction; disabled staging
-returns the same cached canonical bytes through the normal downloader.
+Index hints default off and exact loaders explicitly opt in. Both coordinator
+completion probes and the Worker shortcut permit canonical separator reuse only
+with staging disabled, including offline cached use. Coordinator policy comes
+from its actual downloader; staged/cardless consumers cannot skip transfer.
+Startup-completion candidates must also be loader-discoverable or use that
+Store-direct policy; byte completeness alone cannot bypass staging.
 Deleted aliases, mismatched installed cards and paths outside the Store do not
 gain eligibility from the index. Recovered unowned native jobs fail without automatic replay.
 `worker/separation_output.py` retains four result sets through bounded verification,

@@ -1,17 +1,28 @@
 # pyright: reportPrivateUsage=false
 """Worker and deferred separator loading share a canonical Store artifact path."""
 
+import shutil
+from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
 import pytest
 
+import skulk.download.coordinator as coordinator_module
 import skulk.download.download_utils as download_utils
 import skulk.shared.constants as constants
+from skulk.download.coordinator import DownloadCoordinator
+from skulk.download.download_utils import RepoDownloadProgress
+from skulk.download.impl_shard_downloader import ResumableShardDownloader
+from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.events import Event, IndexedEvent, RunnerStatusUpdated
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import LoadModel, Task
+from skulk.shared.types.telemetry import NodeTelemetry
+from skulk.shared.types.worker.downloads import DownloadCompleted
 from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerLoading, RunnerStatus
 from skulk.store.config import StagingNodeConfig
@@ -20,7 +31,7 @@ from skulk.store.installed_cards import (
     write_installed_card,
 )
 from skulk.store.model_store import StoreModelEntry, StoreRegistryIndex
-from skulk.store.model_store_client import ModelStoreClient
+from skulk.store.model_store_client import ModelStoreClient, ModelStoreDownloader
 from skulk.utils.channels import channel
 from skulk.utils.runtime_files import RuntimeLock
 from skulk.worker.main import Worker
@@ -31,19 +42,24 @@ from skulk.worker.runner.demucs.tests.test_model import fixture
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 
 
+@pytest.mark.parametrize("staging_enabled", [False, True])
+@pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("startup_candidate", [False, True])
 async def test_worker_dispatches_store_direct_separator_through_deferred_load(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staging_enabled: bool, offline: bool,
+    startup_candidate: bool,
 ) -> None:
-    """A completed canonical download reaches the runner without a staged alias.
+    """Configured discovery reaches staged or Store-direct deferred loading.
 
     File custody, path resolution, Worker dispatch and deferred model binding are
-    real. Native model effects are injected; this is not an inference test.
+    real. Staging transfer and native effects are injected; this is not inference.
     """
     actual, factory, _, _ = fixture(tmp_path)
     bound = actual.bound
     card = bound.bound_shard.model_card
     bundle = card.artifact_bundle
     assert bundle is not None and card.source_revision is not None
+    revision = card.source_revision
     store = tmp_path / "store"
     store.mkdir()
     canonical = store / (
@@ -66,8 +82,72 @@ async def test_worker_dispatches_store_direct_separator_through_deferred_load(
     (store / "registry.json").write_text(
         StoreRegistryIndex(entries={str(card.model_id): entry}).model_dump_json()
     )
-    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (store,))
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (staging, store))
     monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path / "unused")
+    monkeypatch.setattr(coordinator_module, "SKULK_MODELS_DIR", tmp_path / "unused")
+    staging_configuration = StagingNodeConfig(
+        enabled=staging_enabled, node_cache_path=str(staging)
+    )
+    store_client = ModelStoreClient(store_host="store.invalid", local_store_path=store)
+    inner = ResumableShardDownloader(offline=offline)
+    downloader = ModelStoreDownloader(inner, store_client, staging_configuration)
+    _, download_receiver = channel[ForwarderDownloadCommand]()
+    discovery_events, _ = channel[Event]()
+    telemetry, _ = channel[NodeTelemetry]()
+    coordinator = DownloadCoordinator(
+        node_id=bound.bound_node_id,
+        shard_downloader=downloader,
+        download_command_receiver=download_receiver,
+        event_sender=discovery_events,
+        telemetry_sender=telemetry,
+        offline=offline,
+        staging_cache_path=staging,
+    )
+    assert await coordinator._resolve_or_refresh_complete_artifact(
+        bound.bound_shard
+    ) == (None if staging_enabled else canonical)
+
+    async def empty_status() -> AsyncIterator[tuple[Path, RepoDownloadProgress]]:
+        if startup_candidate:
+            yield canonical, RepoDownloadProgress(
+                repo_id=str(card.model_id), repo_revision=revision,
+                shard=bound.bound_shard, completed_files=1, total_files=1,
+                downloaded=card.storage_size, downloaded_this_session=Memory.from_bytes(0),
+                total=card.storage_size, overall_speed=0, overall_eta=timedelta(0),
+                status="complete",
+            )
+
+    async def catalog() -> list[ModelCard]:
+        return [card]
+
+    class ScanComplete(BaseException):
+        """Stop after one actual periodic discovery cycle without a timed race."""
+
+    async def stop_scan(_seconds: float) -> None:
+        raise ScanComplete
+
+    with monkeypatch.context() as scan_patch:
+        scan_patch.setattr(inner, "get_shard_download_status", empty_status)
+        scan_patch.setattr(coordinator_module, "get_model_cards", catalog)
+        scan_patch.setattr(coordinator_module.anyio, "sleep", stop_scan)
+        with pytest.raises(ScanComplete):
+            await coordinator._emit_existing_download_progress()
+    assert isinstance(
+        coordinator.download_status.get(card.model_id), DownloadCompleted
+    ) == (not staging_enabled)
+    expected_directory = canonical
+    if staging_enabled:
+        # The transfer effect is injected; real discovery must demand this
+        # staged alias before Worker and deferred loading can share it.
+        expected_directory = staging / card.model_id.normalize()
+        shutil.copytree(canonical, expected_directory)
+        write_installed_card(
+            expected_directory, build_installed_card_record(expected_directory, card)
+        )
+        assert await coordinator._resolve_or_refresh_complete_artifact(
+            bound.bound_shard
+        ) == expected_directory
     reader = RuntimeLock(tmp_path / "reader", name="attachment.lock")
     fence = SourceReadFence(reader.descriptor)
     reader.close()
@@ -78,7 +158,7 @@ async def test_worker_dispatches_store_direct_separator_through_deferred_load(
     def bind(
         owner: SeparationRunnerContext, placement: BoundInstance, directory: Path
     ) -> SeparationModel:
-        assert owner is context and placement == bound and directory == canonical
+        assert owner is context and placement == bound and directory == expected_directory
         return SeparationModel(
             placement,
             actual.runtime,
@@ -117,10 +197,8 @@ async def test_worker_dispatches_store_direct_separator_through_deferred_load(
         event_sender=events,
         command_sender=commands,
         download_command_sender=downloads,
-        store_client=ModelStoreClient(store_host="store.invalid"),
-        staging_config=StagingNodeConfig(
-            enabled=False, node_cache_path=str(tmp_path / "staging")
-        ),
+        store_client=store_client,
+        staging_config=staging_configuration,
     )
     worker.state = State(instances={bound.instance.instance_id: bound.instance})
     runner = RecordingRunner()
@@ -131,7 +209,7 @@ async def test_worker_dispatches_store_direct_separator_through_deferred_load(
         assert dispatched == [task] and model.is_ready()
         assert len(factory.calls) == 1
         assert factory.calls[0][2].weights_path == str(
-            canonical / "955717e8.safetensors"
+            expected_directory / "955717e8.safetensors"
         )
         assert not (store / card.model_id.normalize()).exists()
         assert not any(

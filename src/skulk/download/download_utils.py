@@ -367,7 +367,7 @@ def _artifact_candidates(
     source_revision: str | None,
     *,
     expected_card: ModelCard | None = None,
-    include_store_index: bool = True,
+    include_store_index: bool = False,
 ) -> list[Path]:
     from skulk.store.installed_cards import (
         indexed_recovery_artifact,
@@ -424,13 +424,13 @@ def resolve_model_in_path(
     *,
     expected_card: ModelCard | None = None,
     artifact_root: str | None = None,
-    include_store_index: bool = True,
+    include_store_index: bool = False,
 ) -> Path | None:
     """Search SKULK_MODELS_PATH directories for a pre-existing model.
 
     Checks each directory for the normalized name (org--model) and, for pinned
-    artifacts, the store's revision-qualified sibling name. An exact card also
-    permits a contained Store-index location with matching installed identity,
+    artifacts, the store's revision-qualified sibling name. An exact card with
+    explicit index access also permits a contained location with matching identity,
     including bundle-qualified names when staging is disabled. A candidate is only
     returned if ``is_model_directory_complete`` confirms all weight files are
     present and its revision marker matches. When ``expected_card`` is a signed
@@ -446,9 +446,9 @@ def resolve_model_in_path(
             must match the resolved directory.
         artifact_root: Optional repository-relative loader root whose contents
             determine runtime completeness for a directory-scoped bundle.
-        include_store_index: Whether to consider canonical Store index hints.
-            Download shortcuts disable this so cardless consumers still enter
-            the configured staging transaction before loading.
+        include_store_index: Explicit loader or Store-direct separator permission
+            to consider canonical index hints. Defaults to false so completion
+            probes cannot bypass the configured staging transaction.
 
     Returns:
         The first complete matching model directory, or ``None``.
@@ -783,7 +783,9 @@ def same_repo_served_draft_files(model_card: ModelCard) -> list[str]:
     return []
 
 
-def installed_artifact_in_path(model_card: ModelCard) -> Path | None:
+def installed_artifact_in_path(
+    model_card: ModelCard, *, include_store_index: bool = False
+) -> Path | None:
     """The card's artifact on ``SKULK_MODELS_PATH`` when nothing is left to fetch.
 
     A base found on the search path is installed only if every companion the
@@ -794,13 +796,14 @@ def installed_artifact_in_path(model_card: ModelCard) -> Path | None:
     caller down the download path, where the coordinator fetches what is
     missing and, offline, decides which companions are load-bearing.
 
-    Canonical Store-index hints are excluded from this shortcut: cardless
-    runners cannot resolve them. The configured downloader stages those bytes,
-    or returns them directly when staging is disabled, before declaring the
-    download complete.
+    Canonical Store-index hints require explicit loader support with staging
+    disabled. Otherwise the configured downloader must stage those bytes
+    before declaring the download complete.
 
     Args:
         model_card: The card whose artifact and companions must be present.
+        include_store_index: Whether the caller can load a canonical Store copy
+            directly without staging, including in offline mode.
 
     Returns:
         The complete matching model directory, or ``None``.
@@ -809,7 +812,7 @@ def installed_artifact_in_path(model_card: ModelCard) -> Path | None:
         ModelId(model_card.model_id),
         model_card.source_revision,
         expected_card=model_card,
-        include_store_index=False,
+        include_store_index=include_store_index,
         artifact_root=(
             model_card.artifact_bundle.root
             if model_card.artifact_bundle is not None
@@ -1171,6 +1174,7 @@ def build_model_path(
             source_revision,
             artifact_root=artifact_root,
             expected_card=expected_card,
+            include_store_index=True,
         )
     else:
         found = (

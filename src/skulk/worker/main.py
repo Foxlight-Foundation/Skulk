@@ -4030,7 +4030,14 @@ class Worker:
                     # Only a base whose declared companions are on disk too
                     # is already installed; otherwise the coordinator's
                     # download path fetches what is missing.
-                    found_path = installed_artifact_in_path(shard.model_card)
+                    found_path = installed_artifact_in_path(
+                        shard.model_card,
+                        include_store_index=(
+                            shard.model_card.separation is not None
+                            and self._staging_config is not None
+                            and not self._staging_config.enabled
+                        ),
+                    )
                     if found_path is not None:
                         logger.info(
                             f"Model {model_id} found in SKULK_MODELS_PATH at {found_path}"

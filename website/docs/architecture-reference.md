@@ -184,9 +184,13 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   Worker Store-direct separator preflight passes the same exact card before
   runner dispatch. Signed identity checks also guard default/staging fallbacks;
   staged Worker metadata adoption retains its existing current-catalog proof.
-  Already-installed download shortcuts exclude canonical index hints, so
-  cardless consumers still enter the configured staging transaction. Disabled
-  staging returns the canonical bytes through the normal downloader instead.
+  Index lookup defaults off; exact loaders explicitly opt in. Both coordinator
+  completion probes and the Worker shortcut allow canonical separator reuse
+  only with staging disabled, including offline cached operation. The
+  coordinator reads the actual downloader's staging policy. Staged/cardless
+  consumers retain their normal transfer and current-catalog adoption paths.
+  Startup-completion candidates must already match a loader-discoverable copy
+  or the Store-direct policy; complete bytes alone do not skip staging.
 
 - **Native result producer (initiative):** `worker/separation_output.py` verifies
   fixed private WAVs and emits bounded four-role OUTPUT_MEDIA frames. At most

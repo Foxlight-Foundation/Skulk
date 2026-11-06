@@ -290,7 +290,8 @@ def test_card_resolver_loads_store_direct_bundle_without_a_staged_alias(
     monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path / "unused")
     assert not (store / card.model_id.normalize()).exists()
     assert resolve_model_in_path(
-        card.model_id, REVISION, expected_card=card, artifact_root=bundle_root
+        card.model_id, REVISION, expected_card=card, artifact_root=bundle_root,
+        include_store_index=True,
     ) == canonical
     assert build_model_path(
         card.model_id, REVISION, bundle_root, expected_card=card
@@ -385,7 +386,7 @@ def test_store_index_cannot_admit_an_unverified_or_deleted_card(
         index_path.write_text("{}")
     monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (store,))
     assert resolve_model_in_path(
-        card.model_id, REVISION, expected_card=card
+        card.model_id, REVISION, expected_card=card, include_store_index=True
     ) is None
 
 

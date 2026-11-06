@@ -1360,9 +1360,15 @@ The Worker's Store-direct separator preflight uses the same card-aware lookup
 before dispatching LoadModel. Default/staging fallbacks repeat the expected
 signed-card check, so they cannot undo a refused search result. Staged loading
 retains its existing current-catalog metadata-adoption transaction.
-The Worker's already-installed download shortcut excludes canonical index hints:
-cardless consumers must first enter the configured downloader, which stages the
-cached bytes when enabled or returns their canonical location when disabled.
+Index access is an explicit loader opt-in. Both coordinator completion probes
+and the Worker's already-installed shortcut allow it only for separators whose
+actual downloader/Worker staging policy is disabled. This retains offline
+canonical reuse for that loader while staged and other cardless consumers must
+first enter the configured staging transaction. The coordinator reads the
+downloader's staging policy directly rather than retaining a separate flag.
+An explicit startup-completion candidate must also be discoverable in the
+loader's existing layout or use that Store-direct policy; byte completeness
+alone cannot bypass staging.
 
 `shared/models/separation.py` defines immutable native separator card metadata.
 `AudioSeparation` and `[separation]` must agree, selecting one exact safetensors

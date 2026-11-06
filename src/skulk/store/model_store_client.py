@@ -1919,6 +1919,11 @@ class ModelStoreDownloader(ShardDownloader):
             Callable[[ShardMetadata, RepoDownloadProgress], Awaitable[None]]
         ] = []
 
+    @property
+    def staging_enabled(self) -> bool:
+        """Return whether this downloader must stage Store bytes before loading."""
+        return self._staging_config.enabled
+
     def set_staging_capacity_callback(
         self,
         callback: StagingCapacityCallback,
