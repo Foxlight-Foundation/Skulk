@@ -12,6 +12,15 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ## Components
 
+- **Native audio result finalization (initiative):** `MusicEditAPI._drain` and
+  `SeparationAPI._drain` close the metadata receiver after the render manifest
+  but wait on the accepted entry's `return_settled` event before finalizing
+  the command. Verified WAV custody plus drained reverse ACK (every role for
+  stems) releases successful tasks. Failure/cancellation releases that wait
+  only after cancellation submission has been attempted; the separate
+  `cancel_submitted` fence prevents `TaskFinished` from racing `TaskCancelled`.
+  Metadata ordering alone never deletes a live worker output producer.
+
 - **Source-separation native boundary (initiative):**
   `shared/types/audio_separation.py` is the strict standalone source/four-stem
   and private process protocol; its WAV validator bounds encoded/decoded geometry

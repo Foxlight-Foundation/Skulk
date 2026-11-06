@@ -123,6 +123,7 @@ class _Active:
     acknowledging: bool = False
     cancel_started: bool = False
     cancel_submitted: anyio.Event = field(default_factory=anyio.Event)
+    return_settled: anyio.Event = field(default_factory=anyio.Event)
 
 
 @dataclass
@@ -813,6 +814,11 @@ class MusicEditAPI:
                         )
                         entry.deadline = time.monotonic() + 300
                         await self._reconcile_locked(identifier, entry)
+                    # Render metadata precedes independent WAV custody. A
+                    # TaskFinished here would delete the worker's task and
+                    # cancel its still-owned return stream before the ACK.
+                    receiver.close()
+                    await accepted.return_settled.wait()
                     return
             await self.fail(
                 identifier, "Music edit stream ended without a complete result."
@@ -1049,6 +1055,7 @@ class MusicEditAPI:
                         )
                         if settled is not None and settled.status == "completed":
                             self.active.pop(identifier)
+                            entry.return_settled.set()
                             await self._release_source_locked(identifier, entry)
         except MusicEditStorageError as error:
             logger.opt(exception=error).warning(
@@ -1108,6 +1115,7 @@ class MusicEditAPI:
         self.active.pop(identifier, None)
         if entry is not None:
             self._start_control(identifier, entry)
+            entry.return_settled.set()
         await self._retry_cleanup_locked(identifier)
 
     async def _fence_storage_locked(self) -> None:

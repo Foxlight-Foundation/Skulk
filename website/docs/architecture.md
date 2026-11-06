@@ -4109,6 +4109,13 @@ separate private root, checks PCM24/stereo/48 kHz geometry, size, digest and pea
 and rechecks completed content on adoption. Results retain the 64 MiB/24-hour
 bounds; failed deletion retains its capacity charge.
 
+Both edit and separation metadata consumers retain the native task until the
+verified output acknowledgement drains (all four acknowledgements for stems).
+Render metadata closes only its receiver; it cannot emit `TaskFinished` while
+the worker still owns result delivery. Failure and cancellation submit
+`TaskCancelled` before stream finalization so task deletion cannot race the
+still-running producer.
+
 The encoded source owner and crash journal accept read-only audio-task protocols
 so actual strict music tasks reuse separation's four-source bound and reader
 fences. Native result reclamation is injected per owner; ACE must supply its own
