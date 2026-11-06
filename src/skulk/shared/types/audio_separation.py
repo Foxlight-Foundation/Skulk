@@ -13,7 +13,7 @@ import struct
 from collections.abc import Iterator
 from typing import Annotated, Final, Literal, Self, cast, final
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MAX_SEPARATION_SOURCE_BYTES: Final = 64 * 1024 * 1024
 MAX_SEPARATION_DECODED_BYTES: Final = 128 * 1024 * 1024
@@ -187,6 +187,20 @@ class AudioSeparationOutput(SeparationContract):
         allow_inf_nan=False,
         description="Maximum absolute native model sample across the whole set, before shared attenuation.",
     )
+
+    @field_validator("stems", mode="before")
+    @classmethod
+    def immutable_stems(cls, value: object) -> object:
+        """Normalize the decoded four-element JSON array before strict validation."""
+        # Tagged DATA envelopes unwrap through Python validation, where strict
+        # tuples reject JSON arrays. Preserve immutable output without relaxing
+        # role, geometry or scalar validation or accepting arbitrary iterables.
+        if isinstance(value, list):
+            items = cast(list[object], value)
+            if len(items) != len(SEPARATION_STEMS):
+                raise ValueError("separation requires exactly four stems")
+            return tuple(items)
+        return value
 
     @model_validator(mode="after")
     def validate_complete_set(self) -> Self:
