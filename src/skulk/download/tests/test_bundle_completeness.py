@@ -297,6 +297,48 @@ def test_card_resolver_loads_store_direct_bundle_without_a_staged_alias(
     ) == (canonical / bundle_root if bundle_root else canonical)
 
 
+@pytest.mark.parametrize("bundle_root", [None, "payload/loader"])
+@pytest.mark.parametrize("staged", [False, True])
+def test_download_shortcut_requires_a_cardless_loadable_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bundle_root: str | None,
+    staged: bool,
+) -> None:
+    """A canonical-only cache must still enter the configured staging transaction."""
+    card = _card(bundle_root).model_copy(
+        update={
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot_1_current",
+            "registry_provenance": "agent",
+        }
+    )
+    store = tmp_path / "store"
+    canonical = _indexed_bundle(store, card)
+    staging = tmp_path / "staging"
+    if staged:
+        _install(staging, card)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (staging, store))
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path / "unused")
+    assert build_model_path(
+        card.model_id, REVISION, bundle_root, expected_card=card
+    ) == (
+        (staging / card.model_id.normalize() if staged else canonical)
+        / (bundle_root or "")
+    )
+    found = download_utils.installed_artifact_in_path(card)
+    if staged:
+        assert found is not None
+        assert found == staging / card.model_id.normalize()
+        assert build_model_path(card.model_id, REVISION, bundle_root) == (
+            found / (bundle_root or "")
+        )
+    else:
+        assert found is None
+        with pytest.raises(FileNotFoundError):
+            build_model_path(card.model_id, REVISION, bundle_root)
+
+
 @pytest.mark.parametrize(
     "damage",
     ["outside", "missing", "card", "signed_card", "revision", "tombstone", "bad_tombstone", "index"],

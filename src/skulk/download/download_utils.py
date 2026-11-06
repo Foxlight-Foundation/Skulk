@@ -367,6 +367,7 @@ def _artifact_candidates(
     source_revision: str | None,
     *,
     expected_card: ModelCard | None = None,
+    include_store_index: bool = True,
 ) -> list[Path]:
     from skulk.store.installed_cards import (
         indexed_recovery_artifact,
@@ -389,7 +390,7 @@ def _artifact_candidates(
             index = StoreRegistryIndex.model_validate_json(
                 (root / "registry.json").read_bytes()
             )
-            entry = index.entries.get(str(model_id))
+            entry = index.entries.get(str(model_id)) if include_store_index else None
             if (
                 entry is not None
                 and entry.model_id == str(model_id)
@@ -423,6 +424,7 @@ def resolve_model_in_path(
     *,
     expected_card: ModelCard | None = None,
     artifact_root: str | None = None,
+    include_store_index: bool = True,
 ) -> Path | None:
     """Search SKULK_MODELS_PATH directories for a pre-existing model.
 
@@ -444,6 +446,9 @@ def resolve_model_in_path(
             must match the resolved directory.
         artifact_root: Optional repository-relative loader root whose contents
             determine runtime completeness for a directory-scoped bundle.
+        include_store_index: Whether to consider canonical Store index hints.
+            Download shortcuts disable this so cardless consumers still enter
+            the configured staging transaction before loading.
 
     Returns:
         The first complete matching model directory, or ``None``.
@@ -456,7 +461,11 @@ def resolve_model_in_path(
     search_path: tuple[Path, ...] = _constants.SKULK_MODELS_PATH or ()
     for search_dir in search_path:
         for candidate in _artifact_candidates(
-            search_dir, model_id, source_revision, expected_card=expected_card
+            search_dir,
+            model_id,
+            source_revision,
+            expected_card=expected_card,
+            include_store_index=include_store_index,
         ):
             load_candidate = (
                 candidate / artifact_root if artifact_root is not None else candidate
@@ -785,6 +794,11 @@ def installed_artifact_in_path(model_card: ModelCard) -> Path | None:
     caller down the download path, where the coordinator fetches what is
     missing and, offline, decides which companions are load-bearing.
 
+    Canonical Store-index hints are excluded from this shortcut: cardless
+    runners cannot resolve them. The configured downloader stages those bytes,
+    or returns them directly when staging is disabled, before declaring the
+    download complete.
+
     Args:
         model_card: The card whose artifact and companions must be present.
 
@@ -795,6 +809,7 @@ def installed_artifact_in_path(model_card: ModelCard) -> Path | None:
         ModelId(model_card.model_id),
         model_card.source_revision,
         expected_card=model_card,
+        include_store_index=False,
         artifact_root=(
             model_card.artifact_bundle.root
             if model_card.artifact_bundle is not None
