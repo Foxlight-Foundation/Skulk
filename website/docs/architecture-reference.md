@@ -483,6 +483,7 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
 - **Lives in:** `src/skulk/shared/election.py`
 - **Communicates via:** `ELECTION_MESSAGES` topic
 - **Late proposals:** a better same-round proposal corrects a completed result; comparison uses the completed vote rather than post-win seniority. Duplicate, inferior, and older-round proposals do not reverse the result.
+- **Lost startup votes:** connected nodes republish the original completed winning vote every five seconds. A fixed receive deadline prevents busy incoming traffic from starving repair. A newer in-flight round suppresses the previous result. The timer never creates a round, increases seniority, or substitutes for connection liveness; peerless nodes emit no repair traffic, and input closure stops the receiver.
 - **Triggers:** node startup, lost master heartbeat, explicit master abdication
 
 ### API

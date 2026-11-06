@@ -3,8 +3,10 @@ from typing import Self
 import anyio
 from anyio import (
     CancelScope,
+    EndOfStream,
     Event,
     get_cancelled_exc_class,
+    move_on_after,
 )
 from loguru import logger
 
@@ -16,6 +18,7 @@ from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.task_group import TaskGroup
 
 DEFAULT_ELECTION_TIMEOUT = 3.0
+COMPLETED_ELECTION_REPUBLISH_INTERVAL_SECONDS = 5.0
 
 # Connection updates arrive far more often than cluster membership actually
 # changes: libp2p re-dials multi-homed peers (link-local + LAN + overlay
@@ -148,7 +151,26 @@ class Election:
 
     async def _election_receiver(self) -> None:
         with self._em_receiver as election_messages:
-            async for message in election_messages:
+            republish_at = (
+                anyio.current_time() + COMPLETED_ELECTION_REPUBLISH_INTERVAL_SECONDS
+            )
+            while True:
+                if anyio.current_time() >= republish_at:
+                    await self._republish_completed_election()
+                    republish_at = (
+                        anyio.current_time()
+                        + COMPLETED_ELECTION_REPUBLISH_INTERVAL_SECONDS
+                    )
+                message: ElectionMessage | None = None
+                try:
+                    # Only receiving may time out. Applying a vote or sending
+                    # an election result must never be interrupted by this timer.
+                    with move_on_after(max(0.0, republish_at - anyio.current_time())):
+                        message = await election_messages.receive()
+                except EndOfStream:
+                    return
+                if message is None:
+                    continue
                 logger.debug(f"Election message received: {message}")
                 if message.proposed_session.master_node_id == self.node_id:
                     logger.debug("Dropping message from ourselves")
@@ -196,6 +218,27 @@ class Election:
                     # conflicting masters. Compare the completed vote, not our
                     # post-win seniority, and monotonically adopt a better vote.
                     await self.elect(message)
+
+    async def _republish_completed_election(self) -> None:
+        """Repair lost startup votes without creating a new campaign or vote.
+
+        A connection may settle before gossipsub subscription exchange, losing
+        both campaign broadcasts. Repeating the original winning vote lets a
+        connected peer correct a completed result even when membership stays
+        unchanged. Rebuilding our status here would spend post-win seniority
+        and strengthen the old vote on every retry, so retain its exact fields.
+        The fixed receive deadline also bounds repair under continuous traffic.
+        """
+        completed = self._completed_election
+        campaign = self._campaign_done
+        if (
+            completed is None
+            or completed.clock != self.clock
+            or not self._connected_peers
+            or (campaign is not None and not campaign.is_set())
+        ):
+            return
+        await self._em_sender.send(completed)
 
     def _apply_connection_updates(self, updates: list[ConnectionMessage]) -> bool:
         """Fold connection updates into the per-peer live-connection counts.
@@ -247,7 +290,9 @@ class Election:
                     # update to a peer we already track). Restarting the election
                     # here is exactly what let connection churn livelock cluster
                     # formation, so we ignore it.
-                    logger.debug("Connection update with no membership change; ignoring")
+                    logger.debug(
+                        "Connection update with no membership change; ignoring"
+                    )
                     continue
 
                 # Let any in-flight campaign finish before starting a new one. A
