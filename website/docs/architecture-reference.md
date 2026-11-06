@@ -3049,6 +3049,9 @@ the original indexed owner, including companions reached through a cached base.
   `music_edit` frames, correlate exact reverse ACKs only after emitted terminals,
   and join the sender before ownership-checked reclamation. Failed cleanup keeps
   its reservation. Native completion, media custody and task state are separate.
+  Once a valid result is registered, ordinary execution-task removal after
+  terminal DATA cannot cancel its bounded delivery. Explicit failure/cancellation
+  and correlated reverse control still abort it; ACK and sender join precede cleanup.
   Existing audio.cpp output, speech and separation paths retain their contracts.
 - `ace_step/resources.py::NativeMusicHostGuard`: immutable, picklable outer
   process callback; checks its actual child, current host capacity/pressure and
@@ -3122,6 +3125,10 @@ the original indexed owner, including companions reached through a cached base.
   normal DownloadModel/LoadModel. Failure/cancellation closes untransferred
   custody. Indexed owner removal or snapshot replacement cancels its preparation
   request. Source integration does not establish distribution or qualification.
+  Worker LoadModel preflight resolves the exact recorded native primary off-loop
+  through the same resolver as deferred binding, including indexed installed
+  generations without generic aliases. Missing/stale primaries refuse dispatch;
+  the deferred model still verifies every selected source before native loading.
 - Resident `_read_output` forwards validated native memory frames through
   `record_native_music_memory` and bounded non-blocking diagnostic IPC.
   Supervisor ownership/context/payload/device/native/local freshness and process

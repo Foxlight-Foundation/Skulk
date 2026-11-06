@@ -2928,7 +2928,11 @@ has its separate complete download/store/preservation contract above.
 roots, source-reader custody and a required live resource guard for local spawn.
 Its unloaded wrapper resolves complete installed sources only at LoadModel,
 after normal downloads, with exact primary-card identity and a shared finite
-load budget. Native processes and their guardian inherit the existing reader
+load budget.
+Worker LoadModel preflight uses the same exact recorded primary resolver
+off-loop, including verified installed generations without generic aliases;
+missing or stale primary records refuse dispatch before deferred full-source load.
+Native processes and their guardian inherit the existing reader
 lock. Close permanently retires a wrapper; a failed drain retains the model for
 retry, and normal runner recovery needs a fresh wrapper. Bootstrap requires the
 explicit context for native music. Its supervisor retains the reader through
@@ -3004,6 +3008,9 @@ recovery fails uncertain local work and waits for inherited reader drain.
 `NativeMusicOutputProducer` verifies native PCM24/48 kHz stereo output, streams
 `music`/`music_edit` and retains files through exact terminal ACK and sender join.
 Failed cleanup keeps its slot. Audio.cpp/speech/separation contracts are separate.
+Terminal DATA can retire execution before WAV delivery finishes. Task removal
+alone cannot cancel a registered result; explicit failure/cancellation and
+correlated reverse control still abort the independent bounded sender.
 `NativeMusicHostGuard` is an immutable picklable local process callback using
 fresh actual child/host/RSS checks without capturing Worker State or Torch.
 Private native sensing still owns actual device allocation and heartbeat facts.

@@ -8,9 +8,12 @@ import asyncio
 import multiprocessing
 import threading
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
+from skulk.api.music_edit_media import MusicEditMediaStore
+from skulk.api.video_store import VideoStore
 from skulk.master.tests.test_music_edit_admission import state
 from skulk.routing.output_media import OutputMediaPacket
 from skulk.routing.vision_media import VisionMediaPacket
@@ -20,7 +23,7 @@ from skulk.shared.tests.music_edit_fixtures import music_edit_fixture
 from skulk.shared.types.common import CommandId, ModelId, NodeId
 from skulk.shared.types.diagnostics import RunnerDiagnosticUpdate
 from skulk.shared.types.events import Event
-from skulk.shared.types.music import MusicGenerationTaskParams
+from skulk.shared.types.music import MusicGenerationTaskParams, MusicOutputManifest
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
     MusicEditing,
@@ -400,3 +403,175 @@ async def test_actual_planner_waits_for_native_media_admission(
         ):
             endpoint.close()
         process.close()
+
+
+@pytest.mark.parametrize("editing", [False, True])
+@pytest.mark.parametrize("terminal", ["removed", "complete", "cancelled", "failed"])
+async def test_terminal_handoff_retains_verified_media_until_its_own_ack(
+    tmp_path: Path,
+    *,
+    editing: bool,
+    terminal: Literal["removed", "complete", "cancelled", "failed"],
+) -> None:
+    """Real files/producer/API custody survive normal task removal, not cancellation."""
+    snapshot, task, original = fixture(editing=editing)
+    _, output, _, data = music_edit_fixture(str(task.command_id))
+    facts = output.result.output
+    manifest = MusicOutputManifest(
+        size_bytes=facts.size_bytes,
+        sha256=facts.sha256,
+        sample_rate=facts.sample_rate,
+        channels=facts.channels,
+        duration_seconds=facts.frames / facts.sample_rate,
+    )
+    sent: list[OutputMediaPacket] = []
+    failure: list[str] = []
+    retained: list[bytes] = []
+    store = (
+        MusicEditMediaStore(tmp_path / "api")
+        if editing
+        else VideoStore(tmp_path / "api")
+    )
+
+    async def source(_packet: VisionMediaPacket) -> None:
+        pass
+
+    async def fail(_task: NativeMusicTask, message: str) -> None:
+        failure.append(message)
+
+    async def send(packet: OutputMediaPacket) -> None:
+        sent.append(packet)
+        if packet.kind == "opened":
+            assert packet.total_bytes is not None and packet.total_chunks is not None
+            if isinstance(store, MusicEditMediaStore):
+                store.open_assembly(
+                    packet.command_id,
+                    total_bytes=packet.total_bytes,
+                    total_chunks=packet.total_chunks,
+                )
+            else:
+                store.open_assembly(
+                    packet.command_id,
+                    "music",
+                    content_type="audio/wav",
+                    total_bytes=packet.total_bytes,
+                    total_chunks=packet.total_chunks,
+                )
+        elif packet.kind == "chunk":
+            if isinstance(store, MusicEditMediaStore):
+                store.append(packet.command_id, packet.sequence, packet.data)
+            else:
+                store.append(packet.command_id, "music", packet.sequence, packet.data)
+        elif packet.kind == "completed":
+            assert packet.total_chunks is not None and packet.sha256 is not None
+            if isinstance(store, MusicEditMediaStore):
+                stored = store.commit(
+                    packet.command_id, facts, total_chunks=packet.total_chunks
+                )
+            else:
+                stored = store.commit(
+                    packet.command_id,
+                    "music",
+                    sha256=packet.sha256,
+                    total_chunks=packet.total_chunks,
+                )
+            retained.append(stored.file_path.read_bytes())
+            assert owner.outputs.receive(packet.accepted())
+
+    owner = NativeMusicMediaOwner(
+        NodeId("node-0"),
+        lambda: snapshot,
+        tmp_path / "source",
+        tmp_path / "readers",
+        source,
+        send,
+        fail,
+        lambda _task, _runner, _root: True,
+    )
+    instance = snapshot.instances[task.instance_id]
+    runner = instance.shard_assignments.node_to_runner[NodeId("node-0")]
+    root = tmp_path / "readers" / separation_reader_key(task.instance_id, runner)
+    fence = await owner.prepare_reader(root)
+    try:
+        await owner.begin(task.command_id)
+        if isinstance(task, MusicEditing):
+            for packet in (
+                VisionMediaPacket(
+                    source_node=task.owner_node,
+                    target_node=NodeId("node-0"),
+                    command_id=task.command_id,
+                    model=ModelId(task.task_params.model),
+                    payload="music_edit_source",
+                    kind="opened",
+                    sequence=0,
+                    total_chunks=1,
+                    image_count=1,
+                ),
+                VisionMediaPacket(
+                    source_node=task.owner_node,
+                    target_node=NodeId("node-0"),
+                    command_id=task.command_id,
+                    model=ModelId(task.task_params.model),
+                    payload="music_edit_source",
+                    kind="chunk",
+                    image_index=0,
+                    sequence=1,
+                    total_chunks=1,
+                    data=original,
+                ),
+                VisionMediaPacket(
+                    source_node=task.owner_node,
+                    target_node=NodeId("node-0"),
+                    command_id=task.command_id,
+                    model=ModelId(task.task_params.model),
+                    payload="music_edit_source",
+                    kind="completed",
+                    sequence=2,
+                    total_chunks=1,
+                    image_count=1,
+                    sha256=task.task_params.source.sha256,
+                ),
+            ):
+                await owner.receive_input(packet)
+        assert task.command_id in owner.ready_commands()
+        directory = music_result_directory(root, task.command_id)
+        prepare_result_directory(directory, parents(root))
+        write_private(directory / "result.wav", data)
+        assert owner.register_output(
+            task.command_id, task.owner_node, str(task.task_params.model), manifest
+        )
+        if terminal == "removed":
+            snapshot = snapshot.model_copy(update={"tasks": {}})
+        else:
+            snapshot = snapshot.model_copy(
+                update={
+                    "tasks": {
+                        task.task_id: task.model_copy(
+                            update={
+                                "task_status": {
+                                    "complete": TaskStatus.Complete,
+                                    "cancelled": TaskStatus.Cancelled,
+                                    "failed": TaskStatus.Failed,
+                                }[terminal]
+                            }
+                        )
+                    }
+                }
+            )
+        # Terminal DATA cleanup can remove execution before the independent sender's
+        # first scheduling/verification step. No timing race or native model is needed.
+        await owner.reconcile()
+        assert directory.exists() and owner.owns(task.command_id)
+        await owner.outputs.deliver(task.command_id)
+        if terminal in ("removed", "complete"):
+            assert retained == [data] and not failure
+        else:
+            assert failure and not retained and not sent
+        assert not owner.outputs.pending(task.command_id) and not directory.exists()
+        await owner.reconcile()
+        assert not owner.owns(task.command_id)
+    finally:
+        fence.close()
+        await owner.detach()
+        if isinstance(store, MusicEditMediaStore):
+            store.close()

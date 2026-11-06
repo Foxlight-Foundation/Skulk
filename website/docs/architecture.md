@@ -4378,7 +4378,12 @@ private roots, inherited source-reader fence and required live resource guard
 for local spawning. Its unloaded wrapper resolves complete installed source
 groups only at `LoadModel`, after ordinary downloads, and requires the primary
 installation to match the exact card. Source resolution and native loading
-share one bounded cancellation/deadline budget. The actual native process and
+share one bounded cancellation/deadline budget.
+Worker load preflight uses that same recorded primary-source resolver off the
+event loop, accepting a verified installed generation without requiring a
+generic normalized-name alias. Missing or stale primary records refuse dispatch;
+deferred loading still resolves and verifies the entire source group.
+The native process and
 its guardian inherit the existing reader lock; closing Core's duplicate cannot
 release files while those descendants still run. Close permanently retires a
 wrapper and retains failed cleanup for retry; the runner must create a fresh
@@ -4478,6 +4483,10 @@ The native result producer verifies complete PCM24 stereo 48 kHz WAVs, then send
 bounded `music` or `music_edit` frames. Reverse acknowledgements must match the
 owner, model, role and an emitted terminal. Even a synchronous same-node ACK
 cannot remove files before the sender returns. Failed cleanup keeps its slot.
+The API may retire execution after terminal DATA while addressed WAV delivery
+is still pending. Removing that completed task does not cancel a registered
+result's independent bounded media custody; explicit failure, cancellation and
+verified reverse control still do.
 This path preserves the existing audio.cpp, speech and separation contracts.
 
 `NativeMusicHostGuard` is the spawn-safe outer callback: immutable admitted
