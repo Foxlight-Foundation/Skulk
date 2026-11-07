@@ -96,7 +96,10 @@ class AceStepWheel(FrozenModel):
         """Keep filename, storage policy and actually assembled targets together."""
         if (
             self.filename
-            != f"skulk_ace_step_{self.variant}-0.1.0-cp312-cp312-{self.platform_tag}.whl"
+            not in {
+                f"skulk_ace_step_{self.variant}-0.1.0{build}-cp312-cp312-{self.platform_tag}.whl"
+                for build in ("", "-1")
+            }
             or self.size_bytes > native_package_limits(self.variant).package_bytes
             or self.variant == "cpu"
             and self.platform_tag == "linux_x86_64"

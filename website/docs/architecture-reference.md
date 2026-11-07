@@ -2986,6 +2986,11 @@ the original indexed owner, including companions reached through a cached base.
   workspace from total device capacity or patch a global upstream class.
   Decode and the live allocation guard remain separate and unchanged. Exact
   new-package long-edit memory/fidelity qualification is still required.
+- Package revisions: native ACE wheel build tag `1`, matching `Build: 1` WHEEL
+  metadata and distinct immutable filenames. Reader accepts the original
+  untagged rollback objects and the exact next build; fixed inventory hashes
+  select bytes. Workflow consumes descriptor filenames and runs on inventory
+  updates. Existing channel objects must never be overwritten.
 - Native failure: permanent model retirement, bounded terminal frame, dedicated
   group kill even after BrokenPipe, parent-death guardian, cleanup only after
   owner drain. Module observations do not establish every operator's precision;

@@ -2926,6 +2926,12 @@ codec computation, other handlers, decode policy and the live allocation guard
 are unchanged. The bound is not evidence of long-edit memory fit or fidelity;
 qualify the exact new native payload before making that claim.
 
+The revised ACE producer emits wheel build tag `1` with matching WHEEL metadata,
+retaining the original untagged objects for rollback. The Core reader accepts
+both closed identities; fixed inventory still owns exact hashes. CI consumes
+descriptor filenames and triggers on inventory updates. A new digest must never
+reuse a published filename with different bytes.
+
 Build-time `producer_tests/` and `pyrightconfig.build.json` run with Core Python
 3.13. Native checks use `runtime_checks/check_*.py`, installed-only
 `verify_runtime.py`, and the separate Python 3.12 typing project. The ACE boundary

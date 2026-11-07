@@ -1,12 +1,39 @@
 """Fixed ABI/profile coverage is distinct from executed hardware/model support."""
 
 import pytest
+from pydantic import ValidationError
 
 from skulk.provisioning.ace_step_inventory import (
     ACE_STEP_PACKAGES,
     select_ace_step_package,
 )
+from skulk.provisioning.ace_step_runtime import AceStepWheel
 from skulk.shared.types.native_music import NativeMusicDevice
+
+
+@pytest.mark.parametrize("package", ACE_STEP_PACKAGES)
+@pytest.mark.parametrize("build", ("", "-1"))
+def test_reader_accepts_distinct_current_and_rollback_names(
+    package: AceStepWheel, build: str
+) -> None:
+    """Revised archives cannot collide with the retained original object names."""
+    filename = (
+        f"skulk_ace_step_{package.variant}-0.1.0{build}"
+        f"-cp312-cp312-{package.platform_tag}.whl"
+    )
+    selected = AceStepWheel.model_validate(
+        package.model_dump() | {"filename": filename}
+    )
+    assert selected.url == "https://wheels.foxlight.ai/wheels/" + filename
+
+
+@pytest.mark.parametrize("build", ("-0", "-2", "-1foreign", "-../1"))
+def test_reader_rejects_unimplemented_build_identities(build: str) -> None:
+    """Accepting the next fixed build does not open arbitrary archive names."""
+    package = ACE_STEP_PACKAGES[0]
+    filename = f"skulk_ace_step_cpu-0.1.0{build}-cp312-cp312-macosx_14_0_arm64.whl"
+    with pytest.raises(ValidationError, match="built-in profile"):
+        AceStepWheel.model_validate(package.model_dump() | {"filename": filename})
 
 
 def test_exact_inventory_covers_all_six_built_dependency_profiles() -> None:

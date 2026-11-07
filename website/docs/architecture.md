@@ -4384,6 +4384,11 @@ the class, other handlers, decode policy and live allocation guard are unchanged
 Long-edit memory fit and fidelity require execution against the exact new
 package payload; bounded encoding alone grants no support qualification.
 
+Revised native ACE archives use wheel build tag `1` and matching WHEEL metadata,
+so the fixed package channel retains distinct immutable names for both the
+revision and original untagged rollback packages. Exact inventory hashes select
+bytes; package availability still does not advertise ready model capacity.
+
 Any native request/protocol failure retires the model. A cooperative upstream
 timeout can leave an inference thread active, so the CLI terminates its dedicated
 process group even when the control pipe has closed. Parent loss also terminates
