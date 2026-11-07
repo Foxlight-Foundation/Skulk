@@ -4489,8 +4489,15 @@ resource publication uses the owned native process's existing memory frames.
 The separate `live_resource_guard` package feature binds the admitted
 `NativeMusicMemoryBudget` into the actual native process. A synchronous sample
 must pass before loading begins. The observer continues every half-second while
-loading, generating and idle, measuring the native leader's RSS, Torch reserved
-device allocation (MPS driver allocation on Metal), and raw physical capacity.
+loading, generating and idle, measuring the native leader's RSS, CUDA Torch
+reserved allocation, MPS driver allocation on Metal, ROCm process-owned DRM
+buffer totals, and raw physical capacity. ROCm binds its actual HIP device zero
+to kernel PCI/client identities and counts every requested memory region,
+including driver workspaces and nonresident buffers. Duplicate descriptors use
+conservative per-region maxima for one client; distinct clients remain counted.
+Incomplete or ambiguous sensing fails closed. This independent allocation
+query avoids the Torch allocator-statistics lock during decoder convolution;
+allocation ceilings and heartbeat deadlines are unchanged.
 The same portable fit policy is used by Core and the isolated process. Admission
 normalizes pressure headroom once before reservations: up to 512 MiB for host
 and shared memory and 256 MiB for the device, capped at 5% of each small pool.

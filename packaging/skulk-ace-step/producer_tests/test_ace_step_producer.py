@@ -281,7 +281,7 @@ class NativeProducerTests(unittest.TestCase):
         """The sealed object has no timestamps, local paths or unresolved developer links."""
         first, second = self.build("first"), self.build("second")
         self.assertEqual(first.read_bytes(), second.read_bytes())
-        self.assertEqual(parse_wheel_filename(first.name)[2], (2, ""))
+        self.assertEqual(parse_wheel_filename(first.name)[2], (3, ""))
         self.assertNotEqual(
             first.name,
             "skulk_ace_step_cpu-0.1.0-cp312-cp312-macosx_14_0_arm64.whl",
@@ -290,12 +290,17 @@ class NativeProducerTests(unittest.TestCase):
             first.name,
             "skulk_ace_step_cpu-0.1.0-1-cp312-cp312-macosx_14_0_arm64.whl",
         )
+        self.assertNotEqual(
+            first.name,
+            "skulk_ace_step_cpu-0.1.0-2-cp312-cp312-macosx_14_0_arm64.whl",
+        )
         with zipfile.ZipFile(first) as archive:
             self.assertIn(
-                b"\nBuild: 2\n",
+                b"\nBuild: 3\n",
                 archive.read("skulk_ace_step_cpu-0.1.0.dist-info/WHEEL"),
             )
             self.assertIn("skulk_ace_step/resources.py", archive.namelist())
+            self.assertIn("skulk_ace_step/rocm_memory.py", archive.namelist())
             for name in ("contracts.py", "audio_separation.py"):
                 info = archive.getinfo("skulk_ace_step/" + name)
                 self.assertTrue(stat.S_ISREG(info.external_attr >> 16))

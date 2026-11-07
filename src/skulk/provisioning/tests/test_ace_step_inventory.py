@@ -12,7 +12,7 @@ from skulk.shared.types.native_music import NativeMusicDevice
 
 
 @pytest.mark.parametrize("package", ACE_STEP_PACKAGES)
-@pytest.mark.parametrize("build", ("", "-1", "-2"))
+@pytest.mark.parametrize("build", ("", "-1", "-2", "-3"))
 def test_reader_accepts_distinct_current_and_rollback_names(
     package: AceStepWheel, build: str
 ) -> None:
@@ -27,7 +27,7 @@ def test_reader_accepts_distinct_current_and_rollback_names(
     assert selected.url == "https://wheels.foxlight.ai/wheels/" + filename
 
 
-@pytest.mark.parametrize("build", ("-0", "-3", "-1foreign", "-../1"))
+@pytest.mark.parametrize("build", ("-0", "-4", "-1foreign", "-../1"))
 def test_reader_rejects_unimplemented_build_identities(build: str) -> None:
     """Accepting the next fixed build does not open arbitrary archive names."""
     package = ACE_STEP_PACKAGES[0]

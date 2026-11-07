@@ -3060,8 +3060,13 @@ the original indexed owner, including companions reached through a cached base.
   `native_music_admission_capacity`: host/shared up to 512 MiB, device up to
   256 MiB, each capped at 5% of small totals.
 - Native `live_resource_guard`: required cache feature. Before load and every
-  0.5 seconds, sample own RSS, Torch reserved/MPS driver allocation and actual
-  host/device/shared availability. Enforce allocation ceilings and pressure;
+  0.5 seconds, sample own RSS, CUDA Torch reserved/MPS driver allocation, ROCm
+  process-owned DRM requested-buffer totals, and actual host/device/shared
+  availability. ROCm maps actual HIP device zero through its already loaded
+  runtime to PCI/client identity; count all memory regions, deduplicate alias
+  descriptors by conservative regional maxima, and fail closed on incomplete
+  identity/accounting. Avoid the inference allocator-statistics mutex without
+  changing ceilings or heartbeat deadlines. Enforce allocation ceilings and pressure;
   do not double-charge resident workspace or credit RSS as exclusive pages.
   Unified RSS uses simultaneous phase ceiling; unique physical peaks require
   qualification. Sensing/egress failure retires the private native group even

@@ -22,6 +22,7 @@ from .contracts import (
     native_music_memory_budget_error,
 )
 from .lifetime import terminate_owned_group
+from .rocm_memory import rocm_allocated_bytes
 
 
 class _ResidentMemory(Protocol):
@@ -68,8 +69,10 @@ def sample_music_memory(
     allocated = (
         torch.mps.driver_allocated_memory()
         if configuration.device == "mps"
+        else rocm_allocated_bytes()
+        if configuration.device == "rocm"
         else torch.cuda.memory_reserved(0)
-        if configuration.device in ("cuda", "rocm")
+        if configuration.device == "cuda"
         else 0
     )
     return NativeMusicMemoryObservation(

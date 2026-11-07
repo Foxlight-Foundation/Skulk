@@ -116,11 +116,23 @@ its sound output.
 Production serving additionally requires `live_resource_guard` and the private
 configuration's admitted `NativeMusicMemoryBudget`. The native observer samples
 before loading and every half-second during load, inference and idle residency.
-It checks actual process RSS, Torch reserved device/MPS driver allocations and
-host/device/shared pressure. Core and native use the same fit and normalized
+It checks actual process RSS, CUDA Torch reserved/Metal driver allocations,
+ROCm process-owned DRM buffer totals, and host/device/shared pressure.
+ROCm resolves runtime-visible device zero through its already loaded HIP
+dependency and matches that PCI address against its own kernel DRM clients.
+Requested buffers include driver workspaces, evicted storage and CPU regions;
+duplicated descriptors are counted once per client, using conservative regional
+maxima across alias-read races. Missing or ambiguous accounting fails closed.
+The sampler does not enter Torch's allocator-statistics mutex, which can block
+during decoder convolution. Allocation ceilings and heartbeat deadlines remain
+unchanged. Core and native use the same fit and normalized
 pressure floors; loaded allocations are not repeatedly charged as unallocated
 workspace. RSS is not an exclusive allocation or unique shared-page credit.
 Real model peaks still need workload qualification.
+
+The allocation parser follows the kernel's
+[DRM client accounting contract](https://docs.kernel.org/gpu/drm-usage-stats.html).
+It never substitutes system-wide GPU utilization or another process's counters.
 
 Sensing or egress failure retires only this private process group, even if
 stderr is closed. Core independently checks a bounded latest-value memory frame,
