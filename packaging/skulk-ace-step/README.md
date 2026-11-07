@@ -187,6 +187,16 @@ native source processor and compares its complete tensor with those exact
 canonical samples. Completion binds original and conditioning digests plus the
 conditioning gain. Generation cannot contain source context.
 
+Before readiness, the adapter bounds that loaded handler's `tiled_encode` to
+15-second / 720,000-sample windows with the pinned 2-second overlap-discard
+algorithm. Upstream otherwise chooses 30 seconds from total GPU capacity,
+independently of this instance's admitted workspace. Shorter explicit windows
+survive; codec math, full context, sample clock and short seeded encoding remain
+upstream behavior. No upstream class/module or caller options are changed.
+Decode has its separate existing policy. The live resource guard remains
+enabled; this encoding bound alone does not establish long-edit memory fit,
+musical quality or qualification for a new package payload.
+
 The wrapper owns `result.wav` and `result.json`, written exclusively with 0600
 permissions under the request's private directory. Results are native-rate
 stereo PCM24 WAV, capped at 120 seconds and 64 MiB; edited results must have the

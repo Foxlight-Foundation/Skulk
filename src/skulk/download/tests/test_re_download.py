@@ -998,7 +998,9 @@ async def test_file_valued_default_cache_download_can_be_deleted(
             ),
         ))
         with anyio.fail_after(2):
-            while output.exists():
+            # Off-thread rmtree unlinks the leaf before removing its parents.
+            # Wait for the complete cache contract before asserting or shutdown.
+            while (cache / MODEL_ID.normalize()).exists():
                 await anyio.sleep(0.01)
         assert not (cache / MODEL_ID.normalize()).exists()
     finally:

@@ -4375,6 +4375,15 @@ the tail from that exact aligned extent or the decoder's 128-latent minimum
 (5.12 seconds) is removed after validating the whole tensor. Metadata records
 the removed frames; other length mismatches fail.
 
+Before readiness, the native adapter binds only that resident handler's source
+encoder to at most 15-second windows (720,000 samples), retaining the pinned
+2-second overlap-discard algorithm and any shorter explicit window. This avoids
+upstream's 30-second choice based on total GPU capacity rather than the admitted
+instance workspace. Codec computation and the full source clock stay upstream;
+the class, other handlers, decode policy and live allocation guard are unchanged.
+Long-edit memory fit and fidelity require execution against the exact new
+package payload; bounded encoding alone grants no support qualification.
+
 Any native request/protocol failure retires the model. A cooperative upstream
 timeout can leave an inference thread active, so the CLI terminates its dedicated
 process group even when the control pipe has closed. Parent loss also terminates

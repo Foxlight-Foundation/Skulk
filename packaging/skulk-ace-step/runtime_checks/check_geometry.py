@@ -25,7 +25,11 @@ from skulk_ace_step.bindings import soundfile
 from skulk_ace_step.contracts import NativeMusicRequest, NativeMusicResult
 from skulk_ace_step.generation import result_samples
 from skulk_ace_step.media import export_result, prepare_conditioning, write_conditioning
-from skulk_ace_step.upstream_bindings import native_api, tensor_samples
+from skulk_ace_step.upstream_bindings import (
+    install_bounded_source_encoding,
+    native_api,
+    tensor_samples,
+)
 
 # Bind the three inspected methods on the untyped library to the callable
 # signatures below. These method identities belong to the pinned source.
@@ -179,6 +183,7 @@ class NativeGeometryTests(unittest.TestCase):
             for parameter in codec.parameters():
                 parameter.fill_(0.01)
         handler.vae = codec
+        install_bounded_source_encoding(handler)
         prepare_targets = cast(
             PrepareTargets,
             cast(object, getattr(handler, _TARGET_PREPARATION_METHOD)),

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import check_support
 import check_weights
+import torch
 from skulk_ace_step.contracts import NativeMusicProgress
 from skulk_ace_step.engine import load_music
 from skulk_ace_step.upstream_bindings import NativeAPI, native_api
@@ -102,6 +103,36 @@ class NativeLoadingTests(unittest.TestCase):
             self.invoke()
         self.assertEqual(self.imports, 0)
         self.assertFalse((Path(self.config.directory) / "ready.json").exists())
+
+    def test_successful_loaded_handler_is_bounded_before_returning_ready(self) -> None:
+        """The production loader installs per-instance policy after initialization."""
+        api = native_api()
+        handler = api.handler()
+        original = handler.tiled_encode
+        handler.model = torch.nn.Linear(1, 1)
+        handler.text_encoder = torch.nn.Linear(1, 1)
+        handler.vae = torch.nn.Linear(1, 1)
+        with (
+            patch.dict(os.environ),
+            patch.object(
+                handler, "initialize_service", return_value=("fixture loaded", True)
+            ) as initialize,
+        ):
+            resident = load_music(
+                self.config,
+                "b" * 64,
+                self.progress.append,
+                runtime_root=self.fixture.runtime,
+                code=self.fixture.code,
+                api_loader=lambda: NativeAPI(
+                    handler=lambda: handler,
+                    constructors=api.constructors,
+                    generate=api.generate,
+                ),
+            )
+        initialize.assert_called_once()
+        self.assertEqual(resident.ready.execution.device, "cpu")
+        self.assertNotEqual(handler.tiled_encode, original)
 
     def test_real_initializer_admits_verified_view_through_a_parent_path_alias(
         self,

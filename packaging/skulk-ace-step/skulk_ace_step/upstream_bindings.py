@@ -10,7 +10,7 @@ from __future__ import annotations
 import importlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, Protocol, cast
+from typing import Final, Literal, Protocol, cast, final
 
 import numpy as np
 import numpy.typing as npt
@@ -35,6 +35,20 @@ class SourceProcessor(Protocol):
 
     def __call__(self, audio_file: str | None) -> torch.Tensor | None:
         """Decode and normalize the actual source supplied to native inference."""
+        ...
+
+
+class SourceEncoder(Protocol):
+    """Pinned overlap-discard encoder, with sample-domain chunk arguments."""
+
+    def __call__(
+        self,
+        audio: torch.Tensor,
+        chunk_size: int | None = None,
+        overlap: int | None = None,
+        offload_latent_to_cpu: bool = True,
+    ) -> torch.Tensor:
+        """Encode the complete source while retaining its native latent clock."""
         ...
 
 
@@ -65,6 +79,7 @@ class LoadedHandler(NativeHandler, Protocol):
     use_mlx_dit: bool
     use_mlx_vae: bool
     process_src_audio: SourceProcessor
+    tiled_encode: SourceEncoder
 
     def initialize_service(
         self,
@@ -93,6 +108,49 @@ class HandlerFactory(Protocol):
 
 
 _MODEL_ACQUISITION_HOOK: Final = "_ensure_models_present"
+_MAXIMUM_ENCODING_FRAMES: Final = 15 * 48000
+_ENCODING_OVERLAP_FRAMES: Final = 2 * 48000
+
+
+@final
+@dataclass(frozen=True)
+class _BoundedSourceEncoder:
+    original: SourceEncoder
+
+    def __call__(
+        self,
+        audio: torch.Tensor,
+        chunk_size: int | None = None,
+        overlap: int | None = None,
+        offload_latent_to_cpu: bool = True,
+    ) -> torch.Tensor:
+        # Upstream selects 30s from total GPU capacity, independently of this
+        # instance's admitted workspace. Its existing 15s overlap-discard path
+        # bounds each encode without replacing codec math or dropping context.
+        bounded_chunk = (
+            _MAXIMUM_ENCODING_FRAMES
+            if chunk_size is None
+            else min(chunk_size, _MAXIMUM_ENCODING_FRAMES)
+        )
+        return self.original(
+            audio,
+            chunk_size=bounded_chunk,
+            overlap=_ENCODING_OVERLAP_FRAMES if overlap is None else overlap,
+            offload_latent_to_cpu=offload_latent_to_cpu,
+        )
+
+
+def install_bounded_source_encoding(handler: LoadedHandler) -> None:
+    """Bound this loaded handler's encoding to 15s with native 2s overlap.
+
+    Shorter explicit chunks and explicit overlap/offload arguments survive.
+    The original pinned callable still owns codec execution and geometry. This
+    changes one resident handler only; no upstream class or module is patched.
+    Decode and the admitted live resource guard retain their separate policies.
+    """
+    if handler.sample_rate != 48000:
+        raise ValueError("native music encoding requires the pinned 48kHz clock")
+    handler.tiled_encode = _BoundedSourceEncoder(handler.tiled_encode)
 
 
 def install_offline_precheck(handler: LoadedHandler, precheck: ModelPrecheck) -> None:
