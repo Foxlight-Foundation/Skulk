@@ -95,6 +95,7 @@ from skulk.worker.runner.image_models.output import is_primary_image_output_node
 
 _TRACE_ROUTE_CAPACITY = 256
 _TRACE_ROUTE_TTL_SECONDS = 5 * 60.0
+_NATIVE_FAILURE_MESSAGE_MAX_CHARS = 1024
 
 PREFILL_TIMEOUT_SECONDS = 60
 DECODE_TIMEOUT_SECONDS = 5
@@ -781,6 +782,11 @@ class RunnerSupervisor:
             await self._check_runner(TimeoutError("cancel pipe blocked"))
 
     async def _forward_events(self):
+        # The runner pipe orders its public error before terminal status, but
+        # DATA and indexed control delivery may reorder after this boundary.
+        # Retain only active native task diagnostics until their final status
+        # so one ordered event carries both the failure and its bounded cause.
+        native_failure_messages: dict[TaskId, str] = {}
         try:
             with self._ev_recv as events:
                 async for event in events:
@@ -802,6 +808,23 @@ class RunnerSupervisor:
                             pending.set()
                         self._record_milestone("task_acknowledged", str(event.task_id))
                         continue
+                    if (
+                        isinstance(event, ChunkGenerated)
+                        and isinstance(event.chunk, ErrorChunk)
+                        and event.chunk.error_message
+                    ):
+                        for task in self.in_progress.values():
+                            if (
+                                isinstance(task, (MusicEditing, AudioSeparation))
+                                and task.command_id == event.command_id
+                            ):
+                                native_failure_messages.setdefault(
+                                    task.task_id,
+                                    event.chunk.error_message[
+                                        :_NATIVE_FAILURE_MESSAGE_MAX_CHARS
+                                    ],
+                                )
+                                break
                     if (
                         isinstance(event, TaskStatusUpdated)
                         and event.task_status in _TERMINAL_TASK_STATUSES
@@ -833,6 +856,9 @@ class RunnerSupervisor:
                         # task->command mapping. This covers no-payload completion,
                         # cancellation, failure, and timeout paths.
                         ending_task = self.in_progress.get(event.task_id)
+                        native_failure_message = native_failure_messages.pop(
+                            event.task_id, None
+                        )
                         if isinstance(
                             ending_task,
                             (
@@ -865,7 +891,20 @@ class RunnerSupervisor:
                                 "task_terminal",
                                 f"{event.task_status.value}:{event.task_id}",
                             )
-                        await self._event_sender.send(event)
+                        if (
+                            isinstance(ending_task, (MusicEditing, AudioSeparation))
+                            and event.task_status == TaskStatus.Failed
+                            and native_failure_message is not None
+                        ):
+                            await self._event_sender.send(
+                                TaskFailed(
+                                    task_id=event.task_id,
+                                    error_type="native_execution_failed",
+                                    error_message=native_failure_message,
+                                )
+                            )
+                        else:
+                            await self._event_sender.send(event)
                         if event.task_status == TaskStatus.Cancelled:
                             # Cancelled tasks need an explicit event-sourced delete
                             # because local API cleanup suppresses TaskFinished

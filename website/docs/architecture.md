@@ -1404,6 +1404,14 @@ bound execution policy. Master-local reservations span consecutive commands
 until indexed task creation applies; the applied task then holds that capacity.
 One model runs one separation at a time.
 
+For native editing and separation failures, the runner supervisor retains the
+public error from its ordered local runner pipe until the final failed status.
+It forwards one existing `TaskFailed` event with the diagnostic bounded to 1,024
+characters. The owning API can therefore settle the same failure even when
+indexed control arrives before DATA; delayed DATA cannot replace that terminal
+receipt. Cancellation, timeout and diagnostic-free failures retain their existing
+terminal handling.
+
 `shared/models/separation_runtime.py` resolves the implemented exact tensor and
 constructor by artifact identity, not repository name or tested hardware. A
 mirror with identical weights is still compatible. `demucs-{cpu,metal,cuda,rocm}`

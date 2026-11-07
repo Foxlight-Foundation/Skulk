@@ -2388,7 +2388,8 @@ conditioning gain/padding, render latency and WAV geometry/size/SHA-256/peak.
 Paths and raw audio bytes are excluded. A missing node-local job returns **404**.
 
 Failed jobs retain the available placement or native error in `error`, bounded
-to 1,024 characters. When all matching native instances are busy, the job fails
+to 1,024 characters, including when final task status arrives before its DATA
+error frame. When all matching native instances are busy, the job fails
 with the idle-capacity reason and `output: null`. Callers can submit a new request
 after capacity returns. A **202** response confirms the job receipt; it does not
 reserve a busy model or promise queued inference.
