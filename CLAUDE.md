@@ -2759,7 +2759,11 @@ fence. This is not an engine plugin ABI or ready-backend registration.
 
 The native ACE workflow keeps current-source checks separate from explicit
 `build-inventory` reproduction of `ACE_STEP_ADAPTER_REVISION` and all six fixed
-archives. The adapter Git revision participates in payload identity. Publication
+archives. The adapter Git revision participates in payload identity. Installed
+boundary tests use the exact invoking workflow revision, with a separate sparse
+validation checkout moved outside the clean pinned producer in `build-inventory`
+mode. Candidate `validation-source.json` records both revisions; test-fixture
+repairs do not alter package bytes or replace installed native modules. Publication
 uses a successful same-workflow/repository/source candidate, verifies all six
 fixed sizes/digests with `scripts/verify_ace_step_promotion.py` and hosted
 attestations, requires initiative-merged source, and invokes the shared append-only

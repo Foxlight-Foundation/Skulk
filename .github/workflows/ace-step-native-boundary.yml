@@ -215,6 +215,31 @@ jobs:
           package_sha=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["sha256"])')
           filename=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["filename"])')
           "$PACKAGE_ROOT/tools/bin/python" -B scripts/stage_ace_step_candidate.py --wheel "$PACKAGE_ROOT/first/$filename" --sha256 "$package_sha" --variant '${{ matrix.variant }}' --output "$PACKAGE_ROOT/installed"
+      - name: Check out the invoking revision's installed boundary tests
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'build-inventory'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .native-ace-validation
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /packaging/skulk-ace-step/verify_runtime.py
+            /packaging/skulk-ace-step/runtime_checks/
+      - name: Separate current boundary validation from immutable package production
+        env:
+          VALIDATION_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          validation_root="$PWD/packaging/skulk-ace-step"
+          if [[ -d .native-ace-validation ]]; then
+            test "$(git -C .native-ace-validation rev-parse HEAD)" = "$VALIDATION_REVISION"
+            # Test-fixture repairs must not change the sealed producer revision.
+            mv .native-ace-validation "$PACKAGE_ROOT/validation-source"
+            validation_root="$PACKAGE_ROOT/validation-source/packaging/skulk-ace-step"
+          fi
+          test -z "$(git status --porcelain)"
+          printf 'ACE_RUNTIME_CHECK_ROOT=%s\n' "$validation_root" >> "$GITHUB_ENV"
+          python3 -c 'import json,os,subprocess; from pathlib import Path; root=Path(os.environ["PACKAGE_ROOT"]); (root/"validation-source.json").write_text(json.dumps({"workflow_revision":os.environ["VALIDATION_REVISION"],"producer_revision":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()})+"\n")'
       - name: Check native typing and execute installed boundary suite
         env:
           HF_HUB_OFFLINE: '1'
@@ -223,7 +248,7 @@ jobs:
           PYTORCH_ENABLE_MPS_FALLBACK: '0'
         run: |
           "$PACKAGE_ROOT/tools/bin/basedpyright" --project packaging/skulk-ace-step/pyrightconfig.json --pythonpath "$PACKAGE_ROOT/installed/runtime/bin/python"
-          "$PACKAGE_ROOT/installed/runtime/bin/python" -I -B packaging/skulk-ace-step/verify_runtime.py --variant '${{ matrix.variant }}' > "$PACKAGE_ROOT/native-verification.json"
+          "$PACKAGE_ROOT/installed/runtime/bin/python" -I -B "$ACE_RUNTIME_CHECK_ROOT/verify_runtime.py" --variant '${{ matrix.variant }}' > "$PACKAGE_ROOT/native-verification.json"
       - name: Retain exact installed dependency observations
         if: always()
         run: |
@@ -248,6 +273,7 @@ jobs:
             ${{ env.PACKAGE_ROOT }}/installer-diagnostics/**/*.log
             ${{ env.PACKAGE_ROOT }}/native-dependencies.txt
             ${{ env.PACKAGE_ROOT }}/native-verification.json
+            ${{ env.PACKAGE_ROOT }}/validation-source.json
             ${{ env.PACKAGE_ROOT }}/second-build.json
             ${{ env.PACKAGE_ROOT }}/metapackage-build/provenance.json
 

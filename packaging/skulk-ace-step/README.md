@@ -290,10 +290,18 @@ the fixed inventory. This distinction matters: `adapter_revision` is part of the
 sealed payload identity, so a newer Core commit produces different archive bytes
 even when the native module files are unchanged.
 
-The revised adapter uses wheel build tag `1`: for example,
-`skulk_ace_step_cpu-0.1.0-1-cp312-cp312-macosx_14_0_arm64.whl`.
-Its WHEEL metadata carries `Build: 1`; the distribution version remains `0.1.0`.
-The original untagged packages remain immutable and readable for rollback.
+Installed boundary tests come from the exact revision invoking the workflow.
+In `build-inventory` mode, that validation checkout is separate from the pinned
+producer and is moved outside it before execution. The original producer must
+remain clean. The candidate retains both workflow and producer revisions in
+`validation-source.json`. This permits test-fixture repairs to exercise the same
+immutable package bytes; it does not substitute current source for installed
+engine modules or waive any verification or attestation.
+
+The current adapter uses wheel build tag `3`: for example,
+`skulk_ace_step_cpu-0.1.0-3-cp312-cp312-macosx_14_0_arm64.whl`.
+Its WHEEL metadata carries `Build: 3`; the distribution version remains `0.1.0`.
+Earlier packages remain immutable and readable for rollback.
 Future byte changes require another distinct build identity before publication;
 neither a new digest nor a rebuilt descriptor authorizes overwriting an old name.
 CI reads the producer's exact descriptor filename rather than reconstructing it.
