@@ -36,6 +36,7 @@ from .upstream_bindings import (
     LoadedHandler,
     NativeAPI,
     SourceProcessor,
+    install_bounded_source_encoding,
     install_offline_precheck,
     native_api,
     tensor_samples,
@@ -336,6 +337,7 @@ def load_music(
             "native music activated an unadmitted alternate MLX implementation"
         )
     execution = observe_execution(handler, configuration)
+    install_bounded_source_encoding(handler)
     ready = NativeMusicReady(
         model_identity=configuration.model_identity,
         payload_sha256=payload_sha256,

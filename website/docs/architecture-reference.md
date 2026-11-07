@@ -2979,6 +2979,13 @@ the original indexed owner, including companions reached through a cached base.
   Validate the entire decoder tensor before removing only the exact aligned
   tail or 128-latent/245,760-sample minimum. Record `padding_frames_removed`,
   preserve the requested frame count, reject all other mismatches.
+- Source encoding: after initialization and before readiness, a typed
+  per-handler `tiled_encode` binding caps windows at 720,000 samples / 15s with
+  the pinned 96,000-sample / 2s overlap-discard default. Preserve shorter
+  explicit chunks, codec computation and full context clock. Do not select
+  workspace from total device capacity or patch a global upstream class.
+  Decode and the live allocation guard remain separate and unchanged. Exact
+  new-package long-edit memory/fidelity qualification is still required.
 - Native failure: permanent model retirement, bounded terminal frame, dedicated
   group kill even after BrokenPipe, parent-death guardian, cleanup only after
   owner drain. Module observations do not establish every operator's precision;

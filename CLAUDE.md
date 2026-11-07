@@ -2918,6 +2918,14 @@ excludes Continue's intentional extension. Only that exact aligned extent or the
 `padding_frames_removed` retains the removal. Arbitrary length repair and
 generation cropping remain forbidden.
 
+After initialization and before Ready, the adapter installs a typed per-handler
+source encoder bounded to 15s / 720,000 samples with the pinned 2s overlap-discard
+default. Shorter explicit windows and complete context/latent clocks survive.
+This replaces upstream's capacity-derived 30s window for that instance only;
+codec computation, other handlers, decode policy and the live allocation guard
+are unchanged. The bound is not evidence of long-edit memory fit or fidelity;
+qualify the exact new native payload before making that claim.
+
 Build-time `producer_tests/` and `pyrightconfig.build.json` run with Core Python
 3.13. Native checks use `runtime_checks/check_*.py`, installed-only
 `verify_runtime.py`, and the separate Python 3.12 typing project. The ACE boundary
