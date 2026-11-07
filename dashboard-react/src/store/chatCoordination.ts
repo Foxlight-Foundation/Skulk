@@ -1,4 +1,6 @@
 import { canonicalContinuationJSON } from './chatContinuation';
+import { CHAT_DOCUMENT_STORE, openChatDatabase, putChatSnapshot } from './chatDatabase';
+import { retainChatEdits } from './chatRetainedEdits';
 
 /** Durable JSON fields; browser-only drafts and signing keys never enter this store. */
 export type ChatStorageObject = { [key: string]: unknown };
@@ -12,6 +14,18 @@ const owned = new Set<string>();
 let queue: Promise<unknown> = Promise.resolve();
 let unsaved: { before: ChatStorageObject; after: ChatStorageObject } | undefined;
 let unopenedChanges: ChatStorageChange[] = [];
+const pendingIntents = new Map<string, ChatStorageObject | undefined>();
+
+/** A stale conversation must be quarantined before independent work continues. */
+export class ChatStorageConflict extends Error {
+  readonly conversationId: string;
+  constructor(message: string, conversationId: string) { super(message); this.conversationId = conversationId; }
+}
+
+function changeConversation(change: ChatStorageChange): string | undefined {
+  if (change.path[0] === 'conversations') return change.path[1];
+  if (change.path[0] === 'modelToConversationId') return typeof change.after === 'string' ? change.after : typeof change.before === 'string' ? change.before : undefined;
+}
 
 function retainUnopenedChanges(changes: ChatStorageChange[]): void {
   for (const change of changes) {
@@ -49,17 +63,7 @@ export function readChatStorage(): ChatStorageObject {
 }
 
 async function historyDatabase(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    let failed = false;
-    const request = indexedDB.open('skulk-chat-history-v2', 1);
-    request.onupgradeneeded = () => { request.result.createObjectStore('snapshot'); };
-    request.onerror = request.onblocked = () => { failed = true; reject(new ChatStorageUnavailable('Conversation database is unavailable. Your draft was retained.')); };
-    request.onsuccess = () => {
-      if (failed) { request.result.close(); return; }
-      request.result.onversionchange = () => request.result.close();
-      resolve(request.result);
-    };
-  });
+  return openChatDatabase();
 }
 
 function storedRevision(value: unknown): number {
@@ -109,7 +113,7 @@ async function commitChatStorage(changes: ChatStorageChange[], pendingChanges: C
   let transactionStarted = false;
   try {
     return await new Promise((resolve, reject) => {
-      const transaction = database.transaction('snapshot', 'readwrite', { durability: 'strict' });
+      const transaction = database.transaction(['snapshot', CHAT_DOCUMENT_STORE], 'readwrite', { durability: 'strict' });
       transactionStarted = true;
       const store = transaction.objectStore('snapshot'), request = store.get('current');
       let current: ChatStorageObject | undefined, next: ChatStorageObject | undefined;
@@ -126,17 +130,18 @@ async function commitChatStorage(changes: ChatStorageChange[], pendingChanges: C
           next = applyChatStorageChanges(retained, changes);
           revision = storedRevision(encoded) + 1;
         } catch (error) { refusal = error; transaction.abort(); return; }
-        try { store.put({ state: next, version: 2, revision }, 'current'); }
+        try { putChatSnapshot(transaction, current, next, revision, error => { refusal = error; transaction.abort(); }); }
         catch { transaction.abort(); }
       };
       transaction.onabort = () => {
-        if (refusal !== undefined) { reject(refusal); return; }
+        if (refusal !== undefined) { if (retainOrdinaryEdits) retainUnopenedChanges(changes); reject(refusal); return; }
         if (retainOrdinaryEdits && current && next) { unsaved = { before: current, after: next }; unopenedChanges = []; }
         reject(new ChatStorageUnavailable('Could not save conversation history in this browser. Free browser storage and try again.'));
       };
       transaction.oncomplete = () => {
         unsaved = undefined;
         unopenedChanges = [];
+        pendingIntents.clear();
         // This mirror is optional. A quota failure cannot undo or misreport an
         // authoritative transaction, and legacy writers cannot replace it.
         try { localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({ state: next, version: 2, revision })); } catch { /* Hydrate from IndexedDB on next load. */ }
@@ -183,10 +188,13 @@ function getPath(state: ChatStorageObject, path: string[]): unknown {
 /** Refuse stale fields before changing anything; already-applied acknowledgments are idempotent. */
 export function applyChatStorageChanges(current: ChatStorageObject, changes: ChatStorageChange[]): ChatStorageObject {
   for (const change of changes) {
-    if (change.path[0] === 'conversations' && change.path.length > 2 && getPath(current, change.path.slice(0, 2)) === undefined) throw new Error('The conversation was deleted in another tab. Its history was not recreated.');
+    if (change.path[0] === 'conversations' && change.path.length > 2 && getPath(current, change.path.slice(0, 2)) === undefined) throw new ChatStorageConflict('The conversation was deleted in another tab. Its history was not recreated.', change.path[1]);
     const actual = getPath(current, change.path);
     if (!equal(actual, change.before) && !equal(actual, change.after) && change.path.at(-1) !== 'updatedAt') {
-      throw new Error('This conversation changed in another tab. Its saved history was preserved; review the refreshed conversation before sending.');
+      const message = 'This conversation changed in another tab. Its saved history was preserved; review the refreshed conversation before sending.';
+      const id = changeConversation(change);
+      if (id !== undefined) throw new ChatStorageConflict(message, id);
+      throw new Error(message);
     }
   }
   const next = structuredClone(current);
@@ -219,12 +227,58 @@ async function withConversationLocks<T>(ids: string[], work: () => Promise<T>): 
 }
 
 /** Serialize local writes and atomically merge fields, using shared locks where available. */
-export async function writeChatStorage(changes: ChatStorageChange[], retainOrdinaryEdits = false): Promise<ChatStorageObject> {
+export async function writeChatStorage(changes: ChatStorageChange[], retainOrdinaryEdits = false, localIntent?: ChatStorageObject): Promise<ChatStorageObject> {
   const pending = queue.catch(() => {}).then(async () => {
     const commit = async () => {
-      const pendingChanges = [...(unsaved ? chatStorageChanges(unsaved.before, unsaved.after) : []), ...unopenedChanges];
-      const ids = [...new Set([...pendingChanges, ...changes].filter(change => change.path[0] === 'conversations' && !(change.path.length === 3 && change.path[2] === 'updatedAt')).map(change => change.path[1]))].sort();
-      return withConversationLocks(ids, () => commitChatStorage(changes, pendingChanges, retainOrdinaryEdits));
+      const intent = new Map(pendingIntents);
+      if (retainOrdinaryEdits && localIntent) {
+        for (const change of changes) {
+          const id = changeConversation(change);
+          if (id !== undefined) {
+            const conversation = object(localIntent.conversations)[id];
+            intent.set(id, conversation === undefined ? undefined : object(conversation));
+          }
+        }
+      }
+      let remaining = changes;
+      for (;;) {
+        const pendingChanges = [...(unsaved ? chatStorageChanges(unsaved.before, unsaved.after) : []), ...unopenedChanges];
+        const ids = [...new Set([...pendingChanges, ...remaining].filter(change => change.path[0] === 'conversations' && !(change.path.length === 3 && change.path[2] === 'updatedAt')).map(change => change.path[1]))].sort();
+        let started = false;
+        try {
+          const result = await withConversationLocks(ids, () => { started = true; return commitChatStorage(remaining, pendingChanges, retainOrdinaryEdits); });
+          return result;
+        } catch (error) {
+          if (error instanceof ChatStorageConflict && intent.has(error.conversationId)) {
+            // A message/attempt/receipt writer needs acknowledgement of its
+            // exact mutation. Quarantining an earlier ordinary edit cannot
+            // acknowledge a new conflicting mutation that was never committed.
+            if (!retainOrdinaryEdits && remaining.some(change => changeConversation(change) === error.conversationId)) throw error;
+            // Publish custody before dropping any failed CAS. If this write
+            // cannot commit, the pending intent stays in this tab unchanged.
+            try { await retainChatEdits(new Map([[error.conversationId, intent.get(error.conversationId)]])); }
+            catch (storageError) {
+              if (retainOrdinaryEdits) {
+                for (const [id, conversation] of intent) pendingIntents.set(id, conversation);
+                retainUnopenedChanges(remaining);
+              }
+              throw storageError;
+            }
+            const independent = (change: ChatStorageChange) => changeConversation(change) !== error.conversationId;
+            unopenedChanges = pendingChanges.filter(independent);
+            unsaved = undefined;
+            pendingIntents.delete(error.conversationId);
+            intent.delete(error.conversationId);
+            remaining = remaining.filter(independent);
+            continue;
+          }
+          if (retainOrdinaryEdits) {
+            for (const [id, conversation] of intent) pendingIntents.set(id, conversation);
+            if (!started) retainUnopenedChanges(remaining);
+          }
+          throw error;
+        }
+      }
     };
     // IndexedDB transactions still serialize ordinary HTTP clients. Shared
     // long-lived writer ownership is available only in secure browser contexts.

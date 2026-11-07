@@ -21,6 +21,10 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   `/v1/chat/continuation/receipt` uses a distinct signed lookup domain and empty
   provider input. Semantic receipts require transport completion before HTTP
   publication. No inference retry, implicit new context or destination migration.
+  Receipt half-close/collection/cleanup transport failures become fixed 503
+  uncertainty, under a 30-second lookup deadline. Iterator close and provider
+  cancellation each have a three-second cleanup bound; cancellation is attempted
+  even if iterator close fails. Caller task cancellation is not converted to 503.
   Streaming is bounded per frame; collected JSON alone has an aggregate guard.
   `dashboard-react/src/store/chatContinuation.ts` owns nonextractable Ed25519
   browser keys in IndexedDB, canonical client proofs and public fingerprints.
@@ -50,6 +54,24 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   refreshed public history under writer ownership before persisting a receipt.
   Durable metadata adoption preserves transient fields for unchanged messages
   in the same model. Withdrawal retains reset/recovery UI.
+
+  `store/chatDatabase.ts` opens schema version two with `snapshot`, `documents`
+  and `recoveries` stores. A durable migration cursor copies legacy blobs one
+  at a time before old-store retirement; CAS progress prevents concurrent
+  migration rollback or post-GC resurrection. History publication validates and
+  claims new blob references in the same transaction. Document collection reads
+  canonical and retained references under its deletion transaction, preserves
+  unexpired foreign staging, and aborts on uninterpretable references. Unused
+  staging expires after 24 hours. Older schema-one writers refuse writes.
+
+  `store/chatRetainedEdits.ts` owns at most 64 explicit-resolution records.
+  `writeChatStorage` receives complete ordinary local intent, durably quarantines
+  conflicting conversations, then admits independent edits. Failed quarantine
+  retains in-process writes. `ChatRetainedEdits` offers version review, fresh
+  fork and canonical adoption. Fork publication and recovery removal are atomic;
+  a fork preserves visible messages/documents and explicit model selection but
+  strips continuation, opaque tool history and origin/route affinity. GC also
+  preserves document handles referenced only by retained edits.
 
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`

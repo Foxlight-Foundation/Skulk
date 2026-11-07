@@ -69,9 +69,22 @@ afterEach(async () => {
   await removeChatDocuments(ids);
   await act(async () => { await flushChatStorage().catch(() => {}); });
   vi.restoreAllMocks(); vi.unstubAllGlobals();
+  store.dispatch(chatActions.setRetainedEdits([]));
 });
 
 describe('Chat document submission', () => {
+  it('exposes retained local history when no model or canonical conversation is available', async () => {
+    store.dispatch(chatActions.setRetainedEdits([{ id: 'a'.repeat(32), conversationId: 'missing', createdAt: 1,
+      conversation: { id: 'missing', name: 'Recovered local history', modelId: 'unavailable', messages: [] } }]));
+    container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+    await act(async () => {
+      root!.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ChatView readyInstances={[]} catalog={{ loaded: true, models: {} }} /></ThemeProvider></Provider>);
+    });
+    expect(container.textContent).toContain('No models are ready');
+    expect(container.textContent).toContain('Recovered local history');
+    expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Save as separate conversation')).toBe(true);
+    expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Accept deletion')).toBe(true);
+  });
   it('sends large text and PDF files, retains small history metadata and resends exact files on the next turn', async () => {
     const requests: Array<{ messages: Array<{ content: unknown }> }> = [];
     vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -99,7 +112,13 @@ describe('Chat document submission', () => {
   it('retains the draft and selected document when browser storage fails, without sending inference', async () => {
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
     await renderChat();
-    vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(() => { throw new DOMException('Full', 'QuotaExceededError'); });
+    for (const method of ['add', 'put'] as const) {
+      const write = IDBObjectStore.prototype[method];
+      vi.spyOn(IDBObjectStore.prototype, method).mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (this.name === 'documents') throw new DOMException('Full', 'QuotaExceededError');
+        return write.call(this, value, key);
+      });
+    }
     await select([new File(['MARIGOLD'], 'notes.txt', { type: 'text/plain' })], 'Keep this draft.');
     await waitFor(() => container!.textContent!.includes('Could not save documents'));
     expect(fetch).not.toHaveBeenCalled();

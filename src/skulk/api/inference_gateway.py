@@ -312,6 +312,14 @@ async def send_chat_body(
             raise
         # close_locally() may race a send waiting on the sink lock. Continue
         # into the output adapter, which alone decides whether output succeeded.
+    except asyncio.CancelledError:
+        # Preserve caller/deadline cancellation even when upload cleanup fails.
+        try:
+            async with _owned_frames(session):
+                pass
+        except BaseException:
+            pass
+        raise
     except BaseException:
         # ASGI cancellation can interrupt the upload before a response iterator
         # exists. Enter the same bounded cleanup ownership used by chat output.
@@ -341,10 +349,14 @@ def _sse(value: dict[str, JsonValue]) -> str:
 async def _owned_frames(
     session: CapabilityStreamSession,
 ) -> AsyncIterator[AsyncIterator[CapabilityStreamFrame]]:
+    cancelled = False
     try:
         # Enter cleanup ownership before the role event can suspend delivery,
         # including when the caller closes without consuming a provider frame.
         yield session.frames
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     finally:
         # ASGI disconnect runs under a cancelled scope. Shield bounded cleanup
         # so provider cancellation and local receiver retirement still happen.
@@ -353,10 +365,21 @@ async def _owned_frames(
                 Callable[[], Awaitable[None]] | None,
                 getattr(session.frames, "aclose", None),
             )
-            if close is not None:
-                await close()
-            if session.cancel_output is not None:
-                await asyncio.wait_for(session.cancel_output(), 3)
+            try:
+                try:
+                    if close is not None:
+                        # Keep iterator context-variable ownership in this task.
+                        async with asyncio.timeout(3):
+                            await close()
+                finally:
+                    # Failure to close must not skip bounded provider cleanup.
+                    if session.cancel_output is not None:
+                        await asyncio.wait_for(session.cancel_output(), 3)
+            except BaseException:
+                # Caller cancellation keeps precedence over cleanup failures.
+                # The enclosing timeout still translates its own cancellation.
+                if not cancelled:
+                    raise
 
 
 async def chat_response(
@@ -597,13 +620,39 @@ async def chat_response(
 
 
 async def continuation_receipt_response(
-    session: CapabilityStreamSession, proof: ReceiptProof
+    session: CapabilityStreamSession,
+    proof: ReceiptProof,
+    disconnected: Callable[[], Awaitable[bool]],
 ) -> ReceiptOutcome:
-    """Collect exactly one lookup outcome after verified terminal and cleanup.
+    """Half-close lookup input and collect one outcome after terminal and cleanup.
 
     A transport failure is uncertainty, never permission to replay inference.
     This returns only public receipt metadata, without assistant/provider state.
     """
+    task = asyncio.current_task()
+    initial_cancellations = task.cancelling() if task is not None else 0
+    try:
+        async with asyncio.timeout(30):
+            await send_chat_body(session, b"", disconnected)
+            return await _collect_continuation_receipt(session, proof)
+    except (
+        OSError,
+        RuntimeError,
+        TimeoutError,
+        anyio.BrokenResourceError,
+        anyio.ClosedResourceError,
+    ):
+        # Iterator finalizers can replace CancelledError before this adapter
+        # observes it. Our timeout removes its own cancellation on exit; any
+        # remaining new cancellation belongs to the caller and takes precedence.
+        if task is not None and task.cancelling() > initial_cancellations:
+            raise asyncio.CancelledError from None
+        raise HTTPException(503, "Continuation receipt delivery is uncertain") from None
+
+
+async def _collect_continuation_receipt(
+    session: CapabilityStreamSession, proof: ReceiptProof
+) -> ReceiptOutcome:
     outcome: ReceiptOutcome | None = None
     finished = False
     async with _owned_frames(session) as frames:

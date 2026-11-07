@@ -9,6 +9,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Chat continuity
 
+- Preserve conflicting local edits as separately reviewable versions, with explicit
+  fork/adopt controls and independent conversation progress. Migrate document
+  staging into the history transaction so cleanup cannot race a committed or
+  retained reference; preserve active foreign uploads and expire abandoned staging.
+- Return a fixed uncertainty response when receipt lookup loses transport or
+  cleanup, and still cancel the provider if closing its output iterator fails.
 - Coordinate conversation ownership across browser tabs and commit public history,
   pending attempts and receipts through transactional browser storage. Preserve
   drafts on refused submission, retain recovery/reset controls after a model
