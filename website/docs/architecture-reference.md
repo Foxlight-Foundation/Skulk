@@ -2801,6 +2801,11 @@ the original indexed owner, including companions reached through a cached base.
 
 ### Native music edit contracts and custody
 
+- Native editing/separation failure ordering: `RunnerSupervisor` retains the
+  public `ErrorChunk` reason from the FIFO runner pipe for the active task. Its
+  final failed status becomes one existing `TaskFailed` with at most 1,024
+  diagnostic characters. Indexed control can settle correctly before DATA;
+  cancellation, timeout and failures without a diagnostic keep existing handling.
 - `shared/types/music_edits.py`: task-discriminated `MusicEditRequest` with
   separate Add a part/Repaint/Continue controls, measured source-clock ranges,
   integer floor/ceil conversion to 48 kHz, immutable once-resolved seed, card

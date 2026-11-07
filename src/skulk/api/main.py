@@ -12271,10 +12271,12 @@ class API:
                     self._mark_realtime_task_released(released_task.command_id)
                 if released_task is not None:
                     self._note_music_task_terminal(released_task)
+                    # Terminal receipts cannot be replaced by later frames; retain
+                    # the ordered failure cause before cleanup supplies a fallback.
                     if isinstance(released_task, task_types.MusicEditing) and released_task.task_status in {task_types.TaskStatus.Failed, task_types.TaskStatus.Cancelled}:
-                        await self._music_edit_service.fail(released_task.command_id, "Music edit task failed or was cancelled.", cancel=released_task.task_status == task_types.TaskStatus.Cancelled)
+                        await self._music_edit_service.fail(released_task.command_id, released_task.error_message or "Music edit task failed or was cancelled.", cancel=released_task.task_status == task_types.TaskStatus.Cancelled)
                     if isinstance(released_task, task_types.AudioSeparation) and released_task.task_status in {task_types.TaskStatus.Failed, task_types.TaskStatus.Cancelled}:
-                        await self._separation_service.fail(released_task.command_id, "Separation task failed or was cancelled.", cancel=released_task.task_status == task_types.TaskStatus.Cancelled)
+                        await self._separation_service.fail(released_task.command_id, released_task.error_message or "Separation task failed or was cancelled.", cancel=released_task.task_status == task_types.TaskStatus.Cancelled)
 
                 if isinstance(
                     event,
@@ -14811,11 +14813,11 @@ class API:
             return
         if isinstance(task, task_types.MusicEditing) and not delivered:
             if (edit_service := self._music_edit_api()) is not None:
-                await edit_service.fail(task.command_id, "Native music edit execution failed.", cancel=task.task_status == task_types.TaskStatus.Cancelled)
+                await edit_service.fail(task.command_id, error_message, cancel=task.task_status == task_types.TaskStatus.Cancelled)
             return
         if isinstance(task, task_types.AudioSeparation) and not delivered:
             if (service := self._separation_api()) is not None:
-                await service.fail(task.command_id, "Native separation execution failed.", cancel=task.task_status == task_types.TaskStatus.Cancelled)
+                await service.fail(task.command_id, error_message, cancel=task.task_status == task_types.TaskStatus.Cancelled)
             return
         owner = getattr(task, "owner_node", None)
         if not delivered and (owner is None or owner == self.node_id):

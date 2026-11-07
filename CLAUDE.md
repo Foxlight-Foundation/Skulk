@@ -2867,6 +2867,11 @@ identity, then emitted as path-free music metadata. Closing a model preserves
 journal-owned completed WAVs. Worker placement does not yet supply this runner adapter with its prepared
 private context; no package, model or hardware support claim is granted.
 
+Native editing and separation retain the public ErrorChunk reason in the
+supervisor until final failure, then forward one existing TaskFailed with a
+1,024-character diagnostic. This preserves the cause when ordered control wins
+the race against DATA, without changing cancellation, timeout or other tasks.
+
 Native editing job contracts live in `shared/types/music_edits.py`: closed
 task-discriminated inputs, source-clock integer floor/ceil conversion to 48 kHz,
 card-bound edit modes/classes/lyrics/duration and a seed resolved exactly once
