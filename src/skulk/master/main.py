@@ -144,7 +144,11 @@ from skulk.shared.types.events import (
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage, NodeResources
 from skulk.shared.types.state import State
-from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
+from skulk.shared.types.state_sync import (
+    LocalEventReceipt,
+    StateSnapshot,
+    StateSyncMessage,
+)
 from skulk.shared.types.steward_actions import (
     StewardActionProposal,
     StewardActionProposalId,
@@ -1020,6 +1024,8 @@ class Master:
         state_sync_receiver: Receiver[StateSyncMessage],
         state_sync_sender: Sender[StateSyncMessage],
         download_command_sender: Sender[ForwarderDownloadCommand],
+        receipt_sender: Sender[LocalEventReceipt] | None = None,
+        receipt_receiver: Receiver[tuple[str | None, LocalEventReceipt]] | None = None,
         snapshot_event_cadence: int = SNAPSHOT_EVENT_CADENCE,
         initial_state: State | None = None,
         telemetry_view: TelemetryView | None = None,
@@ -1208,6 +1214,9 @@ class Master:
         self._state_sync_store_http_host = state_sync_store_http_host
         self._system_id = SystemId()
         self._multi_buffer = MultiSourceBuffer[SystemId, Event]()
+        self._consumed_local_indices: dict[SystemId, int] = {}
+        self._local_receipt_sender = receipt_sender
+        self._local_receipt_receiver = receipt_receiver
         self._event_log = DiskEventLog(SKULK_EVENT_LOG_DIR / "master")
         self._snapshot_store = StateSnapshotStore(
             SKULK_EVENT_LOG_DIR / "master" / "snapshots"
@@ -3051,12 +3060,18 @@ class Master:
                 tg.start_soon(self._event_processor)
                 tg.start_soon(self._command_processor)
                 tg.start_soon(self._state_sync_processor)
+                if self._local_receipt_sender is not None and self._local_receipt_receiver is not None:
+                    tg.start_soon(self._local_receipt_processor, self._local_receipt_sender, self._local_receipt_receiver)
                 tg.start_soon(self._plan)
         finally:
             await self._persist_snapshot(force=True)
             self._event_log.close()
             self.global_event_sender.close()
             self.local_event_receiver.close()
+            if self._local_receipt_sender is not None:
+                self._local_receipt_sender.close()
+            if self._local_receipt_receiver is not None:
+                self._local_receipt_receiver.close()
             self.command_receiver.close()
             self.state_sync_receiver.close()
 
@@ -5049,6 +5064,44 @@ class Master:
                     self._append_event_log(event)
                     await self._send_event(indexed)
                     await self._persist_snapshot()
+
+                # drain() advances ordering before its events have been applied.
+                # Publish consumption only after the entire batch has completed,
+                # including persistence and intentionally skipped no-op updates.
+                self._consumed_local_indices = {
+                    source: buffer.next_idx_to_release - 1
+                    for source, buffer in self._multi_buffer.stores.items()
+                }
+
+    async def _local_receipt_processor(
+        self, sender: Sender[LocalEventReceipt],
+        receiver: Receiver[tuple[str | None, LocalEventReceipt]],
+    ) -> None:
+        """Answer bounded retry probes without indexing stale task updates.
+
+        Requests are authenticated to their requesting peer. Responses carry
+        only consumed ordering metadata and use a separate backpressured actor
+        so a blocked reply cannot stall the master's event processor.
+        """
+        with receiver as requests:
+            async for origin, request in requests:
+                if (
+                    request.kind != "request"
+                    or request.session_id != self.session_id
+                    or not (
+                        origin == str(request.requester)
+                        or (origin is None and request.requester == self.node_id)
+                    )
+                ):
+                    continue
+                consumed = self._consumed_local_indices.get(request.source, -1)
+                if consumed < 0:
+                    continue
+                await sender.send(LocalEventReceipt(
+                    kind="response", requester=request.requester,
+                    source=request.source, session_id=self.session_id,
+                    through_idx=consumed, next_global_idx=len(self._event_log),
+                ))
 
     def _schedule_event_log_replay(self, since_idx: int) -> None:
         """Coalesce replay requests onto one paced background worker."""

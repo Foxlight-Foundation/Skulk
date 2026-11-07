@@ -300,6 +300,28 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
 
 ### Router (libp2p)
 
+`LOCAL_EVENT_RECEIPTS` is an ephemeral control topic for retry-time cumulative
+consumption probes. Only authenticated session-master responses can release the
+requesting node's retained source prefix. The master advances that prefix after
+applying/persisting the whole ordered batch, including skipped stale task events;
+receipts themselves never enter State or the event log. Lost indexed echoes still
+request replay. Local self-master probes short-circuit peer egress. Complete the
+documented same-build fleet deployment before resuming workloads.
+
+
+- **Reliable local ordering:** `routing/event_router.py` retains admitted local
+  events under their original source/index until an authenticated master echo or consumed-prefix receipt;
+  it never expires an ordering dependency after a retry count. Retention is
+  bounded by 256 events and 16 MiB (one individually larger legal message may
+  occupy an otherwise empty outbox); producer queues hold one event. Capped
+  exponential retry delay is 30 seconds with at most 16 sends per wakeup.
+- **Local-event egress:** `LOCAL_EVENTS` producer admission is a rendezvous,
+  followed by one serialized packet and its own publisher. A master's own local
+  events bypass peer publication. Non-control events take no source sequence;
+  strict payload validation, master admission and other topic lanes remain
+  authoritative. The worker coalesces pending connectivity readings and clears
+  that coalescing on membership-context replacement or its own timeout.
+
 - **Role:** transport for all inter-node communication
 - **Lives in:** `src/skulk/routing/` (Python wrapper); `rust/networking/` + `rust/skulk_pyo3_bindings/` (Rust libp2p impl + PyO3 bindings)
 - **Topics:** see "Pubsub topics" below

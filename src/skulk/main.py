@@ -918,6 +918,7 @@ class Node:
         zenoh_peer_sampler = ZenohPeerSampler(router.zenoh_connected_peer_count)
         await router.register_topic(topics.GLOBAL_EVENTS)
         await router.register_topic(topics.LOCAL_EVENTS)
+        await router.register_topic(topics.LOCAL_EVENT_RECEIPTS)
         await router.register_topic(topics.COMMANDS)
         await router.register_topic(topics.ELECTION_MESSAGES)
         await router.register_topic(topics.AUTHORITY_MESSAGES)
@@ -942,6 +943,8 @@ class Node:
             command_sender=router.sender(topics.COMMANDS),
             state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
             state_sync_receiver=router.receiver_with_origin(topics.STATE_SYNC_MESSAGES),
+            receipt_sender=router.sender(topics.LOCAL_EVENT_RECEIPTS),
+            receipt_receiver=router.receiver_with_origin(topics.LOCAL_EVENT_RECEIPTS),
             external_outbound=router.sender(topics.LOCAL_EVENTS),
             external_inbound=router.receiver(topics.GLOBAL_EVENTS),
         )
@@ -1167,6 +1170,8 @@ class Node:
             event_sender=event_router.sender(),
             global_event_sender=router.sender(topics.GLOBAL_EVENTS),
             local_event_receiver=router.receiver(topics.LOCAL_EVENTS),
+            receipt_sender=router.sender(topics.LOCAL_EVENT_RECEIPTS),
+            receipt_receiver=router.receiver_with_origin(topics.LOCAL_EVENT_RECEIPTS),
             command_receiver=router.receiver(topics.COMMANDS),
             state_sync_receiver=router.receiver(topics.STATE_SYNC_MESSAGES),
             state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
@@ -1856,6 +1861,8 @@ class Node:
                         ),
                         external_inbound=self.router.receiver(topics.GLOBAL_EVENTS),
                         external_outbound=self.router.sender(topics.LOCAL_EVENTS),
+                        receipt_sender=self.router.sender(topics.LOCAL_EVENT_RECEIPTS),
+                        receipt_receiver=self.router.receiver_with_origin(topics.LOCAL_EVENT_RECEIPTS),
                     )
                     self.artifact_inventory_event_receiver = (
                         self.event_router.receiver()
@@ -1915,6 +1922,8 @@ class Node:
                         event_sender=self.event_router.sender(),
                         global_event_sender=self.router.sender(topics.GLOBAL_EVENTS),
                         local_event_receiver=self.router.receiver(topics.LOCAL_EVENTS),
+                        receipt_sender=self.router.sender(topics.LOCAL_EVENT_RECEIPTS),
+                        receipt_receiver=self.router.receiver_with_origin(topics.LOCAL_EVENT_RECEIPTS),
                         command_receiver=self.router.receiver(topics.COMMANDS),
                         state_sync_receiver=self.router.receiver(
                             topics.STATE_SYNC_MESSAGES

@@ -1248,11 +1248,12 @@ class Worker:
 
         self.state: State = State()
         # Event-log-bound readings (connectivity) confirmed indexed by the
-        # master: keyed by reading type, holding the payload we saw echoed
-        # back as an indexed event. _forward_info gates re-sends on THIS (not
-        # on "last sent"), so a change dropped after bounded delivery retries
-        # keeps being re-sent each poll until it truly lands in the log.
+        # master. The reliable event router owns retries, so unchanged pending
+        # readings also coalesce instead of occupying its bounded outbox once
+        # per poll during a partition. Both caches are invalidated when their
+        # event-log membership context is replaced or our node times out.
         self._confirmed_forwarded_info: dict[type[GatheredInfo], GatheredInfo] = {}
+        self._pending_forwarded_info: dict[type[GatheredInfo], GatheredInfo] = {}
         self.runners: dict[RunnerId, RunnerSupervisor] = {}
         # Staging DIRECTORY NAMES (forward-sanitized) of models evicted by
         # startup reconciliation whose DownloadCompleted entries may still
@@ -2997,15 +2998,11 @@ class Worker:
         # Connectivity readings (network interfaces, thunderbolt) ride the ordered
         # event log. They rarely change, but were emitted every poll, so on a
         # long-lived cluster they filled the master's replay tail and stormed the
-        # AMD nodes on join (the 5-node gossip storm). Forward a reading only when
-        # its value differs from the last value the master CONFIRMED (echoed back
-        # as an indexed event; see _event_applier, which records the echo into
-        # _confirmed_forwarded_info). Gating on confirmation rather than on "last
-        # sent" matters: the delivery retry (event_router ``out_for_delivery``) is
-        # bounded (retry_max_attempts), so a change sent during a long masterless
-        # window can be dropped permanently; gating on the echo means we simply
-        # re-send it on the next poll until it actually lands in the log, and go
-        # quiet once it does. No periodic keepalive is needed; node liveness is
+        # AMD nodes on join (the 5-node gossip storm). Coalesce confirmed or
+        # still-pending readings: EventRouter reliably retains the original
+        # sequence until its echo. Re-publishing unchanged values cannot repair
+        # a sequence hole and would exhaust admission during a partition.
+        # No periodic keepalive is needed; node liveness is
         # carried by the telemetry plane (the master prune and node-health read
         # the explicit telemetry heartbeat), not by these events.
         with recv as info_stream:
@@ -3021,10 +3018,17 @@ class Worker:
                             NodeTelemetry(node_id=self.node_id, info=info)
                         )
                         continue
-                    # Event-log-bound reading: skip only when the log already
-                    # holds this exact value (confirmed by the master's echo).
-                    if self._confirmed_forwarded_info.get(type(info)) == info:
+                    # The outbox already owns retries for an unchanged pending
+                    # value; a confirmed value needs no new event either.
+                    if (
+                        self._confirmed_forwarded_info.get(type(info)) == info
+                        or self._pending_forwarded_info.get(type(info)) == info
+                    ):
                         continue
+                    # Set before yielding to send. A snapshot or timeout can
+                    # then invalidate it while enqueueing waits, without a late
+                    # assignment restoring a stale confirmation context.
+                    self._pending_forwarded_info[type(info)] = info
                     await self.event_sender.send(
                         NodeGatheredInfo(
                             node_id=self.node_id,
@@ -3080,15 +3084,18 @@ class Worker:
                     isinstance(event, NodeTimedOut) and event.node_id == self.node_id
                 ):
                     self._confirmed_forwarded_info.clear()
+                    self._pending_forwarded_info.clear()
 
                 # Confirm our own connectivity readings once the master echoes
-                # them back indexed; _forward_info gates on this so an
-                # unconfirmed change keeps re-sending (see its comment).
+                # them back indexed. An older acknowledgement must not
+                # discard a newer pending value of the same reading type.
                 if (
                     isinstance(event, NodeGatheredInfo)
                     and event.node_id == self.node_id
                 ):
                     self._confirmed_forwarded_info[type(event.info)] = event.info
+                    if self._pending_forwarded_info.get(type(event.info)) == event.info:
+                        self._pending_forwarded_info.pop(type(event.info))
 
                 # Prune telemetry for timed-out nodes from the worker applier.
                 # The API applier does the same; together they cover --no-api

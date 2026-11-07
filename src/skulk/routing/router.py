@@ -45,6 +45,8 @@ from skulk.shared.types.diagnostics import (
     DataPlaneEgressDiagnostics,
     TelemetryPlaneDiagnostics,
 )
+from skulk.shared.types.events import LocalForwarderEvent
+from skulk.shared.types.state_sync import LocalEventReceipt
 from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.pydantic_ext import CamelCaseModel
@@ -65,6 +67,8 @@ from .topics import (
     CONNECTION_MESSAGES,
     DATA,
     ELECTION_MESSAGES,
+    LOCAL_EVENT_RECEIPTS,
+    LOCAL_EVENTS,
     OUTPUT_MEDIA,
     PROVIDER_DATA,
     REALTIME_AUDIO,
@@ -139,6 +143,9 @@ _AUTHORITY_OUTBOUND_BUFFER = 128
 # Telemetry holds at most one serialized packet beyond the in-flight publish.
 # Newer values remain in the keyed admission map and replace stale values there.
 _TELEMETRY_OUTBOUND_BUFFER = 1
+# The reliable local-event outbox owns retention. Serialized retry copies must
+# not accumulate in the ordinary unbounded egress path during a stalled publish.
+_LOCAL_EVENTS_OUTBOUND_BUFFER = 1
 _TELEMETRY_ADMISSION_CAPACITY = 256
 
 
@@ -236,6 +243,23 @@ class TopicRouter[T: CamelCaseModel]:
         logger.debug(f"Topic Router {self.topic} ready to send")
         with self.receiver as items:
             async for item in items:
+                if (
+                    self.topic.topic == LOCAL_EVENTS.topic
+                    and isinstance(item, LocalForwarderEvent)
+                    and str(item.session.master_node_id) == self.local_routing_key
+                ):
+                    # Only the master consumes local control events. A local
+                    # master's own decisions must not wait for peer egress.
+                    await self.publish(item, origin=None)
+                    continue
+                if (
+                    self.topic.topic == LOCAL_EVENT_RECEIPTS.topic
+                    and isinstance(item, LocalEventReceipt)
+                    and str(item.requester) == self.local_routing_key
+                    and str(item.session_id.master_node_id) == self.local_routing_key
+                ):
+                    await self.publish(item, origin=None)
+                    continue
                 if (
                     self.topic.routing_key is not None
                     and self.topic.publish_policy is PublishPolicy.Always
@@ -595,6 +619,11 @@ class Router:
         )
         self._telemetry_out_send = telemetry_send
         self._telemetry_out_recv = telemetry_recv
+        local_events_send, local_events_recv = channel[OutboundPacket](
+            _LOCAL_EVENTS_OUTBOUND_BUFFER
+        )
+        self._local_events_out_send = local_events_send
+        self._local_events_out_recv = local_events_recv
         self._telemetry_plane_observer = TelemetryPlaneObserver(
             admission_capacity=_TELEMETRY_ADMISSION_CAPACITY,
             network_queue_capacity=_TELEMETRY_OUTBOUND_BUFFER,
@@ -707,13 +736,19 @@ class Router:
             send = self._authority_out_send.clone()
         elif topic.topic == TELEMETRY.topic:
             send = self._telemetry_out_send.clone()
+        elif topic.topic in (LOCAL_EVENTS.topic, LOCAL_EVENT_RECEIPTS.topic):
+            send = self._local_events_out_send.clone()
         else:
             send = self._tmp_networking_sender
             if send:
                 self._tmp_networking_sender = None
             else:
                 send = self.networking_receiver.clone_sender()
-        local_routing_key = self._node_id if topic.routing_key is not None else None
+        local_routing_key = (
+            self._node_id
+            if topic.routing_key is not None or topic.topic in (LOCAL_EVENTS.topic, LOCAL_EVENT_RECEIPTS.topic)
+            else None
+        )
         if topic.topic == TELEMETRY.topic:
             router = cast(
                 TopicRouter[T],
@@ -724,9 +759,14 @@ class Router:
                 ),
             )
         else:
-            if topic.topic in (VISION_MEDIA.topic, OUTPUT_MEDIA.topic):
-                # Bulk media admission is a rendezvous: retention lives only
-                # in the bounded, observable egress and stream queues.
+            if topic.topic in (
+                VISION_MEDIA.topic,
+                OUTPUT_MEDIA.topic,
+                LOCAL_EVENTS.topic,
+                LOCAL_EVENT_RECEIPTS.topic,
+            ):
+                # Local control and bulk media use rendezvous admission;
+                # retention belongs to their bounded downstream queues.
                 producer_buffer_size = 0
             elif topic.topic == AUTHORITY_MESSAGES.topic:
                 # Authority admission must be bounded before serialization as
@@ -819,6 +859,7 @@ class Router:
                 tg.start_soon(self._networking_publish)
                 tg.start_soon(self._election_networking_publish)
                 tg.start_soon(self._authority_networking_publish)
+                tg.start_soon(self._local_events_networking_publish)
                 tg.start_soon(self._telemetry_networking_publish)
                 tg.start_soon(self._vision_networking_publish)
                 tg.start_soon(self._output_networking_publish)
@@ -1047,6 +1088,12 @@ class Router:
 
         with self._authority_out_recv as authority_items:
             async for packet in authority_items:
+                await self._publish_gossipsub_packet(packet)
+
+    async def _local_events_networking_publish(self) -> None:
+        """Backpressure local control egress without blocking other topic lanes."""
+        with self._local_events_out_recv as local_events:
+            async for packet in local_events:
                 await self._publish_gossipsub_packet(packet)
 
     async def _telemetry_networking_publish(self) -> None:

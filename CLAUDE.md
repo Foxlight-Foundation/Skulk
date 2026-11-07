@@ -298,6 +298,21 @@ publication. Keep both native publication APIs covered when changing this helper
 
 ### Node Composition
 
+Local control delivery retains admitted producer sequences until the master's
+echo or authenticated consumption receipt, with count/byte bounds, one queued
+event per producer, capped backoff and
+bounded retry batches. `LOCAL_EVENTS` has rendezvous admission and a one-packet
+egress loop; a master's own local events bypass peer egress. Pending connectivity
+readings coalesce, then re-enroll after snapshot replacement or self-timeout.
+
+`LOCAL_EVENT_RECEIPTS` is an ephemeral control topic for retry-time cumulative
+consumption probes. Only authenticated session-master responses can release the
+requesting node's retained source prefix. The master advances that prefix after
+applying/persisting the whole ordered batch, including skipped stale task events;
+receipts themselves never enter State or the event log. Lost indexed echoes still
+request replay. Local self-master probes short-circuit peer egress. Complete the
+documented same-build fleet deployment before resuming workloads.
+
 GGUF hybrid cache admission uses `ModelCard.gguf_cache_geometry` from the exact
 artifact header. Qwen3.5 scalar metadata separates attention, recurrent and NextN
 layers; recurrent FP32 buffers scale with slots and speculative rollback rows.
@@ -1748,6 +1763,12 @@ review threads remain:
 6. Stage any files changed by formatters before committing.
 
 ## Testing
+
+The real two-rank MLX composition test waits for child results under one 60-second
+startup/execution deadline before checking clean exits. Spawn includes strict
+schema imports. Its cleanup drains only its owned child ranks before removing
+the rendezvous file; it never relies on `multiprocessing.Queue.empty()` as a
+completion signal.
 
 Tests use pytest-asyncio with `asyncio_mode = "auto"`. Tests are in `tests/` subdirectories alongside the code they test. The `SKULK_TESTS=1` env var (fallback: `SKULK_TESTS=1`) is set during tests.
 
