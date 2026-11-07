@@ -109,6 +109,26 @@ describe('retained conversation edits', () => {
     expect(await readRetainedChatEdits()).toEqual([]);
   });
 
+  it('refuses acknowledgement of a new write behind a conflicting pending ordinary edit', async () => {
+    const before = await seed(), local = changed(before, 'Unsaved ordinary edit');
+    const put = IDBObjectStore.prototype.put;
+    const quota = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, value, key) {
+      if (this.name === 'snapshot' && key === 'current') throw new DOMException('Synthetic quota', 'QuotaExceededError');
+      return put.call(this, value, key);
+    });
+    await expect(writeChatStorage(chatStorageChanges(before, local), true, local)).rejects.toThrow();
+    quota.mockRestore();
+    const foreign = changed(before, 'Committed in another tab');
+    await foreignCommit(foreign);
+    const acknowledged = changed(local, 'A new message requiring acknowledged custody');
+    await expect(writeChatStorage(chatStorageChanges(local, acknowledged))).rejects.toThrow('changed in another tab');
+    expect(hasUnsavedChatChanges()).toBe(true);
+    expect((await readCommittedChatStorage()).conversations).toEqual(foreign.conversations);
+    await writeChatStorage([]);
+    expect((await readRetainedChatEdits())[0].conversation).toEqual((local.conversations as Record<string, unknown>).a);
+    expect(JSON.stringify(await readRetainedChatEdits())).not.toContain('requiring acknowledged custody');
+  });
+
   it('adopts canonical history explicitly without applying local deletion or edits', async () => {
     const before = await seed(), local = changed(before, 'Discard only after review'), foreign = changed(before, 'Keep saved');
     await foreignCommit(foreign);

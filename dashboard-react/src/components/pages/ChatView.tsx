@@ -1792,10 +1792,13 @@ export function ChatView({
   if (!selectionNeedsReview && !activeContinuation && messages.length === 0 && !stewardStatus?.enabled && readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
     return (
       <NoModels>
-        {t(
-          'chat.view.noReadyModels',
-          'No models are ready. Launch a model from the Model Store to start chatting.',
-        )}
+        <span>
+          {t(
+            'chat.view.noReadyModels',
+            'No models are ready. Launch a model from the Model Store to start chatting.',
+          )}
+        </span>
+        <ChatRetainedEdits disabled={false} />
       </NoModels>
     );
   }

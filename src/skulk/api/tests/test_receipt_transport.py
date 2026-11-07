@@ -5,6 +5,7 @@ import time
 from collections.abc import AsyncGenerator
 from contextvars import ContextVar
 
+import anyio
 import pytest
 from fastapi import HTTPException
 
@@ -42,7 +43,16 @@ def receipt_proof() -> ReceiptProof:
 
 
 @pytest.mark.parametrize("stage", ["half_close", "collection", "close", "cancel"])
-@pytest.mark.parametrize("failure", [RuntimeError, OSError, TimeoutError])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError,
+        OSError,
+        TimeoutError,
+        anyio.BrokenResourceError,
+        anyio.ClosedResourceError,
+    ],
+)
 async def test_receipt_transport_refuses_success_and_cancels(
     stage: str, failure: type[Exception]
 ) -> None:
@@ -242,3 +252,66 @@ async def test_receipt_cleanup_deadline_still_cancels_the_provider() -> None:
             continuation_receipt_response(session, receipt_proof(), disconnected), 5
         )
     assert raised.value.status_code == 503 and cancelled
+
+
+@pytest.mark.parametrize(
+    "stage,cleanup",
+    [("half_close", "cancel"), ("collection", "cancel"), ("collection", "close")],
+)
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError, OSError, anyio.BrokenResourceError, anyio.ClosedResourceError],
+)
+async def test_caller_cancellation_survives_cleanup_failure(
+    stage: str, cleanup: str, failure: type[Exception]
+) -> None:
+    """Cleanup failure must not translate caller cancellation into an HTTP result."""
+    waiting = asyncio.Event()
+    cancelled = False
+
+    async def send(frame: CapabilityStreamFrame) -> None:
+        if stage == "half_close" and frame.kind == "completed":
+            waiting.set()
+            await asyncio.Future[None]()
+
+    async def cancel() -> None:
+        nonlocal cancelled
+        cancelled = True
+        if cleanup == "cancel":
+            raise failure("private cleanup details")
+
+    async def disconnected() -> bool:
+        return False
+
+    async def frames() -> AsyncGenerator[CapabilityStreamFrame]:
+        try:
+            waiting.set()
+            await asyncio.Future[None]()
+            yield CapabilityStreamFrame(
+                call_id="receipt",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+            )
+        finally:
+            if cleanup == "close":
+                raise failure("private close details")
+
+    input_stream = CapabilityStreamInput(
+        call_id="receipt", deadline_at=time.monotonic() + 30, send_frame=send
+    )
+    await input_stream.start()
+    session = CapabilityStreamSession(
+        open_result=CapabilityResult(call_id="receipt", ok=True, result={}),
+        frames=frames(),
+        input=input_stream,
+        cancel_output=cancel,
+    )
+    task = asyncio.create_task(
+        continuation_receipt_response(session, receipt_proof(), disconnected)
+    )
+    await waiting.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled

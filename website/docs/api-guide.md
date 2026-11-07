@@ -6563,7 +6563,10 @@ returns 503. Direct owner access and independent client authorization still appl
 A half-close, receive, iterator-close or provider-cancellation failure also returns
 the fixed 503 uncertainty response, without publishing a semantic receipt. Lookup
 has a 30-second deadline and bounded cleanup; provider cancellation is attempted
-even if closing its output iterator fails. Disconnect cancellation remains
+even if closing its output iterator fails. Receipt cleanup requires an
+acknowledgement from the selected provider, including a successful, matching HTTP
+result for a remote provider; a missing peer or unsuccessful response is
+uncertainty. Ordinary chat retains best-effort cancellation. Disconnect cancellation remains
 cancellation, and none of these failures authorizes an inference retry.
 A recovered receipt cannot recover lost assistant text. Do not invent that text
 or replay inference; continuation still requires the matching committed history.
@@ -6636,6 +6639,10 @@ conversations continue after conflict quarantine. Up to 64 local versions are
 retained without automatic expiry; resolve existing records before saving more.
 If browser storage cannot retain a conflict, keep the current tab open until
 storage recovers: in-process edits are not a successful durable save.
+Message, attempt and receipt writes requiring acknowledgement refuse when they
+conflict with a pending ordinary edit; quarantining that earlier edit cannot
+acknowledge a new mutation. Recovery controls remain available without a ready
+model or an active canonical conversation.
 
 History, document bytes and retained versions now share schema version two of
 `skulk-chat-history-v2`. Legacy document import is resumable and retires the old

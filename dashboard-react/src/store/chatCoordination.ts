@@ -250,6 +250,10 @@ export async function writeChatStorage(changes: ChatStorageChange[], retainOrdin
           return result;
         } catch (error) {
           if (error instanceof ChatStorageConflict && intent.has(error.conversationId)) {
+            // A message/attempt/receipt writer needs acknowledgement of its
+            // exact mutation. Quarantining an earlier ordinary edit cannot
+            // acknowledge a new conflicting mutation that was never committed.
+            if (!retainOrdinaryEdits && remaining.some(change => changeConversation(change) === error.conversationId)) throw error;
             // Publish custody before dropping any failed CAS. If this write
             // cannot commit, the pending intent stays in this tab unchanged.
             try { await retainChatEdits(new Map([[error.conversationId, intent.get(error.conversationId)]])); }

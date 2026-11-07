@@ -13,6 +13,7 @@ const Panel = styled.section`
   margin: 8px 0;
   padding: 12px;
   min-width: 0;
+  max-width: 100%;
   max-height: 40vh;
   overflow: auto;
   overflow-wrap: anywhere;
