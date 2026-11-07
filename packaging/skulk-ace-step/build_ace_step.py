@@ -34,9 +34,9 @@ from wheel_inputs import clean_revision, validate_dependency_closure
 from wheel_inputs import dependency_matches as _cpu_dependency_matches
 
 VERSION = "0.1.0"
-# The original untagged objects are already published immutably. A wheel build
-# tag gives this revised adapter distinct names without changing its protocol.
-BUILD_TAG = "1"
+# Original and build1 objects are immutable. The decoder bound needs distinct
+# build2 names while retaining the same distribution and control protocol.
+BUILD_TAG = "2"
 MAX_OBJECT_BYTES = 768 * 1024**2
 ADAPTER_MODULES = frozenset(
     {

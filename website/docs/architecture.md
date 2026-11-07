@@ -4380,14 +4380,19 @@ encoder to at most 15-second windows (720,000 samples), retaining the pinned
 2-second overlap-discard algorithm and any shorter explicit window. This avoids
 upstream's 30-second choice based on total GPU capacity rather than the admitted
 instance workspace. Codec computation and the full source clock stay upstream;
-the class, other handlers, decode policy and live allocation guard are unchanged.
-Long-edit memory fit and fidelity require execution against the exact new
-package payload; bounded encoding alone grants no support qualification.
+the class and other handlers stay unchanged. The same instance's typed decoder
+binding caps each window at 256 latent frames (10.24 seconds), preserving shorter
+explicit windows, upstream overlap/discard assembly, offload selection, CPU
+fallback and the stricter MPS clamp. Global free GPU memory cannot authorize a
+larger window than this instance's workspace. The full output clock and live
+allocation guard remain unchanged. Long-edit memory fit and fidelity require
+execution against the exact new payload; the bounds grant no qualification.
 
-Revised native ACE archives use wheel build tag `1` and matching WHEEL metadata,
-so the fixed package channel retains distinct immutable names for both the
-revision and original untagged rollback packages. Exact inventory hashes select
-bytes; package availability still does not advertise ready model capacity.
+The revised native ACE producer uses wheel build tag `2` and matching WHEEL
+metadata. Original untagged and build1 archives keep their immutable identities;
+the reader admits only these three closed filename forms. Exact inventory
+hashes select bytes, and a producer revision does not itself advance that
+inventory or advertise ready model capacity.
 
 Any native request/protocol failure retires the model. A cooperative upstream
 timeout can leave an inference thread active, so the CLI terminates its dedicated

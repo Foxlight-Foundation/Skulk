@@ -36,6 +36,7 @@ from .upstream_bindings import (
     LoadedHandler,
     NativeAPI,
     SourceProcessor,
+    install_bounded_source_decoding,
     install_bounded_source_encoding,
     install_offline_precheck,
     native_api,
@@ -338,6 +339,7 @@ def load_music(
         )
     execution = observe_execution(handler, configuration)
     install_bounded_source_encoding(handler)
+    install_bounded_source_decoding(handler)
     ready = NativeMusicReady(
         model_identity=configuration.model_identity,
         payload_sha256=payload_sha256,
