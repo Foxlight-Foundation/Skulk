@@ -502,7 +502,13 @@ export function subscribeChatPersistence(
       }
     } while (revision !== localRevision);
     if (!active) return;
-    if (hasUnsavedChatChanges()) return;
+    if (hasUnsavedChatChanges()) {
+      // Resolution of an independent retained version may still succeed.
+      // Refresh that list without adopting history over this tab's drafts.
+      const retainedEdits = await readRetainedChatEdits();
+      if (active) store.dispatch(chatActions.setRetainedEdits(retainedEdits));
+      return;
+    }
     const revisionBeforeRead = localRevision;
     const [snapshot, retainedEdits] = await Promise.all([readCommittedChatSnapshot(), readRetainedChatEdits()]);
     if (!active) return;

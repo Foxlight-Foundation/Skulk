@@ -85,7 +85,6 @@ export function ChatRetainedEdits({ disabled }: {
       await synchronizeChatPersistence();
       // An asynchronous save must not steal focus from a newer user selection.
       if (conversationId && store.getState().chat.activeConversationId === selectedBefore) dispatch(chatActions.selectConversation(conversationId));
-      dispatch(chatActions.setPersistenceError(undefined));
     } catch (error) {
       setError(error instanceof Error ? error.message : t('chat.retained.failed', 'Could not resolve these edits. Both versions were preserved.'));
       await synchronizeChatPersistence().catch(() => {});
