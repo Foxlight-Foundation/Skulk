@@ -1,8 +1,9 @@
 import { createSlice, nanoid, type PayloadAction } from '@reduxjs/toolkit';
 import { DEFAULT_CONVERSATION_NAME, type ChatMessage, type Conversation } from '../../types/chat';
-import { chatDocumentIds, removeChatDocuments } from '../chatDocuments';
+import { chatDocumentIds, pruneChatDocuments, removeChatDocuments } from '../chatDocuments';
 import type { ChatContinuation } from '../chatContinuation';
 import { chatStorageChanges, readChatStorage, readCommittedChatSnapshot, writeChatStorage, flushChatStorage, CHAT_STORAGE_KEY, ChatStorageUnavailable, hasUnsavedChatChanges, type ChatStorageObject } from '../chatCoordination';
+import { readRetainedChatEdits, type RetainedChatEdit } from '../chatRetainedEdits';
 
 /* ── Helpers ──────────────────────────────────────────── */
 
@@ -49,6 +50,8 @@ export interface ChatState {
   conversations: Record<string, Conversation>;
   /** Visible persistence conflict/failure; no successful save is implied. */
   persistenceError?: string;
+  /** Separately saved local versions awaiting explicit adoption or a clean fork. */
+  retainedEdits?: RetainedChatEdit[];
   /** Per-tab explicit selection required after a foreign deletion or model reassignment. */
   selectionNeedsReview?: boolean;
   activeConversationId: string | null;
@@ -162,6 +165,8 @@ const slice = createSlice({
     },
     /** Surface failed custody without losing the saved browser snapshot. */
     setPersistenceError(state, action: PayloadAction<string | undefined>) { state.persistenceError = action.payload; },
+    /** Publish the bounded list of independently retained local versions. */
+    setRetainedEdits(state, action: PayloadAction<RetainedChatEdit[]>) { state.retainedEdits = action.payload; },
     selectModel(state, action: PayloadAction<string>) {
       state.selectionNeedsReview = false;
       const modelId = action.payload;
@@ -473,25 +478,34 @@ export async function synchronizeChatPersistence(): Promise<void> {
 
 /** Coordinate every ordinary and acknowledged save, preserving unrelated tab changes. */
 export function subscribeChatPersistence(
-  store: { subscribe: (listener: () => void) => () => void; getState: () => ChatRootState; dispatch: (action: ReturnType<typeof chatActions.refreshDurable> | ReturnType<typeof chatActions.setPersistenceError>) => unknown },
+  store: { subscribe: (listener: () => void) => () => void; getState: () => ChatRootState; dispatch: (action: ReturnType<typeof chatActions.refreshDurable> | ReturnType<typeof chatActions.setPersistenceError> | ReturnType<typeof chatActions.setRetainedEdits>) => unknown },
 ): () => void {
   if (typeof window === 'undefined') return () => {};
   let previous = durableChatState(store.getState().chat);
   let lastSessionJson: string | null = null;
   let adopting = false;
+  let active = true;
   let localRevision = 0;
   let committedRevision = 0;
   const refresh = async () => {
+    if (!active) return;
+    let resumedOrdinaryEdits = false;
     // A refresh queued before a newer local action cannot discard that action.
     // Recheck after draining so adoption and its revision share one JS turn.
     let revision: number;
     do {
       revision = localRevision;
       await flushChatStorage().catch(() => {});
+      if (hasUnsavedChatChanges()) {
+        try { await writeChatStorage([]); resumedOrdinaryEdits = true; }
+        catch (error) { store.dispatch(chatActions.setPersistenceError(String(error))); }
+      }
     } while (revision !== localRevision);
+    if (!active) return;
     if (hasUnsavedChatChanges()) return;
     const revisionBeforeRead = localRevision;
-    const snapshot = await readCommittedChatSnapshot();
+    const [snapshot, retainedEdits] = await Promise.all([readCommittedChatSnapshot(), readRetainedChatEdits()]);
+    if (!active) return;
     if (revisionBeforeRead !== localRevision) return refresh();
     if (snapshot.revision < committedRevision) return;
     committedRevision = snapshot.revision;
@@ -499,6 +513,8 @@ export function subscribeChatPersistence(
     adopting = true;
     try {
       store.dispatch(chatActions.refreshDurable(committed as PersistedDurable));
+      store.dispatch(chatActions.setRetainedEdits(retainedEdits));
+      if (resumedOrdinaryEdits) store.dispatch(chatActions.setPersistenceError(undefined));
       previous = durableChatState(store.getState().chat);
     } finally { adopting = false; }
   };
@@ -509,7 +525,7 @@ export function subscribeChatPersistence(
   window.addEventListener('storage', onStorage);
   const channel = typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel('skulk-chat-writers-v2');
   if (channel) channel.onmessage = event => { if (event.data === 'committed') void refresh().catch(error => store.dispatch(chatActions.setPersistenceError(String(error)))); };
-  void refresh().catch(error => store.dispatch(chatActions.setPersistenceError(String(error))));
+  void refresh().then(() => { if (active) return pruneChatDocuments(); }).catch(error => { if (active) store.dispatch(chatActions.setPersistenceError(String(error))); });
   const unsubscribe = store.subscribe(() => {
     const chat = store.getState().chat;
     const current = durableChatState(chat);
@@ -518,7 +534,7 @@ export function subscribeChatPersistence(
     previous = current;
     if (!adopting && changes.length) {
       localRevision++;
-      void writeChatStorage(changes, true).then(committed => {
+      void writeChatStorage(changes, true, current).then(committed => {
         // Only delete blobs dropped by this successful mutation, after checking
         // the merged snapshot. Never prune another tab's uncommitted uploads.
         const oldReferences = chatDocumentIds((before.conversations ?? {}) as Record<string, Conversation>);
@@ -538,5 +554,5 @@ export function subscribeChatPersistence(
       try { window.sessionStorage.setItem(SESSION_STORAGE_KEY, sessionJson); } catch { /* Per-tab selection is best effort. */ }
     }
   });
-  return () => { unsubscribe(); channel?.close(); window.removeEventListener('storage', onStorage); if (refreshCommittedChat === refresh) refreshCommittedChat = undefined; };
+  return () => { active = false; unsubscribe(); channel?.close(); window.removeEventListener('storage', onStorage); if (refreshCommittedChat === refresh) refreshCommittedChat = undefined; };
 }

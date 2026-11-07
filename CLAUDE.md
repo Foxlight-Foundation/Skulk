@@ -26,6 +26,9 @@ client proofs bind the exact HTTP body and a same-provider continuation/chat
 descriptor relationship. Core holds no continuation private keys or provider
 checkpoints. Receipt lookup uses its own signed operation domain and cannot
 replay inference. Hold receipts and success until transport completion. Preserve
+fixed 503 uncertainty for lookup half-close, receive and cleanup failures. Bound
+iterator cleanup and attempt provider cancellation even after a close failure;
+never convert caller task cancellation into successful receipt delivery. Preserve
 early provider refusals when their output closes input during upload. Streaming
 has no aggregate generation cap; collected responses retain a memory guard.
 Dashboard client keys stay nonextractable in origin-local IndexedDB
@@ -33,6 +36,16 @@ Dashboard client keys stay nonextractable in origin-local IndexedDB
 fences enter conversation metadata. Preserve exact public tool rounds, summaries
 and whitespace separately from display content; verify committed fingerprints.
 Never silently recover missing assistant text or restart an uncertain request.
+
+Browser history, document blobs and retained conflicts share schema version two
+of `skulk-chat-history-v2` (`store/chatDatabase.ts`). Resume legacy blob migration
+before retiring old storage. Validate/claim new references atomically with history
+and check canonical plus retained references in the GC deletion transaction.
+Preserve unexpired foreign staging; expire unused staging after 24 hours and
+abort collection on unreadable references. Quarantine complete local conversation
+intent durably before clearing conflicting writes. `ChatRetainedEdits` explicitly
+forks visible history or adopts canonical state; forks reset identity, continuity,
+tool history and affinity. Failed custody stays in-process, never a successful save.
 
 All ordinary/acknowledged chat saves share `store/chatCoordination.ts`: changed-field
 CAS in authoritative versioned IndexedDB

@@ -3649,7 +3649,10 @@ same chat/media adapter. Core checks detached proof shape, exact bytes and the
 advertised same-provider relationship; independently registered client authority,
 encrypted checkpoints and upstream execution remain capability-owned. Successful
 receipts are exposed only after clean transport completion. Separate signed
-receipt lookup never replays inference. Streaming has no aggregate generation
+receipt lookup never replays inference. Input half-close, collection and cleanup
+failures withhold the receipt and return a bounded 503 uncertainty response.
+Iterator cleanup is time-bounded and cannot skip provider cancellation when it
+fails; caller cancellation still propagates. Streaming has no aggregate generation
 cap; collected JSON retains a documented memory guard. Existing full-history
 gateway clients keep their original contract.
 Dashboard `store/chatContinuation.ts` owns a nonextractable origin-local
@@ -3680,6 +3683,27 @@ writes also compare that model identity. Receipt recovery rechecks the refreshed
 public transcript while holding writer ownership before acknowledging custody.
 Durable metadata adoption retains transient images/tokens/file bytes only for
 unchanged messages in the same model; it does not persist those transient fields.
+
+`store/chatDatabase.ts` upgrades that IndexedDB database to schema version two.
+Canonical snapshots, document blobs and retained edits share one transactional
+boundary. A resumable cursor copies one legacy blob at a time before retiring
+the old document database; competing renderers cannot rewind the cursor or
+reimport a collected blob. Snapshot publication validates new document references
+and claims their staging lease atomically. Cleanup reads canonical and retained
+references in the same write transaction as deletion. Unexpired foreign staging
+leases survive cleanup; unused staging expires after one day. Unreadable
+reference metadata aborts collection and preserves the bytes.
+
+`store/chatRetainedEdits.ts` quarantines complete local conversation intent before
+releasing its conflicting writes, allowing independent conversations to proceed.
+Up to 64 retained versions remain until an explicit resolution; quota refusal
+leaves unsaved intent in the current tab and never claims durable custody.
+`ChatRetainedEdits` compares local and saved messages. An acknowledged fork
+creates a fresh conversation from visible public history and document handles,
+without continuation grants/attempts/receipts, opaque tool turns or origin
+affinity. Adoption removes only the retained copy. Resolution and document
+reference publication commit together, so a failed or competing resolution
+cannot discard either version.
 
 
 - **Delegated inference gateway (experimental):** `api/inference_gateway.py`

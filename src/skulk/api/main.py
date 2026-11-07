@@ -2825,6 +2825,7 @@ class API:
                 "continuation destination. Requires direct owner API authority and "
                 "an independently registered client key. Returns content-free commit "
                 "metadata or a fixed refusal after verified transport completion; "
+                "transport and cleanup failures return bounded 503 uncertainty; "
                 "never retries inference or returns stored provider content."
             ),
         )(self.capability_continuation_receipt)
@@ -11216,8 +11217,9 @@ class API:
         )
         if not session.open_result.ok:
             raise HTTPException(503, "Continuation receipt lookup could not start")
-        await send_chat_body(session, b"", request.is_disconnected)
-        return await continuation_receipt_response(session, payload)
+        return await continuation_receipt_response(
+            session, payload, request.is_disconnected
+        )
 
     def _chat_continuation_metadata(
         self, catalog: ChatCatalog, model: str

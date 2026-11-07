@@ -99,7 +99,13 @@ describe('Chat document submission', () => {
   it('retains the draft and selected document when browser storage fails, without sending inference', async () => {
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
     await renderChat();
-    vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(() => { throw new DOMException('Full', 'QuotaExceededError'); });
+    for (const method of ['add', 'put'] as const) {
+      const write = IDBObjectStore.prototype[method];
+      vi.spyOn(IDBObjectStore.prototype, method).mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (this.name === 'documents') throw new DOMException('Full', 'QuotaExceededError');
+        return write.call(this, value, key);
+      });
+    }
     await select([new File(['MARIGOLD'], 'notes.txt', { type: 'text/plain' })], 'Keep this draft.');
     await waitFor(() => container!.textContent!.includes('Could not save documents'));
     expect(fetch).not.toHaveBeenCalled();

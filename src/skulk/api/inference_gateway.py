@@ -353,10 +353,17 @@ async def _owned_frames(
                 Callable[[], Awaitable[None]] | None,
                 getattr(session.frames, "aclose", None),
             )
-            if close is not None:
-                await close()
-            if session.cancel_output is not None:
-                await asyncio.wait_for(session.cancel_output(), 3)
+            try:
+                if close is not None:
+                    # Closing in another task loses iterator context-variable
+                    # ownership; enforce the deadline in this consuming task.
+                    async with asyncio.timeout(3):
+                        await close()
+            finally:
+                # A failed iterator close must not skip cancellation of the
+                # owned provider call or leave cleanup waiting indefinitely.
+                if session.cancel_output is not None:
+                    await asyncio.wait_for(session.cancel_output(), 3)
 
 
 async def chat_response(
@@ -597,13 +604,26 @@ async def chat_response(
 
 
 async def continuation_receipt_response(
-    session: CapabilityStreamSession, proof: ReceiptProof
+    session: CapabilityStreamSession,
+    proof: ReceiptProof,
+    disconnected: Callable[[], Awaitable[bool]],
 ) -> ReceiptOutcome:
-    """Collect exactly one lookup outcome after verified terminal and cleanup.
+    """Half-close lookup input and collect one outcome after terminal and cleanup.
 
     A transport failure is uncertainty, never permission to replay inference.
     This returns only public receipt metadata, without assistant/provider state.
     """
+    try:
+        async with asyncio.timeout(30):
+            await send_chat_body(session, b"", disconnected)
+            return await _collect_continuation_receipt(session, proof)
+    except (OSError, RuntimeError, TimeoutError):
+        raise HTTPException(503, "Continuation receipt delivery is uncertain") from None
+
+
+async def _collect_continuation_receipt(
+    session: CapabilityStreamSession, proof: ReceiptProof
+) -> ReceiptOutcome:
     outcome: ReceiptOutcome | None = None
     finished = False
     async with _owned_frames(session) as frames:
