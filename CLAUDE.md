@@ -3005,12 +3005,20 @@ must still be connected before native capacity can be advertised.
 
 Native package `live_resource_guard` is also required. The prepared model binds
 its exact `NativeMusicMemoryBudget` phase ceilings into the isolated process.
-`resources.py` samples its actual leader RSS, Torch reserved/MPS driver allocation
-and raw host/device/shared availability before load and every half-second across
+`resources.py` samples its actual leader RSS, CUDA Torch reserved/MPS driver
+allocation, ROCm process-owned DRM buffer totals, and raw host/device/shared
+availability before load and every half-second across
 loading, inference and idle residency. Initial fit and all admission owners use
 the same pure budget fit and pressure-headroom normalization: reserve up to
 512 MiB of host/shared and 256 MiB of device capacity, each capped at 5% for
 small pools. Normalize once before charging held/pending reservations.
+
+`rocm_memory.py` resolves actual HIP device zero through Torch's already loaded
+dependency, matches its PCI address to this process's DRM clients, and counts
+all requested memory regions, including driver workspaces/nonresident storage.
+Alias descriptors use conservative regional maxima per client. Missing or
+ambiguous identity/accounting fails closed. This avoids the inference allocator
+statistics mutex; allocation ceilings and freshness deadlines remain unchanged.
 
 Live checks enforce allocation ceilings and pressure floors, not a second full
 workspace reservation on every poll. RSS earns no exclusive-allocation credit;

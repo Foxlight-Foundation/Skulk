@@ -34,9 +34,9 @@ from wheel_inputs import clean_revision, validate_dependency_closure
 from wheel_inputs import dependency_matches as _cpu_dependency_matches
 
 VERSION = "0.1.0"
-# Original and build1 objects are immutable. The decoder bound needs distinct
-# build2 names while retaining the same distribution and control protocol.
-BUILD_TAG = "2"
+# Existing objects are immutable. Independent ROCm allocation sensing needs
+# build3 names while retaining the same distribution and control protocol.
+BUILD_TAG = "3"
 MAX_OBJECT_BYTES = 768 * 1024**2
 ADAPTER_MODULES = frozenset(
     {
@@ -52,6 +52,7 @@ ADAPTER_MODULES = frozenset(
         "media.py",
         "policy.py",
         "resources.py",
+        "rocm_memory.py",
         "server.py",
         "upstream_bindings.py",
         "weights.py",
