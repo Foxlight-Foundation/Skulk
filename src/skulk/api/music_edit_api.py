@@ -789,7 +789,10 @@ class MusicEditAPI:
                     ):
                         await self.fail(
                             identifier,
-                            "Native music edit ended without a complete result.",
+                            (
+                                chunk.error_message if isinstance(chunk, ErrorChunk)
+                                else "Native music edit ended without a complete result."
+                            ),
                         )
                         return
                     async with self.lock:

@@ -622,7 +622,10 @@ class SeparationAPI:
                     ):
                         await self.fail(
                             identifier,
-                            "Native separation ended without a complete result.",
+                            (
+                                chunk.error_message if isinstance(chunk, ErrorChunk)
+                                else "Native separation ended without a complete result."
+                            ),
                             cancel=False,
                         )
                         return

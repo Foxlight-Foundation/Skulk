@@ -2387,6 +2387,12 @@ records exact source lineage, runtime/model identities, observed device/precisio
 conditioning gain/padding, render latency and WAV geometry/size/SHA-256/peak.
 Paths and raw audio bytes are excluded. A missing node-local job returns **404**.
 
+Failed jobs retain the available placement or native error in `error`, bounded
+to 1,024 characters. When all matching native instances are busy, the job fails
+with the idle-capacity reason and `output: null`. Callers can submit a new request
+after capacity returns. A **202** response confirms the job receipt; it does not
+reserve a busy model or promise queued inference.
+
 Placement waits are bounded to 45 seconds, admitted inference to 40 minutes, and
 post-render return delivery to five minutes, checked by a one-second sweeper.
 Restart or cluster-session replacement fails interrupted work without replay or
@@ -2482,6 +2488,11 @@ spooled files are closed. Requests with invalid metadata or WAV data return 422;
 returns 400, an unsupported request content type 415, and byte-limit violations
 413. Capacity or unavailable storage returns 503. An unavailable model or a
 later placement/execution failure is recorded as an actionable terminal error.
+The available placement or native reason is retained in `error`, bounded to
+1,024 characters. When every matching separator is occupied, the job fails with
+the idle-capacity reason and `output: null`; callers can submit a new request
+after capacity returns. The initial `queued` receipt does not promise an inference
+queue on an occupied model.
 Submission occurs once: after an interrupted response, inspect the retained job
 before retrying. The API never automatically replays an uncertain edit.
 
