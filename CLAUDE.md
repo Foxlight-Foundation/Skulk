@@ -2923,7 +2923,9 @@ source encoder bounded to 15s / 720,000 samples with the pinned 2s overlap-disca
 default. Shorter explicit windows and complete context/latent clocks survive.
 This replaces upstream's capacity-derived 30s window for that instance only;
 codec computation and other handlers stay unchanged. The same handler's decoder
-is capped at 256 latent frames / 10.24s while retaining shorter explicit windows,
+is capped at 256 latent frames / 10.24s while retaining shorter automatic and
+explicit windows. Query native automatic sizing on every decode, including its
+128-frame low-memory/failed-query fallback; retain
 native overlap/discard, offload choice, CPU fallback and stricter MPS clamping.
 The full output clock and live allocation guard stay unchanged. Global free GPU
 memory does not enlarge this instance's workspace; qualify memory and fidelity

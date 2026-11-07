@@ -51,7 +51,7 @@ def main() -> None:
         str(Path(__file__).parent / "runtime_checks"), pattern="check_*.py"
     )
     count = suite.countTestCases()
-    if count < 99:
+    if count < 101:
         raise ValueError(
             "native ACE verification collected an incomplete wrapper suite"
         )

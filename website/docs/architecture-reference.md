@@ -2985,7 +2985,8 @@ the original indexed owner, including companions reached through a cached base.
   explicit chunks, codec computation and full context clock. Do not select
   workspace from total device capacity or patch a global upstream class.
   The same handler's typed `tiled_decode` binding caps windows at 256 latent
-  frames / 10.24s. Preserve shorter explicit windows, native overlap/discard,
+  frames / 10.24s. Re-evaluate native automatic sizing per decode, preserving
+  low-memory/failed-query 128-frame choices and shorter explicit windows, native overlap/discard,
   offload selection, CPU fallback and stricter MPS clamping. Global free GPU
   memory cannot enlarge this instance's workspace. The complete output clock
   and live guard stay unchanged; exact-payload memory/fidelity qualification

@@ -196,7 +196,9 @@ upstream behavior. No upstream class/module or caller options are changed.
 The same handler's `tiled_decode` is capped at 256 latent frames (10.24 seconds),
 using the pinned overlap-discard decoder with its existing overlap, offload
 choice, CPU fallback and smaller MPS restriction. Shorter explicit windows are
-preserved. Global free VRAM may exceed an individual instance's admitted
+preserved. Each decode re-evaluates the pinned automatic policy before the cap,
+retaining its 128-frame low-memory or failed-query default. Global free VRAM may
+exceed an individual instance's admitted
 workspace; it cannot justify the upstream 512-frame decode window. No samples
 are dropped to satisfy the bound. The live resource guard remains enabled;
 these bounds alone do not establish long-edit memory fit, musical quality or

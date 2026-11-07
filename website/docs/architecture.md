@@ -4382,8 +4382,10 @@ upstream's 30-second choice based on total GPU capacity rather than the admitted
 instance workspace. Codec computation and the full source clock stay upstream;
 the class and other handlers stay unchanged. The same instance's typed decoder
 binding caps each window at 256 latent frames (10.24 seconds), preserving shorter
-explicit windows, upstream overlap/discard assembly, offload selection, CPU
-fallback and the stricter MPS clamp. Global free GPU memory cannot authorize a
+automatic and explicit windows, upstream overlap/discard assembly, offload selection, CPU
+fallback and the stricter MPS clamp. Native automatic sizing is re-evaluated on
+every decode, preserving its 128-frame low-memory/failed-query fallback. Global
+free GPU memory cannot authorize a
 larger window than this instance's workspace. The full output clock and live
 allocation guard remain unchanged. Long-edit memory fit and fidelity require
 execution against the exact new payload; the bounds grant no qualification.

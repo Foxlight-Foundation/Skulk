@@ -89,6 +89,66 @@ class NativeDecodingTests(unittest.TestCase):
         self.assertGreater(max(second.input_frames), 256)
         self.assertIs(type(other).tiled_decode, original_class_decoder)
 
+    def test_automatic_memory_policy_is_capped_but_never_enlarged(self) -> None:
+        """Each decode retains smaller native windows as GPU headroom changes."""
+        for device in ("cuda", "cuda:1"):
+            handler = native_api().handler()
+            handler.device = device
+            decoder = RecordingDecoder()
+            handler.vae = decoder
+            install_bounded_source_decoding(handler)
+            for free_gib, expected in (
+                (0.0, 128),
+                (11.99, 128),
+                (12.0, 256),
+                (16.0, 256),
+                (24.0, 256),
+                (60.0, 256),
+                (8.0, 128),
+            ):
+                with self.subTest(device=device, free_gib=free_gib):
+                    decoder.input_frames.clear()
+                    with patch(
+                        "acestep.core.generation.handler.memory_utils.get_effective_free_vram_gb",
+                        return_value=free_gib,
+                    ):
+                        actual = handler.tiled_decode(
+                            torch.zeros((1, 64, 375)), offload_wav_to_cpu=False
+                        )
+                    self.assertEqual(max(decoder.input_frames), expected)
+                    self.assertEqual(actual.shape, (1, 2, 375 * 1920))
+
+    def test_failed_memory_query_keeps_native_fallback_and_explicit_windows(
+        self,
+    ) -> None:
+        """The native conservative default survives; explicit windows bypass it."""
+        handler = native_api().handler()
+        handler.device = "cuda"
+        decoder = RecordingDecoder()
+        handler.vae = decoder
+        install_bounded_source_decoding(handler)
+        latents = torch.zeros((1, 64, 750))
+        with patch(
+            "acestep.core.generation.handler.memory_utils.get_effective_free_vram_gb",
+            side_effect=RuntimeError("controlled memory query failure"),
+        ) as memory_query:
+            actual = handler.tiled_decode(latents, offload_wav_to_cpu=False)
+            self.assertEqual(max(decoder.input_frames), 128)
+            self.assertEqual(actual.shape, (1, 2, 750 * 1920))
+            memory_query.reset_mock()
+            for requested, expected in ((64, 64), (512, 256)):
+                with self.subTest(requested=requested):
+                    decoder.input_frames.clear()
+                    actual = handler.tiled_decode(
+                        latents,
+                        chunk_size=requested,
+                        overlap=16,
+                        offload_wav_to_cpu=False,
+                    )
+                    self.assertEqual(max(decoder.input_frames), expected)
+                    self.assertEqual(actual.shape, (1, 2, 750 * 1920))
+                    memory_query.assert_not_called()
+
     def test_short_seeded_decode_matches_unmodified_direct_path(self) -> None:
         """A short decode keeps the same native operation and request RNG."""
         handler = native_api().handler()
