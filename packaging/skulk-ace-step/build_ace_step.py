@@ -34,6 +34,9 @@ from wheel_inputs import clean_revision, validate_dependency_closure
 from wheel_inputs import dependency_matches as _cpu_dependency_matches
 
 VERSION = "0.1.0"
+# The original untagged objects are already published immutably. A wheel build
+# tag gives this revised adapter distinct names without changing its protocol.
+BUILD_TAG = "1"
 MAX_OBJECT_BYTES = 768 * 1024**2
 ADAPTER_MODULES = frozenset(
     {
@@ -640,12 +643,12 @@ def assemble_wheel(
     )
     distribution = f"skulk_ace_step_{variant}"
     metadata = f"{distribution}-{VERSION}.dist-info"
-    filename = f"{distribution}-{VERSION}-cp312-cp312-{target}.whl"
+    filename = f"{distribution}-{VERSION}-{BUILD_TAG}-cp312-cp312-{target}.whl"
     payload[f"{metadata}/METADATA"] = _bytes(
         f"Metadata-Version: 2.4\nName: skulk-ace-step-{variant}\nVersion: {VERSION}\nRequires-Python: >=3.12,<3.13\nSummary: Isolated native ACE music runtime for Skulk\nLicense: See bundled component notices\n\n".encode()
     )
     payload[f"{metadata}/WHEEL"] = _bytes(
-        f"Wheel-Version: 1.0\nGenerator: foxlight-native-ace\nRoot-Is-Purelib: false\nTag: cp312-cp312-{target}\n".encode()
+        f"Wheel-Version: 1.0\nGenerator: foxlight-native-ace\nRoot-Is-Purelib: false\nBuild: {BUILD_TAG}\nTag: cp312-cp312-{target}\n".encode()
     )
     records = [
         f"{name},sha256={base64.urlsafe_b64encode(bytes.fromhex(item.sha256)).rstrip(b'=').decode()},{item.size}"

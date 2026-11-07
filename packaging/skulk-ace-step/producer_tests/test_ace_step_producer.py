@@ -30,6 +30,7 @@ from package_inputs import (
     read_python_catalog,
     unpack_candidate,
 )
+from packaging.utils import parse_wheel_filename
 from pydantic import JsonValue, TypeAdapter
 from wheel_inputs import validate_dependency_closure
 
@@ -280,7 +281,16 @@ class NativeProducerTests(unittest.TestCase):
         """The sealed object has no timestamps, local paths or unresolved developer links."""
         first, second = self.build("first"), self.build("second")
         self.assertEqual(first.read_bytes(), second.read_bytes())
+        self.assertEqual(parse_wheel_filename(first.name)[2], (1, ""))
+        self.assertNotEqual(
+            first.name,
+            "skulk_ace_step_cpu-0.1.0-cp312-cp312-macosx_14_0_arm64.whl",
+        )
         with zipfile.ZipFile(first) as archive:
+            self.assertIn(
+                b"\nBuild: 1\n",
+                archive.read("skulk_ace_step_cpu-0.1.0.dist-info/WHEEL"),
+            )
             self.assertIn("skulk_ace_step/resources.py", archive.namelist())
             for name in ("contracts.py", "audio_separation.py"):
                 info = archive.getinfo("skulk_ace_step/" + name)

@@ -19,6 +19,8 @@ on:
       - 'packaging/skulk-demucs/build_wheel.py'
       - 'src/skulk/provisioning/demucs_package.py'
       - 'src/skulk/provisioning/ace_step_runtime.py'
+      - 'src/skulk/provisioning/ace_step_inventory.py'
+      - 'src/skulk/provisioning/tests/test_ace_step_inventory.py'
       - 'src/skulk/provisioning/ace_step_manager.py'
       - 'src/skulk/provisioning/native_runtime_manager.py'
       - 'src/skulk/provisioning/demucs_runtime.py'
@@ -182,7 +184,8 @@ jobs:
           for build in first second; do
             "$PACKAGE_ROOT/tools/bin/python" -B packaging/skulk-ace-step/build_ace_step.py --repository "$PWD" --source "$PACKAGE_ROOT/source" --wrapper "$PWD/packaging/skulk-ace-step/skulk_ace_step" --wheelhouse "$PACKAGE_ROOT/intake/wheels" --python-archive "$python_archive" --lock "$PWD/packaging/skulk-ace-step/locks/${{ matrix.platform }}-${{ matrix.variant }}-py312.lock" --target '${{ matrix.target }}' --variant '${{ matrix.variant }}' --output "$PACKAGE_ROOT/$build"
           done
-          cmp "$PACKAGE_ROOT/first/skulk_ace_step_${{ matrix.variant }}-0.1.0-cp312-cp312-${{ matrix.target }}.whl" "$PACKAGE_ROOT/second/skulk_ace_step_${{ matrix.variant }}-0.1.0-cp312-cp312-${{ matrix.target }}.whl"
+          filename=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["filename"])')
+          cmp "$PACKAGE_ROOT/first/$filename" "$PACKAGE_ROOT/second/$filename"
           cp "$PACKAGE_ROOT/second/"*.json "$PACKAGE_ROOT/second-build.json"
           rm -rf "$PACKAGE_ROOT/second"
           # The sealed first object already contains every rehashed dependency.
@@ -210,7 +213,8 @@ jobs:
           PYTHONPATH: src
         run: |
           package_sha=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["sha256"])')
-          "$PACKAGE_ROOT/tools/bin/python" -B scripts/stage_ace_step_candidate.py --wheel "$PACKAGE_ROOT/first/skulk_ace_step_${{ matrix.variant }}-0.1.0-cp312-cp312-${{ matrix.target }}.whl" --sha256 "$package_sha" --variant '${{ matrix.variant }}' --output "$PACKAGE_ROOT/installed"
+          filename=$("$PACKAGE_ROOT/tools/bin/python" -c 'import json,os,pathlib; print(json.loads(next((pathlib.Path(os.environ["PACKAGE_ROOT"])/"first").glob("*.json")).read_text())["filename"])')
+          "$PACKAGE_ROOT/tools/bin/python" -B scripts/stage_ace_step_candidate.py --wheel "$PACKAGE_ROOT/first/$filename" --sha256 "$package_sha" --variant '${{ matrix.variant }}' --output "$PACKAGE_ROOT/installed"
       - name: Check native typing and execute installed boundary suite
         env:
           HF_HUB_OFFLINE: '1'

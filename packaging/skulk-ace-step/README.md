@@ -271,6 +271,14 @@ the fixed inventory. This distinction matters: `adapter_revision` is part of the
 sealed payload identity, so a newer Core commit produces different archive bytes
 even when the native module files are unchanged.
 
+The revised adapter uses wheel build tag `1`: for example,
+`skulk_ace_step_cpu-0.1.0-1-cp312-cp312-macosx_14_0_arm64.whl`.
+Its WHEEL metadata carries `Build: 1`; the distribution version remains `0.1.0`.
+The original untagged packages remain immutable and readable for rollback.
+Future byte changes require another distinct build identity before publication;
+neither a new digest nor a rebuilt descriptor authorizes overwriting an old name.
+CI reads the producer's exact descriptor filename rather than reconstructing it.
+
 Only a complete successful inventory build produces releasable candidates, with
 GitHub hosted-build attestations for the actual archives. It still loads no model
 and grants no hardware qualification. Use the same reviewed source branch/tag
