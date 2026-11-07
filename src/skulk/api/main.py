@@ -2825,6 +2825,7 @@ class API:
                 "continuation destination. Requires direct owner API authority and "
                 "an independently registered client key. Returns content-free commit "
                 "metadata or a fixed refusal after verified transport completion; "
+                "transport and cleanup failures return bounded 503 uncertainty; "
                 "never retries inference or returns stored provider content."
             ),
         )(self.capability_continuation_receipt)
@@ -8804,6 +8805,7 @@ class API:
         payload: dict[str, object],
         *,
         timeout_seconds: float | None = None,
+        require_cancel_confirmation: bool = False,
     ) -> CapabilityStreamSession:
         """Open a provider stream and receive output over ``PROVIDER_DATA``."""
 
@@ -8992,13 +8994,20 @@ class API:
             self._provider_stream_receivers.pop(call_id, None)
             output_sender.close()
             output_receiver.close()
-            if receive_state.cancellation_scheduled:
+            if receive_state.cancellation_scheduled and not require_cancel_confirmation:
                 return
             receive_state.cancel_provider = True
             receive_state.cancellation_scheduled = True
             try:
-                await self._cancel_remote_capability_stream(call)
+                if require_cancel_confirmation:
+                    await self._cancel_remote_capability_stream(
+                        call, require_confirmation=True
+                    )
+                else:
+                    await self._cancel_remote_capability_stream(call)
             except Exception as exc:
+                if require_cancel_confirmation:
+                    raise
                 logger.opt(exception=exc).warning(
                     "Best-effort provider stream cancellation failed"
                 )
@@ -9117,8 +9126,10 @@ class API:
             # API teardown may close the task group while DATA is draining.
             return
 
-    async def _cancel_remote_capability_stream(self, call: CapabilityCall) -> None:
-        """Best-effort explicit cancellation for an early-closing caller."""
+    async def _cancel_remote_capability_stream(
+        self, call: CapabilityCall, *, require_confirmation: bool = False
+    ) -> None:
+        """Cancel idempotently; receipt callers require a verified acknowledgement."""
 
         request = CapabilityStreamCancel(
             call_id=call.call_id,
@@ -9126,23 +9137,31 @@ class API:
             target_node=call.target_node,
         )
         if call.target_node == str(self.node_id):
-            await self.cancel_capability_stream(request)
+            result = await self.cancel_capability_stream(request)
+            if require_confirmation and not result.ok:
+                raise OSError("Provider cancellation was not confirmed")
             return
-        with anyio.move_on_after(2.0):
-            base_url = await self._peer_api_url_for(NodeId(call.target_node))
-            if base_url is None:
-                return
-            try:
+        try:
+            with anyio.fail_after(2.0):
+                base_url = await self._peer_api_url_for(NodeId(call.target_node))
+                if base_url is None:
+                    raise OSError("Provider cancellation destination is unavailable")
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(timeout=2.0, connect=1.0),
                     verify=False,
                 ) as client:
-                    await client.post(
+                    response = await client.post(
                         f"{base_url}/v1/capabilities/stream/cancel",
                         json=request.model_dump(mode="json"),
                     )
-            except httpx.HTTPError:
-                return
+                    if require_confirmation:
+                        response.raise_for_status()
+                        result = CapabilityResult.model_validate_json(response.content)
+                        if result.call_id != call.call_id or not result.ok:
+                            raise OSError("Provider cancellation was not confirmed")
+        except (httpx.HTTPError, OSError, TimeoutError, ValueError):
+            if require_confirmation:
+                raise OSError("Provider cancellation was not confirmed") from None
 
     async def _empty_capability_stream(
         self,
@@ -11213,11 +11232,13 @@ class API:
             descriptor_revision(descriptor),
             dict[str, object](payload.model_dump(mode="json")),
             timeout_seconds=30,
+            require_cancel_confirmation=True,
         )
         if not session.open_result.ok:
             raise HTTPException(503, "Continuation receipt lookup could not start")
-        await send_chat_body(session, b"", request.is_disconnected)
-        return await continuation_receipt_response(session, payload)
+        return await continuation_receipt_response(
+            session, payload, request.is_disconnected
+        )
 
     def _chat_continuation_metadata(
         self, catalog: ChatCatalog, model: str

@@ -28,6 +28,7 @@ import { persistChatContinuation, synchronizeChatPersistence } from '../../store
 import { acquireChatConversation, flushChatStorage, observeChatConversation } from '../../store/chatCoordination';
 import { prepareContinuationRequest, publicHistoryFingerprint, readContinuationReceipt, verifyContinuationHistory } from '../../store/chatContinuation';
 import { ChatContinuationControls } from '../chat/ChatContinuationControls';
+import { ChatRetainedEdits } from '../chat/ChatRetainedEdits';
 import { useStore } from 'react-redux';
 import type { RootState } from '../../store';
 import { tolgee, useSkulkTranslation } from '../../i18n/tolgee';
@@ -1791,10 +1792,13 @@ export function ChatView({
   if (!selectionNeedsReview && !activeContinuation && messages.length === 0 && !stewardStatus?.enabled && readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
     return (
       <NoModels>
-        {t(
-          'chat.view.noReadyModels',
-          'No models are ready. Launch a model from the Model Store to start chatting.',
-        )}
+        <span>
+          {t(
+            'chat.view.noReadyModels',
+            'No models are ready. Launch a model from the Model Store to start chatting.',
+          )}
+        </span>
+        <ChatRetainedEdits disabled={false} />
       </NoModels>
     );
   }
@@ -1824,6 +1828,7 @@ export function ChatView({
       </MessagesScroll>
       <InputArea>
         {persistenceError && <p role="alert">{persistenceError}</p>}
+        <ChatRetainedEdits disabled={isLoading} />
         {selectionNeedsReview && <>
           <p role="alert">{t('chat.selection.changedElsewhere', 'This conversation was removed or changed to another model in another tab. Choose a conversation or explicitly start a new one. Your draft was retained.')}</p>
           <Button size="sm" disabled={!selectedModelId || !readyModels.some(model => model.modelId === selectedModelId)} onClick={() => { if (selectedModelId) dispatch(chatActions.newConversation(selectedModelId)); }}>{t('chat.selection.newConversation', 'Start a new conversation')}</Button>
