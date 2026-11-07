@@ -120,12 +120,24 @@ Each bundle retains its own installed record. Deleting one alias only removes
 its links, while another bundle's shared bytes remain available. This does not
 change the 10 GiB reserve or permit automatic eviction from the canonical store.
 
+Worker info ingress forwards heartbeats and resource telemetry independently of
+ordered-control admission. A separate owned publisher drains one latest queued
+value per typed connectivity/info kind; a full reliable outbox cannot stall that
+telemetry consumer or create an unbounded FIFO of changed connectivity readings.
+Snapshot replacement and self-timeout invalidate queued, pending and confirmed
+control readings. Normal input closure drains offered values; worker shutdown
+cancels its blocked publisher.
+
 `LOCAL_EVENT_RECEIPTS` is an ephemeral control topic for retry-time cumulative
 consumption probes. Only authenticated session-master responses can release the
 requesting node's retained source prefix. The master advances that prefix after
 applying/persisting the whole ordered batch, including skipped stale task events;
-receipts themselves never enter State or the event log. Lost indexed echoes still
-request replay. Local self-master probes short-circuit peer egress. Complete the
+receipts themselves never enter State or the event log. Each authenticated reply
+also retains a monotonic global replay target, even after its local source was
+retired. An independent bounded-backoff task retries from the current global
+cursor until that target is reached, surviving lost requests and missing final
+replay frames without depending on local outbox activity. Local self-master probes
+short-circuit peer egress. Complete the
 documented same-build fleet deployment before resuming workloads.
 
 ## The shape of a cluster

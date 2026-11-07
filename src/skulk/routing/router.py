@@ -240,6 +240,12 @@ class TopicRouter[T: CamelCaseModel]:
         self._data_plane_egress_observer = data_plane_egress_observer
 
     async def run(self):
+        """Forward admitted topic messages to local consumers and transport egress.
+
+        Preserves same-node short circuits and each topic delivery policy. Returns
+        on producer closure, releasing its receive endpoint; cancellation and
+        publication failures propagate to the owning router.
+        """
         logger.debug(f"Topic Router {self.topic} ready to send")
         with self.receiver as items:
             async for item in items:
@@ -721,6 +727,15 @@ class Router:
         return self._zenoh.scouting_address()
 
     async def register_topic[T: CamelCaseModel](self, topic: TypedTopic[T]):
+        """Register a typed topic with its designated transport and admission bounds.
+
+        Args:
+            topic: Topic contract selecting payload validation and delivery policy.
+
+        Returns:
+            None. Stores the topic router and subscribes immediately when running;
+            otherwise subscription is deferred to router startup.
+        """
         if topic.topic == VISION_MEDIA.topic:
             send = self._zenoh_vision_out_send.clone()
         elif topic.topic == OUTPUT_MEDIA.topic:
@@ -849,6 +864,12 @@ class Router:
         return recv
 
     async def run(self):
+        """Run topic routers and independent transport loops until cancellation.
+
+        Subscribes registered topics before waiting for shutdown. On exit, attempts
+        bounded unsubscription and closes networking and owned transport resources.
+        Returns after cancellation drains the task group; transport failures propagate.
+        """
         logger.debug("Starting Router")
         try:
             async with self._tg as tg:

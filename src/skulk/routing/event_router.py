@@ -80,6 +80,9 @@ class EventRouter:
 
     _nack_cancel_scope: CancelScope | None = field(init=False, default=None)
     _nack_attempts: int = field(init=False, default=0)
+    _receipt_replay_target: int = field(init=False, default=0)
+    _receipt_replay_deadline: float = field(init=False, default=0.0)
+    _receipt_replay_attempts: int = field(init=False, default=0)
     nack_base_seconds: float = 0.5
     nack_cap_seconds: float = 10.0
     snapshot_request_timeout_seconds: float = 1.0
@@ -106,13 +109,22 @@ class EventRouter:
             raise ValueError("local control retry delays must be finite and positive")
 
     async def run(self):
+        """Run bootstrap, ordered delivery and receipt replay until shutdown.
+
+        Starts independent local-delivery and global-replay retry tasks. On exit,
+        closes owned outbound and state-sync/receipt endpoints. Returns when the
+        owned task group stops; processor failures propagate.
+        """
         try:
             async with self._tg as tg:
                 tg.start_soon(self._bootstrap)
                 tg.start_soon(self._run_ext_in)
                 tg.start_soon(self._simple_retry)
                 if self.receipt_receiver is not None:
-                    tg.start_soon(self._receive_delivery_receipts, self.receipt_receiver)
+                    tg.start_soon(
+                        self._receive_delivery_receipts, self.receipt_receiver
+                    )
+                    tg.start_soon(self._retry_receipt_replay)
         finally:
             self.external_outbound.close()
             self.state_sync_receiver.close()
@@ -164,15 +176,20 @@ class EventRouter:
             # source for the master's fully consumed prefix, never per poll.
             if self.receipt_sender is not None:
                 for source in retried_sources:
-                    await self.receipt_sender.send(LocalEventReceipt(
-                        kind="request", requester=self.node_id, source=source,
-                        session_id=self.session_id,
-                    ))
+                    await self.receipt_sender.send(
+                        LocalEventReceipt(
+                            kind="request",
+                            requester=self.node_id,
+                            source=source,
+                            session_id=self.session_id,
+                        )
+                    )
 
     async def _receive_delivery_receipts(
-        self, receiver: Receiver[tuple[str | None, LocalEventReceipt]],
+        self,
+        receiver: Receiver[tuple[str | None, LocalEventReceipt]],
     ) -> None:
-        """Release consumed source prefixes only on an authenticated master reply."""
+        """Retire authenticated source prefixes and retain missing replay work."""
         with receiver as receipts:
             async for origin, receipt in receipts:
                 if (
@@ -183,20 +200,52 @@ class EventRouter:
                 ):
                     continue
                 matched = [
-                    identifier for identifier, (_, _, frame) in self.out_for_delivery.items()
-                    if frame.origin == receipt.source and frame.origin_idx <= receipt.through_idx
+                    identifier
+                    for identifier, (_, _, frame) in self.out_for_delivery.items()
+                    if frame.origin == receipt.source
+                    and frame.origin_idx <= receipt.through_idx
                 ]
-                if not matched:
-                    continue
                 for identifier in matched:
                     await self._acknowledge_local_event(identifier)
                 # A consumption receipt is not replicated-state delivery. If
-                # indexed echoes were lost, replay still has to repair State.
-                if receipt.next_global_idx > self.event_buffer.next_idx_to_release:
-                    await self.command_sender.send(ForwarderCommand(
-                        origin=self._system_id,
-                        command=RequestEventLog(since_idx=self.event_buffer.next_idx_to_release),
-                    ))
+                # indexed echoes were lost, replay must survive retirement of
+                # the last local frame and loss of a request or final response.
+                # Even an already-retired source can carry a newer trusted head.
+                self._receipt_replay_target = max(
+                    self._receipt_replay_target, receipt.next_global_idx
+                )
+                await self._request_receipt_replay_if_due()
+
+    async def _retry_receipt_replay(self) -> None:
+        """Repair a known global tail independently of local delivery pressure."""
+        while True:
+            await anyio.sleep(0.5)
+            await self._request_receipt_replay_if_due()
+
+    async def _request_receipt_replay_if_due(self) -> None:
+        """Retry from the current cursor until the authenticated head is reached."""
+        cursor = self.event_buffer.next_idx_to_release
+        if cursor >= self._receipt_replay_target:
+            self._receipt_replay_attempts = 0
+            self._receipt_replay_deadline = 0.0
+            return
+        now = anyio.current_time()
+        if now < self._receipt_replay_deadline:
+            return
+        delay = min(
+            self.nack_cap_seconds,
+            self.nack_base_seconds * (2.0**self._receipt_replay_attempts),
+        )
+        # Both receipt ingestion and the retry task call this helper. Reserve
+        # the deadline before yielding so they cannot duplicate one due request.
+        self._receipt_replay_deadline = now + delay
+        self._receipt_replay_attempts = min(self._receipt_replay_attempts + 1, 6)
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=RequestEventLog(since_idx=cursor),
+            )
+        )
 
     def sender(self) -> Sender[Event]:
         """Create a backpressured control producer with one queued event.

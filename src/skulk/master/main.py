@@ -3052,6 +3052,12 @@ class Master:
         )
 
     async def run(self):
+        """Run indexing, commands, state sync, receipts and placement until shutdown.
+
+        Persists the seed before starting concurrent processors. On exit, flushes
+        its final snapshot and closes its event log and owned channel endpoints.
+        Returns when the owned task group stops; processor failures propagate.
+        """
         logger.info("Starting Master")
 
         try:

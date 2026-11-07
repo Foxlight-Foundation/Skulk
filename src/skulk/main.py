@@ -809,6 +809,18 @@ class Node:
 
     @classmethod
     async def create(cls, args: "Args") -> Self:
+        """Construct a node and wire its transport and component channels.
+
+        Args:
+            args: Parsed runtime options controlling enabled node components.
+
+        Returns:
+            The configured node, whose component loops start when it is run.
+
+        Side effects:
+            Loads local identity and configuration, initializes transports, and
+            constructs API, worker, master, election and download components.
+        """
         keypair = get_node_id_keypair()
         node_id = NodeId(keypair.to_node_id())
         session_id = SessionId(master_node_id=node_id, election_clock=0)
