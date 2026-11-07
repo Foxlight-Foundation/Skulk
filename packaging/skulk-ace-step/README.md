@@ -193,9 +193,16 @@ algorithm. Upstream otherwise chooses 30 seconds from total GPU capacity,
 independently of this instance's admitted workspace. Shorter explicit windows
 survive; codec math, full context, sample clock and short seeded encoding remain
 upstream behavior. No upstream class/module or caller options are changed.
-Decode has its separate existing policy. The live resource guard remains
-enabled; this encoding bound alone does not establish long-edit memory fit,
-musical quality or qualification for a new package payload.
+The same handler's `tiled_decode` is capped at 256 latent frames (10.24 seconds),
+using the pinned overlap-discard decoder with its existing overlap, offload
+choice, CPU fallback and smaller MPS restriction. Shorter explicit windows are
+preserved. Each decode re-evaluates the pinned automatic policy before the cap,
+retaining its 128-frame low-memory or failed-query default. Global free VRAM may
+exceed an individual instance's admitted
+workspace; it cannot justify the upstream 512-frame decode window. No samples
+are dropped to satisfy the bound. The live resource guard remains enabled;
+these bounds alone do not establish long-edit memory fit, musical quality or
+qualification for a new package payload.
 
 The wrapper owns `result.wav` and `result.json`, written exclusively with 0600
 permissions under the request's private directory. Results are native-rate

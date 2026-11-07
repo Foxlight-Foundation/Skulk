@@ -1,5 +1,5 @@
 {
-  "include": ["skulk_ace_step", "verify_runtime.py", "runtime_checks/check_geometry.py", "runtime_checks/check_probe.py", "runtime_checks/check_encoding.py"],
+  "include": ["skulk_ace_step", "verify_runtime.py", "runtime_checks/check_geometry.py", "runtime_checks/check_probe.py", "runtime_checks/check_encoding.py", "runtime_checks/check_decoding.py"],
   "typeCheckingMode": "strict",
   "failOnWarnings": true,
   "reportAny": "error",

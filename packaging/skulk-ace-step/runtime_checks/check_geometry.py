@@ -26,6 +26,7 @@ from skulk_ace_step.contracts import NativeMusicRequest, NativeMusicResult
 from skulk_ace_step.generation import result_samples
 from skulk_ace_step.media import export_result, prepare_conditioning, write_conditioning
 from skulk_ace_step.upstream_bindings import (
+    install_bounded_source_decoding,
     install_bounded_source_encoding,
     native_api,
     tensor_samples,
@@ -184,6 +185,7 @@ class NativeGeometryTests(unittest.TestCase):
                 parameter.fill_(0.01)
         handler.vae = codec
         install_bounded_source_encoding(handler)
+        install_bounded_source_decoding(handler)
         prepare_targets = cast(
             PrepareTargets,
             cast(object, getattr(handler, _TARGET_PREPARATION_METHOD)),

@@ -8,6 +8,7 @@ model repository Python, arbitrary keywords or a language-model planner.
 from __future__ import annotations
 
 import importlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast, final
@@ -52,6 +53,20 @@ class SourceEncoder(Protocol):
         ...
 
 
+class SourceDecoder(Protocol):
+    """Pinned overlap-discard decoder, with latent-domain chunk arguments."""
+
+    def __call__(
+        self,
+        latents: torch.Tensor,
+        chunk_size: int | None = None,
+        overlap: int = 64,
+        offload_wav_to_cpu: bool | None = None,
+    ) -> torch.Tensor:
+        """Decode the complete latent clock while preserving native overlap policy."""
+        ...
+
+
 class ModelPrecheck(Protocol):
     """Offline guard replacing the broader upstream default-model download path."""
 
@@ -80,6 +95,7 @@ class LoadedHandler(NativeHandler, Protocol):
     use_mlx_vae: bool
     process_src_audio: SourceProcessor
     tiled_encode: SourceEncoder
+    tiled_decode: SourceDecoder
 
     def initialize_service(
         self,
@@ -110,6 +126,8 @@ class HandlerFactory(Protocol):
 _MODEL_ACQUISITION_HOOK: Final = "_ensure_models_present"
 _MAXIMUM_ENCODING_FRAMES: Final = 15 * 48000
 _ENCODING_OVERLAP_FRAMES: Final = 2 * 48000
+_MAXIMUM_DECODING_LATENT_FRAMES: Final = 256
+_AUTOMATIC_DECODING_POLICY: Final = "_get_auto_decode_chunk_size"
 
 
 @final
@@ -151,6 +169,54 @@ def install_bounded_source_encoding(handler: LoadedHandler) -> None:
     if handler.sample_rate != 48000:
         raise ValueError("native music encoding requires the pinned 48kHz clock")
     handler.tiled_encode = _BoundedSourceEncoder(handler.tiled_encode)
+
+
+@final
+@dataclass(frozen=True)
+class _BoundedSourceDecoder:
+    original: SourceDecoder
+    automatic_chunk_size: Callable[[], int]
+
+    def __call__(
+        self,
+        latents: torch.Tensor,
+        chunk_size: int | None = None,
+        overlap: int = 64,
+        offload_wav_to_cpu: bool | None = None,
+    ) -> torch.Tensor:
+        # Global free VRAM does not describe this instance's admitted workspace.
+        # Re-evaluate the native policy on each decode so low-memory and failed
+        # queries retain their smaller windows before applying our upper bound.
+        bounded_chunk = min(
+            self.automatic_chunk_size() if chunk_size is None else chunk_size,
+            _MAXIMUM_DECODING_LATENT_FRAMES,
+        )
+        return self.original(
+            latents,
+            chunk_size=bounded_chunk,
+            overlap=overlap,
+            offload_wav_to_cpu=offload_wav_to_cpu,
+        )
+
+
+def install_bounded_source_decoding(handler: LoadedHandler) -> None:
+    """Limit one resident decoder to 256 latent frames (10.24s) per window.
+
+    Retain shorter automatic/explicit windows and pinned overlap/offload behavior.
+    Only this handler's callable changes; no class, model math, output clock or
+    live allocation guard is replaced. Actual long-duration memory and musical
+    acceptance remain separate from installing the bound.
+    """
+    if handler.sample_rate != 48000:
+        raise ValueError("native music decoding requires the pinned 48kHz clock")
+    # This fixed upstream hook is read, never replaced. Capturing its bound
+    # callable retains request-time memory queries rather than a load-time size.
+    automatic_chunk_size = getattr(handler, _AUTOMATIC_DECODING_POLICY, None)
+    if not callable(automatic_chunk_size):
+        raise ValueError("native music decoding requires its pinned window policy")
+    handler.tiled_decode = _BoundedSourceDecoder(
+        handler.tiled_decode, cast(Callable[[], int], automatic_chunk_size)
+    )
 
 
 def install_offline_precheck(handler: LoadedHandler, precheck: ModelPrecheck) -> None:
