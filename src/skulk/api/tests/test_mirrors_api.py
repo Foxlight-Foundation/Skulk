@@ -74,13 +74,20 @@ async def test_mirror_operator_journey_preserves_companions_and_only_deletes_sel
             return MirrorJob.model_validate_json(response.text)
 
         async def page() -> MirrorPage:
-            response = await client.get("/preservation/mirror")
-            assert response.status_code == 200, response.text
-            assert (
-                str(tmp_path) not in response.text
-                and "capture.pem" not in response.text
-            )
-            return MirrorPage.model_validate_json(response.text)
+            # Bounded filesystem probes may return a valid busy view even after
+            # the effect succeeds; inspect custody only once observation is available.
+            async with asyncio.timeout(30):
+                while True:
+                    response = await client.get("/preservation/mirror")
+                    assert response.status_code == 200, response.text
+                    assert (
+                        str(tmp_path) not in response.text
+                        and "capture.pem" not in response.text
+                    )
+                    observed = MirrorPage.model_validate_json(response.text)
+                    if observed.available:
+                        return observed
+                    await asyncio.sleep(0.025)
 
         try:
             assert not (await page()).configured

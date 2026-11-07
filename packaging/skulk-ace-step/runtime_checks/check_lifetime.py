@@ -159,7 +159,11 @@ start_parent_guardian(int(sys.argv[2]))
 child=subprocess.Popen([sys.executable,'-c','import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);print("READY",flush=True);time.sleep(60)'],stdout=subprocess.PIPE,close_fds=True)
 assert child.stdout.readline()==b'READY\\n'
 child.stdout.close()
-Path(sys.argv[3]).write_text(json.dumps([os.getpid(),child.pid]))
+# Publish only complete identities before the test begins retiring their owners.
+result=Path(sys.argv[3])
+temporary=result.with_suffix('.partial')
+temporary.write_text(json.dumps([os.getpid(),child.pid]))
+temporary.replace(result)
 time.sleep(60)
 """
         parent_code = """
