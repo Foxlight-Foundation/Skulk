@@ -4,18 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import ipaddress
 import json
 import os
 import re
+import socket
+import ssl
 import subprocess
 import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast, final
+from urllib.parse import urlsplit
 
 from foxlight_model_preservation.licences import licence_status
 from foxlight_model_preservation.mirror_announce import KEY_FILE, dht_port
@@ -42,8 +47,8 @@ from foxlight_model_preservation.signing import encode_record, load_key, public_
 from foxlight_model_preservation.storage import atomic_bytes, directory
 from foxlight_model_preservation.transfer import (
     MirrorHTTPError,
+    PinnedConnection,
     TransferPolicy,
-    response,
 )
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -94,15 +99,14 @@ WITHDRAWAL_ADVICE = (
 
 @dataclass
 class _Admission:
-    """One Core-started standing-intake admission, abortable by the operator.
+    """One Core-started standing-intake admission; see ``offer_public_copy``.
 
-    ``watched`` holds every job this admission stopped or started; a Stop on
-    any of them, or on a job the page reported as the controller meanwhile,
-    aborts the remaining steps so nothing resumes against the operator's Stop.
+    ``current`` is the job that stands in for the controller while no
+    controller runs, so the page can name it. ``aborted`` is set by any
+    operator Stop while the admission exists and is never cleared.
     """
 
-    current: str
-    watched: set[str] = field(default_factory=set[str])
+    current: str | None = None
     aborted: bool = False
 
 
@@ -146,6 +150,7 @@ class MirrorHost:
         self._admission_lock = asyncio.Lock()
         self._offers: set[asyncio.Task[None]] = set()
         self._address_lock = asyncio.Lock()
+        self._address_work: asyncio.Future[MirrorAddressCheck] | None = None
         journal.interrupt_mirror_jobs()
 
     def _enrollment(self) -> _Enrollment | None:
@@ -211,11 +216,8 @@ class MirrorHost:
 
     def _view(self, state: MirrorState, offset: int) -> MirrorPage:
         selections = sorted(state.models.items())
-        withheld = set(state.intake.withheld) if state.intake else set[str]()
         models = tuple(
-            self._model(identity, held).model_copy(
-                update={"withheld": identity in withheld}
-            )
+            self._model(identity, held, state)
             for identity, held in selections[offset : offset + 20]
         )
         advisories = [
@@ -244,11 +246,7 @@ class MirrorHost:
             model_count=len(selections),
             next_offset=offset + 20 if offset + 20 < len(selections) else None,
             intake=MirrorIntake.observed(state.intake) if state.intake else None,
-            usage=MirrorUsage(
-                uploaded_today_bytes=state.egress_day_used,
-                uploaded_month_bytes=state.egress_month_used,
-                received_today_bytes=state.ingress_used,
-            ),
+            usage=_usage(state),
             follow_withdrawals=state.follow_withdrawals,
             withdrawal_advisories=tuple(advisories[:100]),
             withdrawal_advisory_count=len(advisories),
@@ -274,7 +272,9 @@ class MirrorHost:
             else:
                 reasons.append("no_public_url")
             return False, False, tuple(reasons)
-        if not live:
+        # The core announces only beside its HTTP server: a native-only mirror
+        # (HTTP off) publishes no card, DHT announcement or relay copy.
+        if not live or not state.http_enabled:
             reasons.append("not_serving")
         if state.paused or state.left:
             reasons.append("paused")
@@ -284,14 +284,14 @@ class MirrorHost:
             reasons.append("dht_needs_plain_http_root_url")
         if not announce.nostr:
             reasons.append("nostr_not_selected")
-        serving = live and not state.paused and not state.left
+        serving = live and state.http_enabled and not state.paused and not state.left
         return (
             serving and dht_port(announce) is not None,
             serving and announce.nostr,
             tuple(reasons),
         )
 
-    def _model(self, identity: str, held: HeldModel) -> MirrorModel:
+    def _model(self, identity: str, held: HeldModel, state: MirrorState) -> MirrorModel:
         with self._label_lock:
             if held.state == "removed":
                 self._labels.pop(identity, None)
@@ -307,6 +307,9 @@ class MirrorHost:
             name=metadata[0] if metadata is not None else None,
             member_count=metadata[1] if metadata is not None else None,
             size_bytes=metadata[2] if metadata is not None else None,
+            # Same projection everywhere a selection is reported: the page and
+            # the exact lookup agree on what the owner keeps back.
+            withheld=state.intake is not None and identity in state.intake.withheld,
         )
 
     def _load_labels(self, state: MirrorState, offset: int) -> None:
@@ -341,12 +344,15 @@ class MirrorHost:
         def observe() -> MirrorSelection:
             ledger = self._ledger()
             held = selection_status(ledger, manifest_id)
+            state = ledger.read()
             return MirrorSelection(
                 manifest_id=manifest_id,
                 configured=True,
                 available=True,
-                policy_id=policy_id(ledger.read()),
-                model=self._model(manifest_id, held) if held is not None else None,
+                policy_id=policy_id(state),
+                model=self._model(manifest_id, held, state)
+                if held is not None
+                else None,
             )
 
         try:
@@ -448,7 +454,6 @@ class MirrorHost:
             # yet sharing is meant to continue. Report the step in flight so a
             # Stop on it aborts the admission instead of missing it.
             controller = admission.current
-            admission.watched.add(controller)
         if page.configured and page.available:
             dht, nostr, reasons = self._announcement(
                 state, activity is not None and activity.running
@@ -602,6 +607,10 @@ class MirrorHost:
         # such as block stay available, as beside a running controller).
         admitting = (
             self._admission is not None
+            # Only once it has begun stopping the controller: while an offer
+            # is merely evaluated, the running controller already refuses
+            # conflicting decisions, and nothing else needs to wait.
+            and self._admission.current is not None
             and not internal
             and decision.kind not in {"model", "prepare_kit"}
         )
@@ -738,7 +747,7 @@ class MirrorHost:
                         decision.configuration.model_dump(mode="json"),
                     )
             elif decision.kind == "retain" and error is None:
-                await self._keep_covered_approval(decision, result, prior_approval)
+                await self._keep_covered_approval(decision, prior_approval)
             elif decision.kind == "intake" and error is None:
                 if result.policy_id != decision.policy_id:
                     # Exactly as the core: a changed policy clears restart
@@ -793,6 +802,14 @@ class MirrorHost:
                     if error
                     else "succeeded"
                 )
+                if decision.kind == "retain" and state == "failed":
+                    # A failed retain changed nothing the grant covers when the
+                    # ledger still holds the exact original grant: restore
+                    # Core's approval before the receipt is terminal, so the
+                    # sharing it was cleared for can resume. A cancelled
+                    # retain stays cleared, and a changed policy refuses.
+                    with suppress(ValueError, OSError):
+                        await self._keep_covered_approval(decision, prior_approval)
                 self.journal.update_mirror_job(
                     current.model_copy(
                         update={
@@ -824,7 +841,6 @@ class MirrorHost:
     async def _keep_covered_approval(
         self,
         decision: MirrorRequest,
-        result: MirrorWorkerEvent,
         prior: object,
     ) -> None:
         """Restore Core's standing permission when the core kept the grant.
@@ -836,10 +852,7 @@ class MirrorHost:
         if not isinstance(prior, dict):
             return
         approval = cast(dict[str, JsonValue], prior)
-        if (
-            approval.get("policy_id") != decision.policy_id
-            or result.policy_id != decision.policy_id
-        ):
+        if approval.get("policy_id") != decision.policy_id:
             return
         state = await self.storage.run(lambda: self._ledger().read())
         if (
@@ -963,7 +976,7 @@ class MirrorHost:
 
     async def _stop(self, job_id: str, *, operator: bool) -> MirrorJob:
         admission = self._admission
-        if operator and admission is not None and job_id in admission.watched:
+        if operator and admission is not None:
             # An operator Stop on any step of a standing-intake admission ends
             # it: the controller it stopped is not resumed afterwards.
             admission.aborted = True
@@ -1058,6 +1071,32 @@ class MirrorHost:
         Called when a publish, receive or import completes. Nothing happens
         unless the saved policy shares every eligible copy, a resume controller
         runs under a valid grant, and the copy's signed terms are covered.
+
+        Admission invariants (the persistent mirror's Stop rule from #134):
+
+        1. Stop is a durable fence. Any operator Stop while an admission
+           exists aborts it, and nothing the admission does afterwards starts
+           sharing again: the abort, close and durable-Stop checks run after
+           every await, and immediately before the resumed controller is
+           submitted.
+        2. The admission is registered before its first await, so a Stop that
+           lands while the copy's terms are being read is seen.
+        3. It never consents. It runs only under the existing exact grant and
+           Core's matching approval, and the core keeps that grant only for a
+           covered new selection with the policy unchanged. Nothing is retained
+           or resumed while paused, left or stopped, or for a private, PMF,
+           withheld, already selected or removed copy.
+        4. Ownership lasts until the resumed controller is ready (it has
+           restored running intent and unpaused the ledger) or has ended, so a
+           queued offer is evaluated against active sharing, never against
+           this admission's own transition.
+        5. A failed automatic retain leaves the ledger's grant unchanged, and
+           Core restores its unchanged approval, so the earlier sharing
+           resumes. If the policy did change, the resume is refused and the
+           mirror stays visibly stopped (paused, no restart permission) with
+           the retain's error in history.
+        6. Nothing replays: an admission interrupted by Core stopping leaves
+           sharing stopped until the owner turns it on again.
         """
         if self._closed:
             return
@@ -1070,16 +1109,45 @@ class MirrorHost:
         async with self._admission_lock:
             if self._closed:
                 return
+            admission = _Admission()
+            self._admission = admission
             try:
-                controller = await self._admissible(copy_id, manifest_id)
+                controller = await self._admissible(copy_id, manifest_id, admission)
                 if controller is not None:
-                    await self._admit(controller, copy_id, manifest_id)
+                    await self._admit(controller, copy_id, manifest_id, admission)
             except (ValueError, OSError):
                 # An unavailable mirror or copy is left for the owner's own
                 # "Change what's shared"; standing intake never retries alone.
                 return
+            finally:
+                self._admission = None
 
-    async def _admissible(self, copy_id: str, manifest_id: str) -> str | None:
+    def _halted(self, admission: _Admission) -> bool:
+        """Whether an operator Stop or Core close ended this admission."""
+        return admission.aborted or self._closed
+
+    def _sharing(self, admission: _Admission, controller: str) -> bool:
+        """Whether the exact resume controller still shares, by the durable fence."""
+        if self._halted(admission) or self.journal.setting("mirror-stopped") is True:
+            return False
+        intent = self.journal.setting("mirror-running-intent")
+        if (
+            not isinstance(intent, dict)
+            or cast(dict[str, JsonValue], intent).get("job_id") != controller
+            or controller not in self._tasks
+            or controller in self._cancellations
+        ):
+            return False
+        job, decision = self.journal.mirror_job(controller)
+        return (
+            job.kind == "run"
+            and decision.mode == "resume"
+            and job.state in {"queued", "running"}
+        )
+
+    async def _admissible(
+        self, copy_id: str, manifest_id: str, admission: _Admission
+    ) -> str | None:
         """The running resume controller to admit beside, or None to leave it."""
         if self._enrollment() is None:
             return None
@@ -1098,22 +1166,13 @@ class MirrorHost:
             or state.left
             or not restart_allowed(state)
             or state.restart is None
-            or self.journal.setting("mirror-stopped") is True
             or approved
             != {"policy_id": policy_id(state), "expires": state.restart.expires}
             or not isinstance(intent, dict)
         ):
             return None
         controller = cast(dict[str, JsonValue], intent).get("job_id")
-        if not isinstance(controller, str) or controller not in self._tasks:
-            return None
-        job, decision = self.journal.mirror_job(controller)
-        if (
-            job.kind != "run"
-            or decision.mode != "resume"
-            or job.state not in {"queued", "running"}
-            or controller in self._cancellations
-        ):
+        if not isinstance(controller, str) or not self._sharing(admission, controller):
             return None
         # Review the copy's own signed terms under its accepted keys. A private
         # copy, a PMF copy or a changed archive refuses here and is left alone.
@@ -1121,53 +1180,71 @@ class MirrorHost:
             licences = [terms.license_id for terms in source.terms]
         if licence_status(licences, intake.licenses) != "eligible":
             return None
-        return controller
+        # A Stop during the review is a durable fence: never act past it.
+        return controller if self._sharing(admission, controller) else None
 
-    async def _admit(self, controller: str, copy_id: str, manifest_id: str) -> None:
+    async def _admit(
+        self,
+        controller: str,
+        copy_id: str,
+        manifest_id: str,
+        admission: _Admission,
+    ) -> None:
         """Stop the controller, retain the covered copy, resume with no new grant."""
-        admission = _Admission(current=controller, watched={controller})
-        self._admission = admission
-        try:
-            await self._stop(controller, operator=False)
-            if admission.aborted or self._closed:
+        admission.current = controller
+        await self._stop(controller, operator=False)
+        if self._halted(admission):
+            return
+        current = await self.storage.run(lambda: self._ledger().read())
+        if self._halted(admission):
+            return
+        retain = await self._start(
+            MirrorRequest(
+                owner_id="core-intake",
+                operation_id=uuid.uuid4().hex,
+                kind="retain",
+                policy_id=policy_id(current),
+                copy_id=copy_id,
+                manifest_id=manifest_id,
+                confirm_redistribution=True,
+            ),
+            internal=True,
+            intake=True,
+        )
+        admission.current = retain.job_id
+        await self._settled(retain.job_id)
+        # Resume even when the retain failed: the controller was stopped only
+        # to admit, and a failed retain restores Core's unchanged approval.
+        # A policy the retain changed refuses the resume (fail closed).
+        if self._halted(admission):
+            return
+        current = await self.storage.run(lambda: self._ledger().read())
+        if self._halted(admission):
+            return
+        # No await from here until the controller is submitted.
+        resumed = await self._start(
+            MirrorRequest(
+                owner_id="core-intake",
+                operation_id=uuid.uuid4().hex,
+                kind="run",
+                policy_id=policy_id(current),
+                mode="resume",
+                public_participation=True,
+            ),
+            internal=True,
+        )
+        admission.current = resumed.job_id
+        await self._ready(resumed.job_id, admission)
+
+    async def _ready(self, job_id: str, admission: _Admission) -> None:
+        """Hold the admission until the resumed controller shares or has ended."""
+        while not self._halted(admission):
+            job = self.job(job_id)
+            if job.state not in {"queued", "running"} or (
+                job.activity is not None and job.activity.running
+            ):
                 return
-            current = await self.storage.run(lambda: self._ledger().read())
-            retain = await self._start(
-                MirrorRequest(
-                    owner_id="core-intake",
-                    operation_id=uuid.uuid4().hex,
-                    kind="retain",
-                    policy_id=policy_id(current),
-                    copy_id=copy_id,
-                    manifest_id=manifest_id,
-                    confirm_redistribution=True,
-                ),
-                internal=True,
-                intake=True,
-            )
-            admission.current = retain.job_id
-            admission.watched.add(retain.job_id)
-            await self._settled(retain.job_id)
-            # Resume even when the retain failed: the controller was stopped
-            # only to admit. Its grant decides; a policy the retain changed
-            # refuses the resume, so sharing then stays stopped (fail closed).
-            if admission.aborted or self._closed:
-                return
-            current = await self.storage.run(lambda: self._ledger().read())
-            resumed = await self._start(
-                MirrorRequest(
-                    owner_id="core-intake",
-                    operation_id=uuid.uuid4().hex,
-                    kind="run",
-                    policy_id=policy_id(current),
-                    mode="resume",
-                    public_participation=True,
-                ),
-                internal=True,
-            )
-            admission.watched.add(resumed.job_id)
-        finally:
-            self._admission = None
+            await asyncio.sleep(0.05)
 
     async def _settled(self, job_id: str) -> MirrorJob:
         while True:
@@ -1194,43 +1271,26 @@ class MirrorHost:
         if url is None:
             raise PreservationHostError("mirror_address_required")
         key = self.path / KEY_FILE
-
-        def check() -> MirrorAddressCheck:
-            outcome: AddressOutcome
-            status: int | None = None
-            policy = ADDRESS_CHECK_POLICY
-            deadline = time.monotonic() + policy.deadline_seconds
-            try:
-                with response(url, PEERS_PATH, policy) as received:
-                    data = b""
-                    while len(data) <= MAX_PEERS_BYTES:
-                        if time.monotonic() > deadline:
-                            raise TimeoutError("address check deadline exceeded")
-                        chunk = received.read1(
-                            min(65536, MAX_PEERS_BYTES + 1 - len(data))
-                        )
-                        if not chunk:
-                            break
-                        data += chunk
-            except TimeoutError:
-                outcome = "too_slow"
-            except MirrorHTTPError as failure:
-                outcome, status = "http_error", failure.status_code
-            except PreservationError as failure:
-                # Every resolved address was private, so none was even tried.
-                private = (
-                    "no permitted reachable address" in str(failure)
-                    and failure.__cause__ is None
-                )
-                outcome = "private_address" if private else "unreachable"
-            except (OSError, http.client.HTTPException):
-                outcome = "unreachable"
-            else:
-                outcome = peers_outcome(data, key)
-            return MirrorAddressCheck(address=url, outcome=outcome, http_status=status)
-
         async with self._address_lock:
-            return await asyncio.to_thread(check)
+            previous = self._address_work
+            if previous is not None and not previous.done():
+                # An earlier check still owns a resolver call past its deadline.
+                raise PreservationHostError("address_check_busy")
+            deadline = time.monotonic() + ADDRESS_CHECK_POLICY.deadline_seconds
+            work = asyncio.ensure_future(
+                asyncio.to_thread(check_address, url, key, deadline)
+            )
+            self._address_work = work
+            try:
+                # The worker bounds every connect and read by the remaining
+                # time; this bounds name resolution too. A resolver still
+                # running afterwards stays owned until it returns.
+                return await asyncio.wait_for(
+                    asyncio.shield(work),
+                    timeout=ADDRESS_CHECK_POLICY.deadline_seconds + 1,
+                )
+            except TimeoutError:
+                return MirrorAddressCheck(address=url, outcome="too_slow")
 
     async def resume_at_startup(self) -> MirrorJob | None:
         """Called only by explicit store startup; never from construction or GET."""
@@ -1283,13 +1343,12 @@ class MirrorHost:
         downloads = tuple(self._downloads)
         for task in downloads:
             task.cancel()
-        # A pending standing-intake offer never outlives Core; its controller
-        # Stop below is the ordinary drain and nothing resumes after it.
+        # A pending standing-intake offer never outlives Core. Signal it now
+        # but await it only after every worker withdrawal has started: an
+        # offer stalled in filesystem work must not keep public sharing up.
         offers = tuple(self._offers)
         for offer in offers:
             offer.cancel()
-        if offers:
-            await asyncio.gather(*offers, return_exceptions=True)
         tasks = tuple(self._tasks.values())
 
         async def withdraw(job_id: str, task: asyncio.Task[None]) -> None:
@@ -1308,10 +1367,13 @@ class MirrorHost:
 
         # A preparation may precede its controller. Start every withdrawal
         # before awaiting any drain, and do not cancel siblings on failure.
-        results = await asyncio.gather(
+        withdrawals = asyncio.gather(
             *(withdraw(job_id, task) for job_id, task in tuple(self._tasks.items())),
             return_exceptions=True,
         )
+        results = await withdrawals
+        if offers:
+            await asyncio.gather(*offers, return_exceptions=True)
         for result in results:
             if isinstance(result, BaseException):
                 raise result
@@ -1323,6 +1385,10 @@ class MirrorHost:
             await asyncio.gather(*tasks, return_exceptions=True)
         if downloads:
             await asyncio.gather(*downloads, return_exceptions=True)
+        if self._address_work is not None:
+            # A best-effort check's resolver call is bounded by the OS; it is
+            # drained, never abandoned, before Core reports closed.
+            await asyncio.gather(self._address_work, return_exceptions=True)
         if self._kit_removals:
             await asyncio.gather(
                 *tuple(self._kit_removals.values()), return_exceptions=True
@@ -1368,3 +1434,131 @@ def peers_outcome(data: bytes, key: Path) -> AddressOutcome:
     except (OSError, ValueError):
         return "other_mirror"
     return "this_mirror" if card.mirror_key == own else "other_mirror"
+
+
+def _usage(state: MirrorState, now: datetime | None = None) -> MirrorUsage:
+    """Counted volume for the current UTC day and month, from one clock reading.
+
+    The ledger rolls its counters over only when it next reserves a transfer,
+    so a stopped mirror still holds an earlier period's totals. A read projects
+    zero for an expired period and never writes the ledger.
+    """
+    moment = now or datetime.now(UTC)
+    today = moment.strftime("%Y-%m-%d") == state.day
+    month = moment.strftime("%Y-%m") == state.month
+    return MirrorUsage(
+        uploaded_today_bytes=state.egress_day_used if today else 0,
+        uploaded_month_bytes=state.egress_month_used if month else 0,
+        received_today_bytes=state.ingress_used if today else 0,
+    )
+
+
+class _DeadlineConnection(PinnedConnection):
+    """The core's pinned connection, with every attempt inside one deadline."""
+
+    def __init__(self, host: str, port: int, *, tls: bool, deadline: float) -> None:
+        super().__init__(host, port, ADDRESS_CHECK_POLICY, tls=tls)
+        self._deadline = deadline
+
+    def remaining(self) -> float:
+        """Seconds left for the whole check; refuse once none remain."""
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("address check deadline exceeded")
+        return min(ADDRESS_CHECK_POLICY.timeout, left)
+
+    def connect(self) -> None:
+        """Resolve once and try permitted addresses, each within the time left."""
+        addresses = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)
+        last_error: OSError | None = None
+        for family, kind, protocol, _name, address in addresses:
+            host = str(address[0]).split("%", 1)[0]
+            ip = ipaddress.ip_address(host)
+            if ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+                continue
+            if not ip.is_global:
+                continue
+            connection = socket.socket(family, kind, protocol)
+            connection.settimeout(self.remaining())
+            try:
+                connection.connect(address)
+                self.sock = (
+                    ssl.create_default_context().wrap_socket(
+                        connection, server_hostname=self.host
+                    )
+                    if self._tls
+                    else connection
+                )
+                return
+            except OSError as error:
+                connection.close()
+                if (
+                    isinstance(error, TimeoutError)
+                    and self._deadline <= time.monotonic()
+                ):
+                    raise
+                last_error = error
+        raise PreservationError("no permitted reachable address for mirror") from (
+            last_error
+        )
+
+
+def check_address(url: str, key: Path, deadline: float) -> MirrorAddressCheck:
+    """Fetch one address's peers document within ``deadline`` (monotonic seconds).
+
+    Same outcomes and limits as the desktop community "Check address": plain
+    HTTP allowed, no redirects, proxies or credentials, private addresses never
+    contacted. Every connect and read uses only the time that remains.
+    """
+    outcome: AddressOutcome
+    status: int | None = None
+    parsed = urlsplit(url)
+    connection: _DeadlineConnection | None = None
+    try:
+        if parsed.hostname is None or parsed.hostname.rstrip(".").lower().endswith(
+            (".i2p", ".i2p.alt", ".onion")
+        ):
+            raise PreservationError("private-network names need their own transport")
+        connection = _DeadlineConnection(
+            parsed.hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            tls=parsed.scheme == "https",
+            deadline=deadline,
+        )
+        connection.request(
+            "GET",
+            parsed.path.rstrip("/") + "/" + PEERS_PATH,
+            headers={"Accept-Encoding": "identity", "User-Agent": "skulk-core"},
+        )
+        if connection.sock is not None:
+            connection.sock.settimeout(connection.remaining())
+        received = connection.getresponse()
+        if received.status != 200:
+            raise MirrorHTTPError(received.status)
+        data = b""
+        while len(data) <= MAX_PEERS_BYTES:
+            if connection.sock is not None:
+                connection.sock.settimeout(connection.remaining())
+            chunk = received.read1(min(65536, MAX_PEERS_BYTES + 1 - len(data)))
+            if not chunk:
+                break
+            data += chunk
+    except TimeoutError:
+        outcome = "too_slow"
+    except MirrorHTTPError as failure:
+        outcome, status = "http_error", failure.status_code
+    except PreservationError as failure:
+        # Every resolved address was private, so none was even tried.
+        private = (
+            "no permitted reachable address" in str(failure)
+            and failure.__cause__ is None
+        )
+        outcome = "private_address" if private else "unreachable"
+    except (OSError, http.client.HTTPException):
+        outcome = "unreachable"
+    else:
+        outcome = peers_outcome(data, key)
+    finally:
+        if connection is not None:
+            connection.close()
+    return MirrorAddressCheck(address=url, outcome=outcome, http_status=status)

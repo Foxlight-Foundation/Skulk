@@ -117,8 +117,11 @@ async def complete(
             process.stdin.close()
 
 
-def archive(root: Path) -> tuple[Path, str, TrustProfile]:
-    """Make a genuine signed two-member public closure with future card data."""
+def archive(root: Path, label: str = "") -> tuple[Path, str, TrustProfile]:
+    """Make a genuine signed two-member public closure with future card data.
+
+    A ``label`` changes the payload, giving a distinct manifest identity.
+    """
     members: list[dict[str, object]] = []
     sources: dict[str, Path] = {}
     for name, role, dependencies in (
@@ -127,7 +130,9 @@ def archive(root: Path) -> tuple[Path, str, TrustProfile]:
     ):
         path = root / name
         path.mkdir()
-        (path / "payload.bin").write_bytes((name + " synthetic bytes\n").encode() * 400)
+        (path / "payload.bin").write_bytes(
+            (name + label + " synthetic bytes\n").encode() * 400
+        )
         (path / "LICENSE").write_text("Synthetic fixture, no actual model weights.\n")
         sources[name] = path
         members.append(
