@@ -115,6 +115,9 @@ class DownloadCoordinator:
     _pending_download_starts: dict[ModelId, ShardMetadata] = field(
         default_factory=dict
     )
+    # A cleanup handoff can run outside the command actor. Keep its complete
+    # preflight and registration ordered with starts, cancellation and deletion.
+    _download_admission_lock: anyio.Lock = field(default_factory=anyio.Lock)
 
     # Emit an in_progress update only after the download advances this fraction
     # (so ~20 readings total), never faster than the min interval (no bursts on a
@@ -367,20 +370,21 @@ class DownloadCoordinator:
                     )
                     continue
 
-                match cmd.command:
-                    case RetryDownload(shard_metadata=shard):
-                        await self._start_download(shard, retry_failed=True)
-                    case StartDownload(shard_metadata=shard):
-                        logger.info(
-                            f"DownloadCoordinator: received StartDownload for {shard.model_card.model_id}"
-                        )
-                        await self._start_download(shard)
-                    case DeleteDownload(model_id=model_id):
-                        await self._delete_download(model_id)
-                    case CancelDownload(model_id=model_id, attempt_id=attempt_id):
-                        await self._cancel_download(model_id, attempt_id)
-                    case RestartNode():
-                        await self._restart_node()
+                async with self._download_admission_lock:
+                    match cmd.command:
+                        case RetryDownload(shard_metadata=shard):
+                            await self._start_download(shard, retry_failed=True)
+                        case StartDownload(shard_metadata=shard):
+                            logger.info(
+                                f"DownloadCoordinator: received StartDownload for {shard.model_card.model_id}"
+                            )
+                            await self._start_download(shard)
+                        case DeleteDownload(model_id=model_id):
+                            await self._delete_download(model_id)
+                        case CancelDownload(model_id=model_id, attempt_id=attempt_id):
+                            await self._cancel_download(model_id, attempt_id)
+                        case RestartNode():
+                            await self._restart_node()
 
     async def _cancel_download(
         self,
@@ -822,10 +826,11 @@ class DownloadCoordinator:
                 # ignore cancellation - let cleanup do its thing
                 pass
             finally:
-                self.active_downloads.pop(model_id, None)
-                pending_start = self._pending_download_starts.pop(model_id, None)
-                if pending_start is not None:
-                    await self._start_download(pending_start)
+                async with self._download_admission_lock:
+                    self.active_downloads.pop(model_id, None)
+                    pending_start = self._pending_download_starts.pop(model_id, None)
+                    if pending_start is not None:
+                        await self._start_download(pending_start)
 
         scope = anyio.CancelScope()
         self._tg.start_soon(download_wrapper, scope)

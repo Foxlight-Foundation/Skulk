@@ -18,6 +18,7 @@ from skulk.routing.topics import DOWNLOAD_COMMANDS
 from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.types.commands import (
+    CancelDownload,
     ForwarderCommand,
     ForwarderDownloadCommand,
     RetryDownload,
@@ -285,6 +286,81 @@ async def test_retry_waits_for_failed_task_cleanup_and_suppresses_old_callbacks(
             assert isinstance(completed, DownloadCompleted)
             assert completed.attempt_id != failed.attempt_id
             assert harness.downloader.calls == 2
+            harness.coordinator._tg.cancel_tasks()
+
+
+async def test_second_retry_during_handoff_preflight_keeps_one_cancellable_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent explicit request cannot race the cleanup admission handoff."""
+    harness = _harness(tmp_path, monkeypatch)
+    harness.downloader.finish = anyio.Event()
+    release_failure = anyio.Event()
+    entered_preflight = anyio.Event()
+    release_preflight = anyio.Event()
+    emit = harness.coordinator._emit_status
+    resolve = harness.coordinator._resolve_or_refresh_complete_artifact
+    resolutions = 0
+
+    async def hold_failure(status: DownloadProgress) -> DownloadProgress:
+        """Pause the original task after publishing its terminal failure."""
+        prepared = await emit(status)
+        if isinstance(status, DownloadFailed):
+            await release_failure.wait()
+        return prepared
+
+    async def hold_handoff(
+        shard: ShardMetadata, candidate: Path | None = None
+    ) -> Path | None:
+        """Pause the retry after ownership release but before registration."""
+        nonlocal resolutions
+        resolutions += 1
+        if resolutions == 2:
+            entered_preflight.set()
+            await release_preflight.wait()
+        return await resolve(shard, candidate)
+
+    monkeypatch.setattr(harness.coordinator, "_emit_status", hold_failure)
+    monkeypatch.setattr(
+        harness.coordinator, "_resolve_or_refresh_complete_artifact", hold_handoff
+    )
+    with anyio.fail_after(8):
+        async with harness.coordinator._tg:
+            harness.coordinator._tg.start_soon(harness.coordinator._command_processor)
+            await _post(harness)
+            failed = await _terminal(harness)
+            assert isinstance(failed, DownloadFailed)
+            await _post(harness)
+            await anyio.wait_all_tasks_blocked()
+            assert harness.coordinator._pending_download_starts
+            release_failure.set()
+            await entered_preflight.wait()
+            await _post(harness)
+            await anyio.wait_all_tasks_blocked()
+            assert harness.downloader.calls == 1
+            assert resolutions == 2
+            release_preflight.set()
+            while harness.downloader.calls < 2:
+                await anyio.sleep(0)
+            await anyio.wait_all_tasks_blocked()
+            assert harness.downloader.calls == 2
+            assert len(harness.coordinator.active_downloads) == 1
+            model = harness.shard.model_card.model_id
+            ongoing = harness.coordinator.download_status[model]
+            assert ongoing.attempt_id != failed.attempt_id
+            await harness.commands.send(
+                ForwarderDownloadCommand(
+                    origin=SystemId(),
+                    command=CancelDownload(
+                        target_node_id=harness.coordinator.node_id,
+                        model_id=model,
+                        attempt_id=ongoing.attempt_id,
+                    ),
+                )
+            )
+            await _idle(harness)
+            assert harness.downloader.calls == 2
+            assert not harness.coordinator._pending_download_starts
             harness.coordinator._tg.cancel_tasks()
 
 
