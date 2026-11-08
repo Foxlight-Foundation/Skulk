@@ -149,9 +149,19 @@ receipts themselves never enter State or the event log. Each authenticated reply
 also retains a monotonic global replay target, even after its local source was
 retired. An independent bounded-backoff task retries from the current global
 cursor until that target is reached, surviving lost requests and missing final
-replay frames without depending on local outbox activity. Local self-master probes
-short-circuit peer egress. Complete the
-documented same-build fleet deployment before resuming workloads.
+replay frames without depending on local outbox activity, while those events
+remain in the master's retained log. Local self-master probes short-circuit peer
+egress. Origin-aware receipt subscriptions coalesce by transport origin,
+requester, source, session and request/response kind. Each holds at most 256
+frames of 4 KiB each (at most 1 MiB encoded); oversized metadata is not admitted.
+Admission never blocks the shared network receive loop. A full queue evicts its
+oldest disposable metadata, which ordinary idempotent retry repairs.
+
+A same-session cursor older than the compacted master tail is a separate recovery
+limit: existing replay clamps to the retained range and does not acquire another
+snapshot for a running follower. This bounded local-delivery path does not add
+live snapshot recovery. Complete the documented same-build fleet deployment
+before resuming workloads.
 
 ## The shape of a cluster
 

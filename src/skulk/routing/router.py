@@ -20,6 +20,7 @@ from anyio import (
     move_on_after,
     sleep_forever,
 )
+from anyio.lowlevel import checkpoint
 from filelock import FileLock
 from loguru import logger
 from pydantic import ValidationError
@@ -242,6 +243,78 @@ class _LocalControlSender[T: CamelCaseModel](Sender[T]):
         return _LocalControlSender(_state=self._state, publish_local=self.publish_local)
 
 
+_LOCAL_RECEIPT_ADMISSION_CAPACITY = 256
+_MAX_LOCAL_RECEIPT_WIRE_BYTES = 4096
+
+
+@final
+@dataclass(eq=False)
+class _CoalescingReceiptSender[T: CamelCaseModel](Sender[tuple[str | None, T]]):
+    """Retain bounded latest receipts without blocking the shared receive loop."""
+
+    @classmethod
+    def adopt_receipts(
+        cls, stream: Sender[tuple[str | None, T]]
+    ) -> "_CoalescingReceiptSender[T]":
+        """Take ownership of a bounded receipt subscription's send endpoint."""
+        adopted = cls(_state=stream._state)
+        stream.close()
+        return adopted
+
+    def send_nowait(self, item: tuple[str | None, T]) -> None:
+        """Replace a queued lineage or evict its oldest retry when capacity is full.
+
+        Args:
+            item: Authenticated transport origin and validated receipt payload.
+
+        Returns:
+            None. Oversized metadata is dropped; ordinary idempotent retry repairs
+            eviction. Each subscription retains at most 256 frames of 4 KiB.
+        """
+        if self._closed:
+            raise ClosedResourceError
+        if not self._state.open_receive_channels:
+            raise BrokenResourceError
+        origin, receipt = item
+        if not isinstance(receipt, LocalEventReceipt):
+            raise TypeError("Receipt admission requires LocalEventReceipt")
+        size = len(receipt.model_dump_json().encode("utf-8")) + len(
+            (origin or "").encode("utf-8")
+        )
+        if size > _MAX_LOCAL_RECEIPT_WIRE_BYTES:
+            return
+        key = (
+            origin,
+            receipt.kind,
+            receipt.requester,
+            receipt.source,
+            receipt.session_id,
+        )
+        for index, (previous_origin, previous) in enumerate(self._state.buffer):
+            if isinstance(previous, LocalEventReceipt) and key == (
+                previous_origin,
+                previous.kind,
+                previous.requester,
+                previous.source,
+                previous.session_id,
+            ):
+                self._state.buffer[index] = item
+                return
+        try:
+            super().send_nowait(item)
+        except WouldBlock:
+            # This queue is disposable retry metadata, not ordered decisions.
+            # A full consumer must never block unrelated network reception.
+            self._state.buffer.popleft()
+            super().send_nowait(item)
+
+    def clone(self) -> "_CoalescingReceiptSender[T]":
+        """Clone ownership while preserving bounded coalescing admission."""
+        if self._closed:
+            raise ClosedResourceError
+        return _CoalescingReceiptSender(_state=self._state)
+
+
 # A significant current limitation of the TopicRouter is that it is not capable
 # of preventing feedback, as it does not ask for a system id so cannot tell
 # which message is coming/going to which system.
@@ -354,10 +427,22 @@ class TopicRouter[T: CamelCaseModel]:
         origin_to_clear: set[Sender[tuple[str | None, T]]] = set()
         for sender in copy(self.origin_senders):
             try:
-                await sender.send((origin, item))
+                if self.topic.topic == LOCAL_EVENT_RECEIPTS.topic:
+                    # Receipt consumers may be stalled on remote reply egress.
+                    # Their bounded coalescing admission cannot hold this loop.
+                    try:
+                        sender.send_nowait((origin, item))
+                    except WouldBlock:
+                        continue
+                else:
+                    await sender.send((origin, item))
             except (ClosedResourceError, BrokenResourceError):
                 origin_to_clear.add(sender)
         self.origin_senders -= origin_to_clear
+        if self.topic.topic == LOCAL_EVENT_RECEIPTS.topic:
+            # Nonblocking offers still yield under a sustained probe stream;
+            # admission must not trade memory pressure for event-loop starvation.
+            await checkpoint()
 
     async def publish_bytes(self, data: bytes, origin: str | None):
         # Wire-format payloads are deserialized strictly (extra="forbid"). During
@@ -909,12 +994,25 @@ class Router:
     def receiver_with_origin[T: CamelCaseModel](
         self, topic: TypedTopic[T]
     ) -> Receiver[tuple[str | None, T]]:
+        """Subscribe with transport origin and the topic's ingress policy.
+
+        Receipt subscriptions coalesce disposable retries in at most 256 frames
+        of 4 KiB each. Their publication never blocks shared network reception;
+        ordinary origin-aware topics keep their existing delivery semantics.
+        """
         router = self.topic_routers.get(topic.topic, None)
         assert router is not None
         assert router.topic == topic
         assert router.topic.model_type == topic.model_type
 
-        send, recv = channel[tuple[str | None, T]]()
+        capacity = (
+            _LOCAL_RECEIPT_ADMISSION_CAPACITY
+            if topic.topic == LOCAL_EVENT_RECEIPTS.topic
+            else inf
+        )
+        send, recv = channel[tuple[str | None, T]](capacity)
+        if topic.topic == LOCAL_EVENT_RECEIPTS.topic:
+            send = _CoalescingReceiptSender[T].adopt_receipts(send)
         router.origin_senders.add(cast(Sender[tuple[str | None, CamelCaseModel]], send))
         return recv
 
