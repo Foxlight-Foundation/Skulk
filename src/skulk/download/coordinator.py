@@ -391,7 +391,11 @@ class DownloadCoordinator:
         model_id: ModelId,
         attempt_id: DownloadAttemptId | None = None,
     ) -> None:
-        """Cancel the current model download when its attempt identity matches."""
+        """Cancel current work or withdraw an unscoped queued start."""
+        if attempt_id is None:
+            # Explicit cancellation also withdraws intent held by old cleanup.
+            # A stale attempt-scoped cancellation must not cancel a fresh retry.
+            self._pending_download_starts.pop(model_id, None)
         if model_id in self.active_downloads and model_id in self.download_status:
             current_status = self.download_status[model_id]
             if attempt_id is not None and current_status.attempt_id != attempt_id:

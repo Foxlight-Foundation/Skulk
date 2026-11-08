@@ -3788,7 +3788,9 @@ arriving during failure publication suppresses old callbacks and waits on the
 existing cleanup-to-queued-start handoff; it does not overlap owners or delete
 files. One admission lock orders the entire handoff preflight and registration
 with targeted start, cancel and delete commands, so a second request cannot
-create a competing owner. Active/completed starts remain idempotent. Deploy compatible target
+create a competing owner. Unscoped cancellation also withdraws a queued retry;
+an old attempt-scoped cancellation cannot withdraw that new intent.
+Active/completed starts remain idempotent. Deploy compatible target
 readers before using the new command. This does not reset coordinator state for
 master-generated `DownloadPending` placement recovery; that cross-component
 recovery remains a separate contract and test obligation.

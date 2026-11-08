@@ -364,6 +364,55 @@ async def test_second_retry_during_handoff_preflight_keeps_one_cancellable_owner
             harness.coordinator._tg.cancel_tasks()
 
 
+@pytest.mark.parametrize("attempt_scoped", [False, True])
+async def test_cancellation_withdraws_queued_retry_only_when_unscoped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attempt_scoped: bool
+) -> None:
+    """Unscoped cancellation withdraws intent; old attempt IDs cannot cancel it."""
+    harness = _harness(tmp_path, monkeypatch)
+    release = anyio.Event()
+    emit = harness.coordinator._emit_status
+
+    async def hold_failure(status: DownloadProgress) -> DownloadProgress:
+        """Keep the old task in failure cleanup until cancellation is handled."""
+        value = await emit(status)
+        if isinstance(status, DownloadFailed):
+            await release.wait()
+        return value
+
+    monkeypatch.setattr(harness.coordinator, "_emit_status", hold_failure)
+    with anyio.fail_after(8):
+        async with harness.coordinator._tg:
+            harness.coordinator._tg.start_soon(harness.coordinator._command_processor)
+            await _post(harness)
+            failed = await _terminal(harness)
+            assert isinstance(failed, DownloadFailed)
+            await _post(harness)
+            await anyio.wait_all_tasks_blocked()
+            assert harness.coordinator._pending_download_starts
+            await harness.commands.send(
+                ForwarderDownloadCommand(
+                    origin=SystemId(),
+                    command=CancelDownload(
+                        target_node_id=harness.coordinator.node_id,
+                        model_id=harness.shard.model_card.model_id,
+                        attempt_id=failed.attempt_id if attempt_scoped else None,
+                    ),
+                )
+            )
+            await anyio.wait_all_tasks_blocked()
+            assert bool(harness.coordinator._pending_download_starts) == attempt_scoped
+            release.set()
+            if attempt_scoped:
+                completed = await _terminal(harness)
+                assert isinstance(completed, DownloadCompleted)
+                assert completed.attempt_id != failed.attempt_id
+            await _idle(harness)
+            assert harness.downloader.calls == (2 if attempt_scoped else 1)
+            assert not harness.coordinator._pending_download_starts
+            harness.coordinator._tg.cancel_tasks()
+
+
 async def test_explicit_retry_preserves_offline_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
