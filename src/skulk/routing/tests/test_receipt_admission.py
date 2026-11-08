@@ -5,15 +5,28 @@
 from typing import Literal, cast
 
 import anyio
+import pytest
 from skulk_pyo3_bindings import NetworkingHandle
 
 from skulk.master.main import Master
 from skulk.routing.router import Router, TopicRouter
+from skulk.routing.tests.test_local_control_delivery import _components
 from skulk.routing.topics import LOCAL_EVENT_RECEIPTS
-from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
+from skulk.shared.types.commands import (
+    ForwarderCommand,
+    ForwarderDownloadCommand,
+    RequestEventLog,
+)
 from skulk.shared.types.common import NodeId, SessionId, SystemId
-from skulk.shared.types.events import Event, GlobalForwarderEvent, LocalForwarderEvent
+from skulk.shared.types.events import (
+    Event,
+    GlobalForwarderEvent,
+    LocalForwarderEvent,
+    TaskDeleted,
+    TracingStateChanged,
+)
 from skulk.shared.types.state_sync import LocalEventReceipt, StateSyncMessage
+from skulk.shared.types.tasks import TaskId
 from skulk.utils.channels import Receiver, channel
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -58,6 +71,99 @@ async def test_receipt_origin_subscription_coalesces_without_a_consumer() -> Non
             await topic.publish(_receipt(source, head=head), origin="master")
         assert receiver.statistics().current_buffer_used == 1
         assert receiver.receive_nowait()[1].next_global_idx == 2047
+
+
+@pytest.mark.parametrize(
+    ("previous_through", "previous_head", "incoming_through", "incoming_head"),
+    [(0, 2, 0, 1), (3, 10, 2, 10), (5, 8, 4, 9)],
+)
+async def test_response_coalescing_preserves_each_progress_high_water_mark(
+    previous_through: int,
+    previous_head: int,
+    incoming_through: int,
+    incoming_head: int,
+) -> None:
+    """Out-of-order arrivals cannot erase acknowledged prefixes or replay targets."""
+    _, topic, receiver = await _subscription()
+    previous = _receipt(SystemId(), head=previous_head).model_copy(
+        update={"through_idx": previous_through}
+    )
+    incoming = previous.model_copy(
+        update={"through_idx": incoming_through, "next_global_idx": incoming_head}
+    )
+    with receiver:
+        await topic.publish(previous, origin="master")
+        await topic.publish(incoming, origin="master")
+        assert receiver.statistics().current_buffer_used == 1
+        result = receiver.receive_nowait()[1]
+        assert result.through_idx == max(previous_through, incoming_through)
+        assert result.next_global_idx == max(previous_head, incoming_head)
+
+
+async def test_reversed_queued_response_keeps_replay_after_outbox_retirement() -> None:
+    """The real subscriber and consumer recover a lost final frame after coalescing."""
+    _, topic, receipts = await _subscription()
+    router, outbound, incoming = _components()
+    router.nack_base_seconds = router.nack_cap_seconds = 0.01
+    commands = router.command_sender.clone_receiver()
+    indexed = router.receiver()
+    with anyio.fail_after(5):
+        async with router._tg as group:
+            group.start_soon(router._run_ext_in)
+            await router.sender().send(TaskDeleted(task_id=TaskId()))
+            local = await outbound.receive()
+            latest = LocalEventReceipt(
+                kind="response",
+                requester=router.node_id,
+                source=local.origin,
+                session_id=router.session_id,
+                through_idx=0,
+                next_global_idx=2,
+            )
+            await topic.publish(latest, origin="master")
+            await topic.publish(
+                latest.model_copy(update={"next_global_idx": 1}), origin="master"
+            )
+            group.start_soon(router._receive_delivery_receipts, receipts)
+            group.start_soon(router._retry_receipt_replay)
+            first_request = await commands.receive()
+            assert isinstance(first_request.command, RequestEventLog)
+            assert first_request.command.since_idx == 0
+            assert not router.out_for_delivery
+            assert router._receipt_replay_target == 2
+            for index in range(2):
+                if index:
+                    retry = await commands.receive()
+                    assert isinstance(retry.command, RequestEventLog)
+                    assert retry.command.since_idx == index
+                event = TracingStateChanged(enabled=index % 2 == 0)
+                await incoming.send(
+                    GlobalForwarderEvent(
+                        origin=router.session_id.master_node_id,
+                        origin_idx=index,
+                        session=router.session_id,
+                        event=event,
+                    )
+                )
+                assert (await indexed.receive()).event == event
+            await anyio.sleep(0.6)
+            assert commands.collect() == []
+            group.cancel_scope.cancel()
+
+
+async def test_coalescing_cannot_expand_metadata_past_the_frame_limit() -> None:
+    """Combining individually admitted counters cannot bypass the byte bound."""
+    _, topic, receiver = await _subscription()
+    large = 10**2000
+    previous = _receipt(SystemId()).model_copy(update={"through_idx": large})
+    incoming = previous.model_copy(update={"through_idx": 0, "next_global_idx": large})
+    with receiver:
+        await topic.publish(previous, origin="master")
+        await topic.publish(incoming, origin="master")
+        assert receiver.statistics().current_buffer_used == 1
+        origin, result = receiver.receive_nowait()
+        assert result == previous
+        assert len(result.model_dump_json().encode("utf-8")) + len(origin or "") <= 4096
 
 
 async def test_receipt_origin_subscription_bounds_unique_sources_and_frame_bytes() -> (

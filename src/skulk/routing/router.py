@@ -250,7 +250,7 @@ _MAX_LOCAL_RECEIPT_WIRE_BYTES = 4096
 @final
 @dataclass(eq=False)
 class _CoalescingReceiptSender[T: CamelCaseModel](Sender[tuple[str | None, T]]):
-    """Retain bounded latest receipts without blocking the shared receive loop."""
+    """Retain bounded receipt progress without blocking shared reception."""
 
     @classmethod
     def adopt_receipts(
@@ -262,7 +262,7 @@ class _CoalescingReceiptSender[T: CamelCaseModel](Sender[tuple[str | None, T]]):
         return adopted
 
     def send_nowait(self, item: tuple[str | None, T]) -> None:
-        """Replace a queued lineage or evict its oldest retry when capacity is full.
+        """Coalesce lineage progress or evict its oldest retry when capacity is full.
 
         Args:
             item: Authenticated transport origin and validated receipt payload.
@@ -298,6 +298,27 @@ class _CoalescingReceiptSender[T: CamelCaseModel](Sender[tuple[str | None, T]]):
                 previous.source,
                 previous.session_id,
             ):
+                if receipt.kind == "response":
+                    # Arrival order is not progress order. Retain both maxima
+                    # exactly as the consumer would after receiving both, or a
+                    # stale response can erase the last missing replay target.
+                    receipt = receipt.model_copy(
+                        update={
+                            "through_idx": max(previous.through_idx, receipt.through_idx),
+                            "next_global_idx": max(
+                                previous.next_global_idx, receipt.next_global_idx
+                            ),
+                        }
+                    )
+                    if (
+                        len(receipt.model_dump_json().encode("utf-8"))
+                        + len((origin or "").encode("utf-8"))
+                        > _MAX_LOCAL_RECEIPT_WIRE_BYTES
+                    ):
+                        # Even coalescing malformed oversized counters must
+                        # preserve the same fixed per-frame admission bound.
+                        return
+                    item = (origin, receipt)
                 self._state.buffer[index] = item
                 return
         try:

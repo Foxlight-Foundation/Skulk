@@ -332,8 +332,10 @@ cursor until that target is reached, surviving lost requests and missing final
 replay frames without depending on local outbox activity, while those events
 remain in the master's retained log. Local self-master probes short-circuit peer
 egress. Origin-aware receipt subscriptions coalesce by transport origin,
-requester, source, session and request/response kind. Each holds at most 256
-frames of 4 KiB each (at most 1 MiB encoded); oversized metadata is not admitted.
+requester, source, session and request/response kind. Responses preserve the
+highest acknowledged prefix and highest global head independently, so a delayed
+older reply cannot erase replay work after outbox retirement. Requests retain
+latest metadata. Each subscription holds at most 256 frames of 4 KiB each (at most 1 MiB encoded); oversized metadata is not admitted.
 Admission never blocks the shared network receive loop. A full queue evicts its
 oldest disposable metadata, which ordinary idempotent retry repairs.
 
