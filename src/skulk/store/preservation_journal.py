@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import cast, final
 
+from foxlight_model_preservation.signing import encode_record
 from pydantic import JsonValue, TypeAdapter
 
 from skulk.store.discovery_contracts import DiscoveryJob, DiscoveryRequest
@@ -25,6 +26,12 @@ from skulk.store.preservation_contracts import (
     PreservationJob,
     PreservationPlan,
     PreservationStart,
+)
+from skulk.store.preservation_terms import (
+    TermsRefusedError,
+    acceptance_record,
+    check_acceptance,
+    required_terms,
 )
 
 
@@ -270,6 +277,10 @@ class PreservationJournal:
                     and not request.public_participation
                 ):
                     raise PreservationHostError("public_participation_required")
+                try:
+                    accepted_terms = check_acceptance(plan, request.accepted_terms)
+                except TermsRefusedError as refused:
+                    raise PreservationHostError(refused.code) from None
                 # Retire display history, never its permanent request reservation.
                 # Uncertain outcomes and stopped work stay inspectable. Presence
                 # pins even legacy or unsafe work: cleanup authenticates custody
@@ -328,6 +339,7 @@ class PreservationJournal:
                     state="queued",
                     created_at=now,
                     updated_at=now,
+                    accepted_terms=accepted_terms,
                 )
                 db.execute(
                     "INSERT INTO requests VALUES (?,?,?,?)",
@@ -341,6 +353,18 @@ class PreservationJournal:
                     "INSERT INTO settings VALUES (?,?)",
                     ("request:" + job_id, request.model_dump_json()),
                 )
+                if accepted_terms:
+                    # Recorded with the job in the same transaction, so the
+                    # acceptance exists before any byte of the model is fetched.
+                    db.execute(
+                        "INSERT INTO settings VALUES (?,?)",
+                        (
+                            "terms-acceptance:" + job_id,
+                            encode_record(
+                                acceptance_record(plan, job_id, accepted_terms)
+                            ).decode(),
+                        ),
+                    )
                 db.execute("COMMIT")
                 return job, True
             except BaseException:
@@ -468,6 +492,18 @@ class PreservationJournal:
                     raise PreservationHostError("receive_resume_inputs_changed")
                 if not request.accept_owner_capture:
                     raise PreservationHostError("owner_capture_acceptance_required")
+                # The original start's acceptance stays on record; a resume needs
+                # no second tick. A job started before acceptance was recorded,
+                # or a new explicit acceptance, is checked exactly as at start.
+                try:
+                    if request.accepted_terms or tuple(
+                        sorted(previous.accepted_terms)
+                    ) != required_terms(plan):
+                        accepted_terms = check_acceptance(plan, request.accepted_terms)
+                    else:
+                        accepted_terms = ()
+                except TermsRefusedError as refused:
+                    raise PreservationHostError(refused.code) from None
                 count = cast(
                     tuple[int], db.execute("SELECT count(*) FROM requests").fetchone()
                 )[0]
@@ -490,7 +526,18 @@ class PreservationJournal:
                         "error_code": None,
                         "result": None,
                     }
+                    | ({"accepted_terms": accepted_terms} if accepted_terms else {})
                 )
+                if accepted_terms:
+                    db.execute(
+                        "INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (
+                            "terms-acceptance:" + job_id,
+                            encode_record(
+                                acceptance_record(plan, job_id, accepted_terms)
+                            ).decode(),
+                        ),
+                    )
                 if peer_resume:
                     setup_id = TypeAdapter[str](Digest).validate_python(
                         payload.get("peer_setup_id")

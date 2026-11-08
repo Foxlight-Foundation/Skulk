@@ -28,6 +28,8 @@ _BODYLESS_MUTATIONS = {
     ("POST", "/preservation/setup/device"),
     ("POST", "/preservation/setup/publisher"),
     ("POST", "/preservation/jobs/{job_id}/cancel"),
+    # Best-effort reachability of the configured address; it takes no input.
+    ("POST", "/preservation/mirror/check-address"),
     # Metadata cancellation is an operator action with no new policy/body.
     ("POST", "/preservation/discovery/jobs/{job_id}/cancel"),
     ("POST", "/preservation/jobs/{job_id}/reclaim"),

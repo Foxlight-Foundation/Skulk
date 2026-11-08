@@ -209,6 +209,29 @@ class PublicationMember(PreservationContract):
 
 
 @final
+class PlanMemberTerms(PreservationContract):
+    """One member's declared licence and where its full text is; never a rights grant."""
+
+    member: str = Field(
+        min_length=1, max_length=64, description="Exact signed member selection."
+    )
+    license_id: str = Field(
+        max_length=200, description="Declared licence identifier, as signed."
+    )
+    reference: str = Field(
+        min_length=1,
+        max_length=2048,
+        description="Licence file in the bundle, or the original card's reference.",
+    )
+    repository: str | None = Field(
+        default=None, max_length=2048, description="Original repository, if any."
+    )
+    revision: str | None = Field(
+        default=None, max_length=512, description="Exact original revision, if any."
+    )
+
+
+@final
 class PublicationSource(PreservationContract):
     """Metadata-only source for an exact private copy's publication review."""
 
@@ -714,6 +737,12 @@ class PreservationPlan(PreservationContract):
         max_length=64,
         description="Original signed file binding, separate from captured hashes.",
     )
+    member_terms: tuple[PlanMemberTerms, ...] = Field(
+        default=(),
+        max_length=256,
+        exclude_if=omit_peer_default,
+        description="Receive plans: each member's signed licence and terms reference, for a terms review before download. Licences with use restrictions or conditions, and unidentified ones, need explicit acceptance at start.",
+    )
 
 
 @final
@@ -743,6 +772,13 @@ class PreservationStart(PreservationContract):
     public_participation: bool = Field(
         default=False,
         description="Explicit public-audience publication, hosting or swarm participation; publication starts no listener.",
+    )
+    accepted_terms: tuple[Annotated[str, Field(max_length=600)], ...] | None = Field(
+        default=None,
+        strict=False,  # FastAPI supplies decoded JSON lists; items stay strict.
+        max_length=256,
+        exclude_if=omit_peer_default,
+        description="Receive plans with member terms: exactly the licence identifiers whose terms the person accepted (the review's accept list). Core refuses terms_acceptance_required otherwise and records the acceptance before any download. Not legal advice.",
     )
 
 
@@ -872,6 +908,12 @@ class PreservationJob(PreservationContract):
     result: dict[str, JsonValue] | None = Field(
         default=None,
         description="Bounded safe terminal receipt, independently checked by the host.",
+    )
+    accepted_terms: tuple[str, ...] = Field(
+        default=(),
+        max_length=256,
+        exclude_if=omit_peer_default,
+        description="Licence terms the person accepted for this receive, recorded before any download.",
     )
 
 

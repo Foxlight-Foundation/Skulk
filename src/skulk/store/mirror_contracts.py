@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal, final
+from typing import Annotated, Literal, final
 
+from foxlight_model_preservation.mirror_cards import base_url
+from foxlight_model_preservation.mirror_models import IntakePolicy
 from pydantic import Field, model_validator
 
 from skulk.store.preservation_contracts import (
@@ -26,8 +28,31 @@ MirrorKind = Literal[
     "prune",
     "prepare_kit",
     "recover",
+    "intake",
 ]
-MirrorAction = Literal["pin", "unpin", "block", "unblock", "retry"]
+MirrorAction = Literal[
+    "pin",
+    "unpin",
+    "block",
+    "unblock",
+    "retry",
+    "acknowledge",
+    "withhold",
+    "release",
+]
+# The announcement disclosure version this Core recognizes: the text a client
+# shows before consent (public address, DHT and Nostr exposure, no anonymity).
+ANNOUNCE_DISCLOSURE = 1
+AddressOutcome = Literal[
+    "this_mirror",
+    "other_mirror",
+    "no_card",
+    "not_a_mirror",
+    "http_error",
+    "private_address",
+    "too_slow",
+    "unreachable",
+]
 
 
 def _omit_absent(value: object) -> bool:
@@ -52,15 +77,15 @@ class MirrorConfiguration(PreservationContract):
         le=2**53 - 1,
         description="Daily network intake allowance; local retention spends none.",
     )
-    egress_daily: int = Field(
+    egress_daily: int | None = Field(
         ge=1,
         le=2**53 - 1,
-        description="Conservatively reserved daily upload allowance.",
+        description="Conservatively reserved daily upload allowance; null is no cap (uploads are still counted).",
     )
-    egress_monthly: int = Field(
+    egress_monthly: int | None = Field(
         ge=1,
         le=2**53 - 1,
-        description="Conservatively reserved monthly upload allowance.",
+        description="Conservatively reserved monthly upload allowance; null is no cap (uploads are still counted).",
     )
     http: bool = Field(
         default=False,
@@ -111,13 +136,109 @@ class MirrorConfiguration(PreservationContract):
         le=100 * 1024**2,
         description="Native upload rate in bytes per second.",
     )
+    public_url: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=2048,
+        description="Credential-free HTTP(S) base URL announced in this mirror's signed card. Saving it contacts nothing; an address is public, not anonymous.",
+    )
+    announce_dht: bool = Field(
+        default=False,
+        description="Also announce the public address on the public BitTorrent DHT (plain-HTTP root URLs only).",
+    )
+    publish_nostr: bool = Field(
+        default=False,
+        description="Also copy the signed card to third-party Nostr relays.",
+    )
+    follow_withdrawals: bool = Field(
+        default=False,
+        description="Operator choice to stop serving a copy a followed catalog withdrew, unless acknowledged. Off by default: a withdrawal is advisory only and no catalog publisher can take a copy down. Part of the reviewed policy; changing it clears restart permission.",
+    )
+    announce_disclosure: int | None = Field(
+        default=None,
+        ge=1,
+        le=1000,
+        description="Announcement disclosure version shown before consent. Nothing is announced until a recognized version is recorded with this configuration.",
+    )
 
     @model_validator(mode="after")
     def check_peer_selection(self) -> MirrorConfiguration:
         """Bind IPFS to current reviewed setup, without granting network effects."""
         if self.ipfs != (self.peer_setup_id is not None):
             raise ValueError("IPFS requires its exact peer setup identity")
+        if self.public_url is not None and base_url(self.public_url) != self.public_url:
+            raise ValueError("public URL must be a plain HTTP(S) base URL")
+        if (self.announce_dht or self.publish_nostr) and self.public_url is None:
+            raise ValueError("announcing needs a public URL")
         return self
+
+    def announces(self) -> bool:
+        """Whether this configuration may announce: an address and its disclosure."""
+        return (
+            self.public_url is not None
+            and self.announce_disclosure is not None
+            and self.announce_disclosure >= ANNOUNCE_DISCLOSURE
+        )
+
+
+@final
+class MirrorIntake(PreservationContract):
+    """The owner's standing public intake policy, held by Core under the grant.
+
+    ``eligible`` admits a newly kept public copy whose every member licence is
+    listed, without new consent: the restart grant already covers it.
+    ``chosen`` admits nothing on its own. ``withheld`` copies stay back from
+    serving and from standing intake; withholding only narrows.
+    """
+
+    share: Literal["eligible", "chosen"] = Field(
+        description="Share every eligible public copy, or only individually chosen ones."
+    )
+    licenses: tuple[Annotated[str, Field(min_length=1, max_length=200)], ...] = Field(
+        strict=False,  # FastAPI supplies decoded JSON lists; items stay strict.
+        min_length=1,
+        max_length=128,
+        description="Normalized, unique licence identifiers the owner reviewed.",
+    )
+    definition: int = Field(
+        ge=1,
+        le=1000,
+        description="Licence-definition version the list was reviewed under.",
+    )
+    withheld: tuple[Digest, ...] = Field(
+        default=(),
+        strict=False,
+        max_length=1000,
+        description="Exact copies kept back from serving and standing intake.",
+    )
+
+    @model_validator(mode="after")
+    def check_policy(self) -> MirrorIntake:
+        """Refuse anything the core intake policy would refuse, before any effect."""
+        self.core()
+        return self
+
+    def core(self) -> IntakePolicy:
+        """The exact core ``IntakePolicy`` this decision records."""
+        try:
+            return IntakePolicy(
+                share=self.share,
+                licenses=self.licenses,
+                definition=self.definition,
+                withheld=self.withheld,
+            )
+        except ValueError as error:
+            raise ValueError("invalid standing intake policy") from error
+
+    @classmethod
+    def observed(cls, policy: IntakePolicy) -> MirrorIntake:
+        """Project a saved core policy for the mirror page."""
+        return cls(
+            share=policy.share,
+            licenses=policy.licenses,
+            definition=policy.definition,
+            withheld=policy.withheld,
+        )
 
 
 @final
@@ -186,12 +307,19 @@ class MirrorRequest(PreservationContract):
         default=None,
         description="Exact operator deletion confirmation; no automatic eviction.",
     )
+    intake: MirrorIntake | None = Field(
+        default=None,
+        exclude_if=_omit_absent,
+        description="Standing intake policy for an intake decision; null clears it. Any effective change clears restart permission, except the withheld list, which only narrows.",
+    )
 
     @model_validator(mode="after")
     def check_decision(self) -> MirrorRequest:
         """Refuse missing authority and inputs belonging to a different operation."""
         if (self.configuration is not None) != (self.kind == "configure"):
             raise ValueError("configuration belongs only to configure")
+        if self.kind != "intake" and self.intake is not None:
+            raise ValueError("an intake policy belongs only to intake")
         if self.kind != "configure" and self.policy_id is None:
             raise ValueError("review the current mirror policy first")
         if self.kind == "retain":
@@ -325,6 +453,11 @@ class MirrorJob(PreservationContract):
         default=False,
         description="Operator removed this job's prepared or incomplete kit generation; retained models are unaffected.",
     )
+    admitted_by: Literal["intake"] | None = Field(
+        default=None,
+        exclude_if=_omit_absent,
+        description="Present on a retain that Core started itself under the standing intake policy and the existing grant, without a new consent.",
+    )
 
 
 @final
@@ -359,6 +492,63 @@ class MirrorModel(PreservationContract):
         default=None,
         ge=0,
         description="Declared logical closure bytes, without scanning weights.",
+    )
+    withheld: bool = Field(
+        default=False,
+        description="Kept back from serving and standing intake by the owner.",
+    )
+
+
+@final
+class MirrorWithdrawalAdvisory(PreservationContract):
+    """A followed catalog stopped listing a retained copy: advice, not a takedown.
+
+    No catalog publisher is a takedown authority. The copy keeps serving unless
+    the operator blocks it, or turned on following withdrawals and has not
+    acknowledged this one.
+    """
+
+    manifest_id: Digest = Field(description="Exact retained copy.")
+    source_id: Digest | None = Field(
+        default=None, description="Withdrawing source, when known."
+    )
+    catalog_id: Digest | None = Field(
+        default=None, description="Exact catalog version that omitted it, when known."
+    )
+    observed_at: int | None = Field(
+        default=None, ge=0, description="First observation, Unix seconds."
+    )
+    acknowledged: bool = Field(description="The operator reviewed this advisory.")
+    serving_withheld: bool = Field(
+        description="Serving stops for it only because the operator follows withdrawals."
+    )
+    blocked: bool = Field(description="The operator's own serving block.")
+    advice: str = Field(max_length=500, description="What the operator can do.")
+
+
+@final
+class MirrorUsage(PreservationContract):
+    """Counted transfer volume in the current UTC day and month."""
+
+    uploaded_today_bytes: int = Field(ge=0, description="Bytes served today.")
+    uploaded_month_bytes: int = Field(ge=0, description="Bytes served this month.")
+    received_today_bytes: int = Field(ge=0, description="Bytes received today.")
+
+
+@final
+class MirrorAddressCheck(PreservationContract):
+    """Best-effort reachability of the configured public address, from this host only."""
+
+    address: str = Field(max_length=2048, description="The configured public URL.")
+    outcome: AddressOutcome = Field(
+        description="What this host saw. this_mirror shows the address answers here; it cannot prove others can reach it."
+    )
+    http_status: int | None = Field(
+        default=None, ge=100, le=599, description="Status of an HTTP error, if any."
+    )
+    best_effort: Literal[True] = Field(
+        default=True,
+        description="Always true: a check from this host, not proof of public reachability.",
     )
 
 
@@ -473,6 +663,39 @@ class MirrorPage(PreservationContract):
     )
     next_offset: int | None = Field(
         default=None, ge=0, le=1000, description="Next model-page offset."
+    )
+    intake: MirrorIntake | None = Field(
+        default=None,
+        description="Saved standing intake policy (share mode and licences), or null.",
+    )
+    usage: MirrorUsage | None = Field(
+        default=None,
+        description="Counted uploads and intake, including when uploads are uncapped.",
+    )
+    follow_withdrawals: bool = Field(
+        default=False,
+        description="Operator choice to stop serving withdrawn copies; off means advisory only.",
+    )
+    withdrawal_advisories: tuple[MirrorWithdrawalAdvisory, ...] = Field(
+        default=(),
+        max_length=100,
+        description="Catalog withdrawal advisories, first 100 by manifest. Advice only; blocking is the operator's takedown.",
+    )
+    withdrawal_advisory_count: int = Field(
+        default=0, ge=0, le=1000, description="All current advisories."
+    )
+    dht_announcing: bool = Field(
+        default=False,
+        description="The owned controller is announcing the public address on the DHT now.",
+    )
+    nostr_publishing: bool = Field(
+        default=False,
+        description="The owned controller is publishing the signed card to Nostr relays now.",
+    )
+    announce_reasons: tuple[str, ...] = Field(
+        default=(),
+        max_length=16,
+        description="Why announcing is off or limited, as stable codes; empty while announcing as configured.",
     )
 
 

@@ -322,6 +322,7 @@ async def test_native_source_to_verified_copy_then_offline_search_after_restart(
                             operation_id="receive-discovered",
                             owner_id="library-receive",
                             accept_owner_capture=True,
+                            accepted_terms=("test-only",),
                         )
                     )
                     completed = await settled(host, received.job_id)
@@ -919,6 +920,7 @@ async def test_discovered_skulk_model_restores_companions_with_separate_code_con
                             "operation_id": "receive",
                             "owner_id": "new-library-receiving",
                             "accept_owner_capture": True,
+                            "accepted_terms": ["test-only"],
                         },
                     )
                     received = await settled(

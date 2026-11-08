@@ -358,6 +358,7 @@ async def test_real_i2p_core_source_receive_restart_and_offline_recovery(
                             operation_id="receive",
                             owner_id="library",
                             accept_owner_capture=True,
+                            accepted_terms=("test-only",),
                         )
                     ).job_id,
                 )
@@ -504,6 +505,7 @@ async def test_i2p_receive_stop_restart_and_exact_policy_resume(tmp_path: Path) 
                     operation_id="receive-i2p",
                     owner_id="library",
                     accept_owner_capture=True,
+                    accepted_terms=("test-only",),
                 )
             )
             assert await asyncio.to_thread(blocked.wait, 10)
