@@ -83,9 +83,13 @@ class _ControlledSendEventRouter(EventRouter):
 @pytest.mark.asyncio
 async def test_snapshot_supported_bootstrap_replays_only_tail() -> None:
     session_id = SessionId(master_node_id=NodeId("master"), election_clock=3)
-    router, command_receiver, state_sync_requests, state_sync_responses, event_sender = (
-        _make_router(session_id)
-    )
+    (
+        router,
+        command_receiver,
+        state_sync_requests,
+        state_sync_responses,
+        event_sender,
+    ) = _make_router(session_id)
     internal_receiver = router.receiver()
 
     async with anyio.create_task_group() as tg:
@@ -141,9 +145,13 @@ async def test_snapshot_supported_bootstrap_replays_only_tail() -> None:
 @pytest.mark.asyncio
 async def test_old_master_fallback_requests_full_replay() -> None:
     session_id = SessionId(master_node_id=NodeId("master"), election_clock=5)
-    router, command_receiver, state_sync_requests, _state_sync_responses, event_sender = (
-        _make_router(session_id)
-    )
+    (
+        router,
+        command_receiver,
+        state_sync_requests,
+        _state_sync_responses,
+        event_sender,
+    ) = _make_router(session_id)
     internal_receiver = router.receiver()
 
     async with anyio.create_task_group() as tg:
@@ -177,9 +185,13 @@ async def test_old_master_fallback_requests_full_replay() -> None:
 @pytest.mark.asyncio
 async def test_snapshot_session_mismatch_falls_back_to_full_replay() -> None:
     session_id = SessionId(master_node_id=NodeId("master"), election_clock=7)
-    router, command_receiver, state_sync_requests, state_sync_responses, _event_sender = (
-        _make_router(session_id)
-    )
+    (
+        router,
+        command_receiver,
+        state_sync_requests,
+        state_sync_responses,
+        _event_sender,
+    ) = _make_router(session_id)
     internal_receiver = router.receiver()
 
     async with anyio.create_task_group() as tg:
@@ -220,9 +232,13 @@ async def test_snapshot_session_mismatch_falls_back_to_full_replay() -> None:
 @pytest.mark.asyncio
 async def test_snapshot_gap_triggers_nack_recovery() -> None:
     session_id = SessionId(master_node_id=NodeId("master"), election_clock=9)
-    router, command_receiver, state_sync_requests, state_sync_responses, event_sender = (
-        _make_router(session_id)
-    )
+    (
+        router,
+        command_receiver,
+        state_sync_requests,
+        state_sync_responses,
+        event_sender,
+    ) = _make_router(session_id)
     internal_receiver = router.receiver()
 
     async with anyio.create_task_group() as tg:
@@ -294,9 +310,13 @@ async def test_snapshot_gap_triggers_nack_recovery() -> None:
 @pytest.mark.asyncio
 async def test_snapshot_bootstrap_retries_before_full_replay_fallback() -> None:
     session_id = SessionId(master_node_id=NodeId("master"), election_clock=11)
-    router, command_receiver, state_sync_requests, state_sync_responses, _event_sender = (
-        _make_router(session_id)
-    )
+    (
+        router,
+        command_receiver,
+        state_sync_requests,
+        state_sync_responses,
+        _event_sender,
+    ) = _make_router(session_id)
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(router.run)
@@ -337,9 +357,13 @@ async def test_snapshot_bootstrap_retries_before_full_replay_fallback() -> None:
 @pytest.mark.asyncio
 async def test_snapshot_bootstrap_ignores_non_master_origin() -> None:
     session_id = SessionId(master_node_id=NodeId("master"), election_clock=12)
-    router, command_receiver, state_sync_requests, state_sync_responses, _event_sender = (
-        _make_router(session_id)
-    )
+    (
+        router,
+        command_receiver,
+        state_sync_requests,
+        state_sync_responses,
+        _event_sender,
+    ) = _make_router(session_id)
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(router.run)
@@ -372,9 +396,13 @@ async def test_snapshot_bootstrap_ignores_non_master_origin() -> None:
 @pytest.mark.asyncio
 async def test_snapshot_bootstrap_accepts_local_self_master_origin() -> None:
     session_id = SessionId(master_node_id=NodeId("self"), election_clock=13)
-    router, command_receiver, state_sync_requests, state_sync_responses, _event_sender = (
-        _make_router(session_id, node_id=NodeId("self"))
-    )
+    (
+        router,
+        command_receiver,
+        state_sync_requests,
+        state_sync_responses,
+        _event_sender,
+    ) = _make_router(session_id, node_id=NodeId("self"))
     internal_receiver = router.receiver()
 
     async with anyio.create_task_group() as tg:
@@ -414,15 +442,17 @@ async def test_snapshot_bootstrap_accepts_local_self_master_origin() -> None:
 @pytest.mark.asyncio
 async def test_release_ready_events_preserves_order_during_concurrent_drains() -> None:
     session_id = SessionId(master_node_id=NodeId("master"), election_clock=14)
-    router, _command_receiver, _state_sync_requests, _state_sync_responses, _sender = cast(
-        tuple[
-            _ControlledSendEventRouter,
-            Receiver[ForwarderCommand],
-            Receiver[StateSyncMessage],
-            Sender[tuple[str | None, StateSyncMessage]],
-            Sender[GlobalForwarderEvent],
-        ],
-        _make_router(session_id, router_cls=_ControlledSendEventRouter),
+    router, _command_receiver, _state_sync_requests, _state_sync_responses, _sender = (
+        cast(
+            tuple[
+                _ControlledSendEventRouter,
+                Receiver[ForwarderCommand],
+                Receiver[StateSyncMessage],
+                Sender[tuple[str | None, StateSyncMessage]],
+                Sender[GlobalForwarderEvent],
+            ],
+            _make_router(session_id, router_cls=_ControlledSendEventRouter),
+        )
     )
 
     router.event_buffer.ingest(0, TestEvent())
@@ -443,11 +473,17 @@ async def test_release_ready_events_preserves_order_during_concurrent_drains() -
 
 
 @pytest.mark.asyncio
-async def test_conflicting_duplicate_index_requests_replay_instead_of_crashing() -> None:
+async def test_conflicting_duplicate_index_requests_replay_instead_of_crashing() -> (
+    None
+):
     session_id = SessionId(master_node_id=NodeId("master"), election_clock=15)
-    router, command_receiver, state_sync_requests, state_sync_responses, event_sender = (
-        _make_router(session_id)
-    )
+    (
+        router,
+        command_receiver,
+        state_sync_requests,
+        state_sync_responses,
+        event_sender,
+    ) = _make_router(session_id)
     internal_receiver = router.receiver()
 
     async with anyio.create_task_group() as tg:
@@ -517,19 +553,14 @@ async def test_conflicting_duplicate_index_requests_replay_instead_of_crashing()
 
 
 @pytest.mark.asyncio
-async def test_simple_retry_backs_off_and_gives_up() -> None:
-    """Unbounded fixed-interval resend amplified event storms (#278).
-
-    Retries must back off exponentially and stop after retry_max_attempts —
-    an event the master never echoes back (dead session, partition,
-    saturation) is dropped instead of being re-sent forever.
-    """
+async def test_simple_retry_retains_the_missing_sequence_after_backoff_saturates() -> (
+    None
+):
+    """A missing source sequence survives a long partition until acknowledgement."""
     session_id = SessionId(master_node_id=NodeId("master"), election_clock=1)
     command_sender, _command_receiver = channel[ForwarderCommand]()
     state_sync_sender, _requests = channel[StateSyncMessage]()
-    _responses, state_sync_receiver = channel[
-        tuple[str | None, StateSyncMessage]
-    ]()
+    _responses, state_sync_receiver = channel[tuple[str | None, StateSyncMessage]]()
     _external_sender, external_receiver = channel[GlobalForwarderEvent]()
     external_outbound, outbound_receiver = channel[LocalForwarderEvent]()
 
@@ -558,10 +589,10 @@ async def test_simple_retry_backs_off_and_gives_up() -> None:
             async for sent in outbound:
                 resent.append(sent)
 
-    # Expired deadline, one attempt left before the cap.
+    # Expire a retry near the saturated backoff.
     router.out_for_delivery[event.event_id] = (
         -1.0,
-        router.retry_max_attempts - 1,
+        5,
         forwarder_event,
     )
 
@@ -571,20 +602,22 @@ async def test_simple_retry_backs_off_and_gives_up() -> None:
         with anyio.fail_after(5):
             while not resent:
                 await anyio.sleep(0.05)
-        # The final allowed attempt was sent with a backed-off deadline.
+        # Retry remains retained and the delay is capped.
         deadline, attempts, _ = router.out_for_delivery[event.event_id]
-        assert attempts == router.retry_max_attempts
+        assert attempts == 6
         assert deadline > anyio.current_time()
 
-        # Force the deadline into the past: the cap must now drop it.
+        # Exceeding the previous retry cap must resend the original sequence.
         router.out_for_delivery[event.event_id] = (
             -1.0,
-            router.retry_max_attempts,
+            6,
             forwarder_event,
         )
         with anyio.fail_after(5):
-            while event.event_id in router.out_for_delivery:
+            while len(resent) < 2:
                 await anyio.sleep(0.05)
         tg.cancel_scope.cancel()
 
-    assert len(resent) == 1
+    assert len(resent) == 2
+    assert event.event_id in router.out_for_delivery
+    assert resent[0].origin_idx == resent[1].origin_idx == 0

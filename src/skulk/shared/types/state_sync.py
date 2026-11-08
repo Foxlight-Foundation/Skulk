@@ -1,8 +1,8 @@
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
-from skulk.shared.types.common import SessionId, SystemId
+from skulk.shared.types.common import NodeId, SessionId, SystemId
 from skulk.shared.types.state import State
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -43,3 +43,26 @@ class StateSyncMessage(CamelCaseModel):
         if self.kind == "response" and self.snapshot is None:
             raise ValueError("State sync responses must carry a snapshot")
         return self
+
+
+class LocalEventReceipt(CamelCaseModel):
+    """Ephemeral request or master receipt for a consumed local source prefix.
+
+    Receipts release ordered delivery storage, including rejected no-op task
+    updates. They never enter replicated State or the durable event log.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["request", "response"]
+    """Requests ask for progress; only the session master sends responses."""
+    requester: NodeId
+    """Node whose EventRouter owns the retained source."""
+    source: SystemId
+    """Producer ordering lineage within the elected session."""
+    session_id: SessionId
+    """Session that consumed the source, preventing cross-election release."""
+    through_idx: int = Field(default=-1, ge=-1)
+    """Last fully processed source index; requests leave this at minus one."""
+    next_global_idx: int = Field(default=0, ge=0)
+    """Master log length, allowing the recipient to request missing replay."""

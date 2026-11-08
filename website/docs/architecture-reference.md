@@ -300,6 +300,65 @@ The bare `audio_cpp` tag reports engine availability, but signed music support a
 
 ### Router (libp2p)
 
+Worker info ingress forwards heartbeats and resource telemetry independently of
+ordered-control admission. A separate owned publisher drains one latest queued
+value per typed connectivity/info kind; a full reliable outbox cannot stall that
+telemetry consumer or create an unbounded FIFO of changed connectivity readings.
+Snapshot replacement and self-timeout invalidate queued, pending and confirmed
+control readings. Normal input closure drains offered values; worker shutdown
+cancels its blocked publisher.
+
+
+Self-master control admission bypasses the serialized topic loop before queueing,
+including after promotion while an earlier follower publication is blocked. The
+master also reports newly consumed prefixes directly to its local EventRouter
+after the whole ordered batch has applied/persisted. That in-process retirement
+performs no peer send, so blocked remote receipt replies cannot strand local
+skipped events. Remote receipts retain their authenticated retry path.
+Local producers reject encoded frames above the conservative 8-MiB transport
+budget (4 KiB reserved for framing and envelope growth) before enqueueing or
+allocating a source sequence. The producer receives an explicit size error;
+cloned handles retain the guard. Retention never waits for an untransmittable
+frame to obtain an acknowledgement.
+
+`LOCAL_EVENT_RECEIPTS` is an ephemeral control topic for retry-time cumulative
+consumption probes. Only authenticated session-master responses can release the
+requesting node's retained source prefix. The master advances that prefix after
+applying/persisting the whole ordered batch, including skipped stale task events;
+receipts themselves never enter State or the event log. Each authenticated reply
+also retains a monotonic global replay target, even after its local source was
+retired. An independent bounded-backoff task retries from the current global
+cursor until that target is reached, surviving lost requests and missing final
+replay frames without depending on local outbox activity, while those events
+remain in the master's retained log. Local self-master probes short-circuit peer
+egress. Origin-aware receipt subscriptions coalesce by transport origin,
+requester, source, session and request/response kind. Responses preserve the
+highest acknowledged prefix and highest global head independently, so a delayed
+older reply cannot erase replay work after outbox retirement. Requests retain
+latest metadata. Each subscription holds at most 256 frames of 4 KiB each (at most 1 MiB encoded); oversized metadata is not admitted.
+Admission never blocks the shared network receive loop. A full queue evicts its
+oldest disposable metadata, which ordinary idempotent retry repairs.
+
+A same-session cursor older than the compacted master tail is a separate recovery
+limit: existing replay clamps to the retained range and does not acquire another
+snapshot for a running follower. This bounded local-delivery path does not add
+live snapshot recovery. Complete the documented same-build fleet deployment
+before resuming workloads.
+
+
+- **Reliable local ordering:** `routing/event_router.py` retains admitted local
+  events under their original source/index until an authenticated master echo or consumed-prefix receipt;
+  it never expires an ordering dependency after a retry count. Retention is
+  bounded by 256 events and 16 MiB (one individually larger legal message may
+  occupy an otherwise empty outbox); producer queues hold one event. Capped
+  exponential retry delay is 30 seconds with at most 16 sends per wakeup.
+- **Local-event egress:** `LOCAL_EVENTS` producer admission is a rendezvous,
+  followed by one serialized packet and its own publisher. A master's own local
+  events bypass peer publication. Non-control events take no source sequence;
+  strict payload validation, master admission and other topic lanes remain
+  authoritative. The worker coalesces pending connectivity readings and clears
+  that coalescing on membership-context replacement or its own timeout.
+
 - **Role:** transport for all inter-node communication
 - **Lives in:** `src/skulk/routing/` (Python wrapper); `rust/networking/` + `rust/skulk_pyo3_bindings/` (Rust libp2p impl + PyO3 bindings)
 - **Topics:** see "Pubsub topics" below

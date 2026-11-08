@@ -37,7 +37,7 @@ from skulk.shared.types.events import (
     GlobalForwarderEvent,
     LocalForwarderEvent,
 )
-from skulk.shared.types.state_sync import StateSyncMessage
+from skulk.shared.types.state_sync import LocalEventReceipt, StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -98,6 +98,9 @@ GLOBAL_EVENTS = TypedTopic(
 )
 LOCAL_EVENTS = TypedTopic(
     "local_events", PublishPolicy.Always, MessagePlane.Control, LocalForwarderEvent
+)
+LOCAL_EVENT_RECEIPTS = TypedTopic(
+    "local_event_receipts", PublishPolicy.Always, MessagePlane.Control, LocalEventReceipt
 )
 COMMANDS = TypedTopic(
     "commands", PublishPolicy.Always, MessagePlane.Control, ForwarderCommand
@@ -244,6 +247,7 @@ TOPIC_PLANE_CENSUS = {
     for topic in (
         GLOBAL_EVENTS,
         LOCAL_EVENTS,
+        LOCAL_EVENT_RECEIPTS,
         COMMANDS,
         ELECTION_MESSAGES,
         AUTHORITY_MESSAGES,

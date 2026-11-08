@@ -62,7 +62,20 @@ flowchart TB
 
 Each subsystem has its own concern:
 
-- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `AUTHORITY_MESSAGES`, `CONNECTION_MESSAGES`, `TELEMETRY`, `DATA`, `PROVIDER_DATA`, `REALTIME_AUDIO`, `SPEECH_MEDIA`, `TRACE_DATA`, `VISION_MEDIA`, and `OUTPUT_MEDIA`. Components subscribe by topic; every topic has a machine-checked control, authority, telemetry, or data plane assignment and payloads are validated Pydantic types.
+Local control delivery preserves every admitted producer sequence until its
+authenticated master echo or consumed-prefix receipt. `EventRouter` bounds retained work to 256 events and
+16 MiB, allowing one larger transport-valid message only while otherwise empty;
+each producer has one queued event. Admission backpressures instead of forgetting
+an event that later ordered events depend on. Retries use capped exponential
+backoff (30 seconds) and at most 16 sends per wakeup. Non-control payloads are
+rejected before taking a local sequence. Unchanged connectivity readings coalesce
+while pending, and become publishable again after snapshot replacement or a
+self-timeout. `LOCAL_EVENTS` has rendezvous producer admission, a one-packet
+serialized egress queue and a separate publish loop. A master's own local events
+short-circuit to its indexer without waiting for peer egress. These bounds do not
+change the separate telemetry, election or authority lanes.
+
+- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `LOCAL_EVENT_RECEIPTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `AUTHORITY_MESSAGES`, `CONNECTION_MESSAGES`, `TELEMETRY`, `DATA`, `PROVIDER_DATA`, `REALTIME_AUDIO`, `SPEECH_MEDIA`, `TRACE_DATA`, `VISION_MEDIA`, and `OUTPUT_MEDIA`. Components subscribe by topic; every topic has a machine-checked control, authority, telemetry, or data plane assignment and payloads are validated Pydantic types.
 - **Telemetry plane** (`TELEMETRY` topic) carries last-write-wins readings that are *not* decisions: each node's `participation` role and `backends`, memory and system profile, observational identity/disk/rdma-ctl status, heartbeat, non-terminal model-download progress, and compact node-local artifact availability. A node-owned inventory service runs independently of the HTTP API (including under `--no-api`), publishes at startup and after storage/runtime transitions, and repairs every 60 seconds; a fixed entry ceiling and truncation flag keep it bounded. Detached records for read-only model roots receive one full hash verification per stable file-stat fingerprint, so periodic repair scans reuse process-local trust while any path, device, inode, size, modification-time, or change-time transition forces re-verification. Canonical card bodies, manifests, and the store catalog never ride telemetry: the store host advertises only its role, and API nodes synthesize canonical `store_local` locations while projecting additional `node_cache` copies from `TelemetryView`. Local receipt time establishes freshness; readings become partial after two publication intervals and are pruned with node membership. Local producers never wait for network capacity: a fixed 256-key admission map replaces older values for the same node/reading (download progress additionally keys by model), evicts the oldest distinct key only at the bound, and drains through a one-packet network queue. Telemetry then uses a dedicated gossipsub behavior and protocol with independent per-peer handler queues: transport isolation is structural, so a saturated control or election path cannot delay telemetry and telemetry fan-out cannot consume control or election capacity. Aggregate pressure is available at `GET /v1/diagnostics/telemetry`. Readings land in an in-memory `TelemetryView`, not event-sourced `State`; only download completion and failure remain durable. Attempt identities stop delayed progress on the independent protocol from overriding terminal/reset decisions, while `GET /state` overlays the live view to preserve the dashboard's wire shape. `GET /store/registry` exposes inventory coverage as `syncing`, `current`, `degraded`, or `unavailable`; this is operator/read truth only. Store reconciliation continues to query each node's `/store/storage` directly and verify identities and manifests before transferring bytes. The system profile includes a collector-agnostic accelerator block (GPU utilization, VRAM used and total, power, temperature, clock) normalized at each platform collector. Because the context-admission ceiling must be identical across ranks but telemetry is unordered, the master computes it once at placement time and stamps it onto the instance (`context_token_limit`). **Connectivity readings stay on the control plane**: `node_network`, the thunderbolt maps, and derived `thunderbolt_bridge_cycles` define the topology graph and therefore require ordered event-sourced state.
   Canonical locality does not depend on card resolution:
   `cache_inventory.store_nodes` identifies the live store hosts even when a
@@ -106,6 +119,51 @@ failed links receive no capacity credit and use the ordinary download path.
 Each bundle retains its own installed record. Deleting one alias only removes
 its links, while another bundle's shared bytes remain available. This does not
 change the 10 GiB reserve or permit automatic eviction from the canonical store.
+
+Worker info ingress forwards heartbeats and resource telemetry independently of
+ordered-control admission. A separate owned publisher drains one latest queued
+value per typed connectivity/info kind; a full reliable outbox cannot stall that
+telemetry consumer or create an unbounded FIFO of changed connectivity readings.
+Snapshot replacement and self-timeout invalidate queued, pending and confirmed
+control readings. Normal input closure drains offered values; worker shutdown
+cancels its blocked publisher.
+
+
+Self-master control admission bypasses the serialized topic loop before queueing,
+including after promotion while an earlier follower publication is blocked. The
+master also reports newly consumed prefixes directly to its local EventRouter
+after the whole ordered batch has applied/persisted. That in-process retirement
+performs no peer send, so blocked remote receipt replies cannot strand local
+skipped events. Remote receipts retain their authenticated retry path.
+Local producers reject encoded frames above the conservative 8-MiB transport
+budget (4 KiB reserved for framing and envelope growth) before enqueueing or
+allocating a source sequence. The producer receives an explicit size error;
+cloned handles retain the guard. Retention never waits for an untransmittable
+frame to obtain an acknowledgement.
+
+`LOCAL_EVENT_RECEIPTS` is an ephemeral control topic for retry-time cumulative
+consumption probes. Only authenticated session-master responses can release the
+requesting node's retained source prefix. The master advances that prefix after
+applying/persisting the whole ordered batch, including skipped stale task events;
+receipts themselves never enter State or the event log. Each authenticated reply
+also retains a monotonic global replay target, even after its local source was
+retired. An independent bounded-backoff task retries from the current global
+cursor until that target is reached, surviving lost requests and missing final
+replay frames without depending on local outbox activity, while those events
+remain in the master's retained log. Local self-master probes short-circuit peer
+egress. Origin-aware receipt subscriptions coalesce by transport origin,
+requester, source, session and request/response kind. Responses preserve the
+highest acknowledged prefix and highest global head independently, so a delayed
+older reply cannot erase replay work after outbox retirement. Requests retain
+latest metadata. Each subscription holds at most 256 frames of 4 KiB each (at most 1 MiB encoded); oversized metadata is not admitted.
+Admission never blocks the shared network receive loop. A full queue evicts its
+oldest disposable metadata, which ordinary idempotent retry repairs.
+
+A same-session cursor older than the compacted master tail is a separate recovery
+limit: existing replay clamps to the retained range and does not acquire another
+snapshot for a running follower. This bounded local-delivery path does not add
+live snapshot recovery. Complete the documented same-build fleet deployment
+before resuming workloads.
 
 ## The shape of a cluster
 
