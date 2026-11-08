@@ -4362,6 +4362,12 @@ observation lifetime with Demucs, whose CPU/Metal policy stays unchanged.
 Candidate availability does not appear in `engine_builds`; only successful actual
 preparation does, and loaded-model readiness remains independent.
 
+Native ACE and separator package preparation classify their known disk-reserve
+refusals into a path-free public error asking the operator to free worker storage
+and retry. The ordered completion remains unsuccessful with no ready resources;
+unknown exception details remain in worker logs. A fresh request can retry on
+the same preparation owner after capacity recovers.
+
 Trusted storage profiles bound complete packages/installed trees to CPU 1/4 GiB,
 CUDA 4/8 GiB and ROCm 3/10 GiB. GPU dependency archive members are capped at
 768 MiB and expanded members at 1 GiB. Installed accounting includes both retained

@@ -10,6 +10,10 @@ import anyio
 import pytest
 
 from skulk.provisioning.demucs_inventory import DEMUCS_PACKAGES
+from skulk.provisioning.demucs_runtime import (
+    DemucsStorageError,
+    PreparedDemucsRuntime,
+)
 from skulk.routing.output_media import OutputMediaPacket
 from skulk.routing.vision_media import VisionMediaPacket
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
@@ -169,6 +173,57 @@ async def test_unknown_package_has_no_install_effect_or_success_snapshot(
         assert (await worker._gather_node_resources()).engine_builds == {
             "audio_cpp-metal": "existing-music-build"
         }
+    finally:
+        await worker._demucs_preparation.close()
+
+
+@pytest.mark.parametrize("storage_failure", [False, True])
+async def test_preparation_failure_is_safe_and_same_worker_can_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    storage_failure: bool,
+) -> None:
+    """Known storage failures expose a remedy, while arbitrary exception text stays private."""
+    worker, manager, output, _ = await fixture(tmp_path, monkeypatch)
+    private_detail = "private-cache-path-and-command-details"
+    failure = (
+        DemucsStorageError(private_detail)
+        if storage_failure
+        else ValueError(private_detail)
+    )
+    original_prepare = manager.prepare
+
+    def fail_prepare(*_arguments: object, **_keywords: object) -> PreparedDemucsRuntime:
+        """Inject only the blocking effect's exception into the real async owner."""
+        raise failure
+
+    monkeypatch.setattr(manager, "prepare", fail_prepare)
+    try:
+        command = DemucsPreparationRequested(
+            request_id=CommandId(),
+            target_node=worker.node_id,
+            owner_node=NodeId("api"),
+            package_sha256=DEMUCS_PACKAGES[0].sha256,
+            device="cpu",
+            expires_at=time.time() + 30,
+        )
+        await worker._prepare_demucs_engine(command)
+        failed = await output.receive()
+        assert isinstance(failed, DemucsPreparationCompleted) and not failed.success
+        assert failed.resources is None and failed.error is not None
+        assert private_detail not in failed.error
+        assert ("free disk space" in failed.error) is storage_failure
+        assert (await worker._gather_node_resources()).engine_builds == {
+            "audio_cpp-metal": "existing-music-build"
+        }
+
+        monkeypatch.setattr(manager, "prepare", original_prepare)
+        await worker._prepare_demucs_engine(
+            command.model_copy(update={"request_id": CommandId()})
+        )
+        recovered = await output.receive()
+        assert isinstance(recovered, DemucsPreparationCompleted) and recovered.success
+        assert recovered.error is None and recovered.resources is not None
     finally:
         await worker._demucs_preparation.close()
 

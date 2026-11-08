@@ -7,6 +7,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Native engine preparation
+
+- Explain insufficient worker disk space when native music or separation engine
+  preparation fails, with a storage cleanup and retry remedy. Keep private cache
+  paths and command details out of the public response.
+
 ### Native music model metadata
 
 - Read native ACE-Step base generation and editing capabilities with complete,
