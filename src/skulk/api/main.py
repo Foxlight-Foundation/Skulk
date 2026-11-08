@@ -560,6 +560,7 @@ from skulk.shared.types.commands import (
     PrepareAudioCpp,
     ProposeStewardAction,
     RealtimeAudioTranscription,
+    RetryDownload,
     SetModelTrustApproval,
     SetTracingEnabled,
     SpeechSynthesis,
@@ -3375,7 +3376,10 @@ class API:
             summary="Start a node download",
             description=(
                 "Start a low-level node download for an exact authorized catalog "
-                "card. Requires a direct loopback or trusted-fabric (private "
+                "card. An explicit request retries a retained failed attempt "
+                "without a delete operation; active and completed same-artifact "
+                "attempts remain idempotent. Requires a direct loopback or "
+                "trusted-fabric (private "
                 "LAN / CGNAT) connection without proxy-forwarding headers, or "
                 "authenticated operator-gateway access; browser requests must "
                 "present an Origin on those trust classes or naming one of "
@@ -14917,7 +14921,10 @@ class API:
     async def start_download(
         self, payload: StartDownloadParams, request: Request
     ) -> StartDownloadResponse:
-        """Start one exact catalog-authorized shard download.
+        """Start or explicitly retry one exact catalog-authorized shard download.
+
+        A terminal failure permits a fresh attempt without deleting local files.
+        Existing active and completed attempts remain idempotent.
 
         Args:
             payload: Target node and shard metadata selected for download.
@@ -14944,7 +14951,7 @@ class API:
                     "the authorized catalog. Refresh model truth and retry."
                 ),
             )
-        command = StartDownload(
+        command = RetryDownload(
             target_node_id=payload.target_node_id,
             shard_metadata=payload.shard_metadata,
         )

@@ -3775,3 +3775,18 @@ revision below the accepted legacy revision is refused. Restart, a failed
 retained-document write or returning from a private catalog cannot restore
 legacy fallback. Introduce both catalogs using existing releases, deploy the
 reader, then publish expanded releases.
+
+## Explicit node-download retry
+
+The operator-authorized `POST /download/start` dispatches `RetryDownload` on
+`DOWNLOAD_COMMANDS` after validating exact catalog truth. This distinct typed
+variant preserves the existing `StartDownload` wire shape and automatic planner
+semantics. `DownloadCoordinator` consumes only a same-artifact terminal failure
+for an explicit retry, clears that attempt's progress throttle and starts a new
+attempt identity through the normal verifier/offline/capacity path. A retry
+arriving during failure publication suppresses old callbacks and waits on the
+existing cleanup-to-queued-start handoff; it does not overlap owners or delete
+files. Active/completed starts remain idempotent. Deploy compatible target
+readers before using the new command. This does not reset coordinator state for
+master-generated `DownloadPending` placement recovery; that cross-component
+recovery remains a separate contract and test obligation.

@@ -34,6 +34,7 @@ from skulk.shared.types.commands import (
     ForwarderDownloadCommand,
     PurgeStagingCache,
     RestartNode,
+    RetryDownload,
     StartDownload,
     SyncConfig,
 )
@@ -367,6 +368,8 @@ class DownloadCoordinator:
                     continue
 
                 match cmd.command:
+                    case RetryDownload(shard_metadata=shard):
+                        await self._start_download(shard, retry_failed=True)
                     case StartDownload(shard_metadata=shard):
                         logger.info(
                             f"DownloadCoordinator: received StartDownload for {shard.model_card.model_id}"
@@ -588,7 +591,10 @@ class DownloadCoordinator:
 
             logger.info(f"PurgeStagingCache: purged {total_purged} model directories")
 
-    async def _start_download(self, shard: ShardMetadata) -> None:
+    async def _start_download(
+        self, shard: ShardMetadata, *, retry_failed: bool = False
+    ) -> None:
+        """Admit one shard attempt, consuming failures only on explicit retry."""
         model_id = shard.model_card.model_id
         status = self.download_status.get(model_id)
         artifact_changed = (
@@ -600,11 +606,22 @@ class DownloadCoordinator:
         )
 
         active_scope = self.active_downloads.get(model_id)
+        retrying_failed = (
+            retry_failed and isinstance(status, DownloadFailed) and not artifact_changed
+        )
         if active_scope is not None:
-            if active_scope.cancel_called:
+            if active_scope.cancel_called or retrying_failed:
                 # Cancellation cleanup can outlive the command-loop tick that
                 # requested it. Retain the replacement command so the active
                 # task's finally block can start it after releasing ownership.
+                if retrying_failed:
+                    # Failure publication can precede the old task's finally
+                    # block. Suppress its tail callbacks and consume only that
+                    # failure; the existing cleanup handoff starts the retry.
+                    self._begin_reset(model_id)
+                    self._reset_progress_throttle(model_id)
+                    del self.download_status[model_id]
+                    active_scope.cancel()
                 self._pending_download_starts[model_id] = shard
                 logger.info(
                     f"DownloadCoordinator: queued restart for {model_id} until "
@@ -625,6 +642,13 @@ class DownloadCoordinator:
             )
             return
 
+        if retrying_failed:
+            # Only an explicit operator start consumes this terminal outcome.
+            # Periodic planner commands must not create a repeated-failure loop.
+            self._reset_progress_throttle(model_id)
+            del self.download_status[model_id]
+            status = None
+
         # Check if already downloading, complete, or recently failed
         if status is not None:
             if artifact_changed:
@@ -638,10 +662,7 @@ class DownloadCoordinator:
             # clear the stale status and re-download from scratch.
             elif isinstance(status, DownloadCompleted) and status.model_directory:
                 model_dir = Path(status.model_directory)
-                if (
-                    not model_dir.is_dir()
-                    or not (model_dir / "config.json").exists()
-                ):
+                if not model_dir.is_dir() or not (model_dir / "config.json").exists():
                     logger.info(
                         f"DownloadCoordinator: {model_id} was DownloadCompleted but "
                         "its directory is stale; re-downloading"
