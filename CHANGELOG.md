@@ -38,6 +38,23 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Model preservation
 
+- Bring Sovereign sharing to Core's persistent mirror. Upload caps are optional
+  (`null` is no cap; uploads are still counted and shown). A standing intake
+  policy keeps the owner's share mode and licence list on Core, and a newly kept
+  public copy it covers joins a running mirror under the existing grant with no
+  new consent; nothing joins while stopped, and private, withheld or uncovered
+  copies are left alone. Copies can be withheld and released without clearing
+  the grant. An announced public address waits for a recorded disclosure, the
+  page reports what is announced and why not, and a best-effort Check address
+  reads the owner's own address from this host only. Catalog withdrawals are
+  advisory by default; following them is an operator-only policy choice, and
+  blocking stays the operator's takedown. Receive plans list each member's
+  licence, and restricted or unidentified terms need explicit acceptance, which
+  Core records before any download. Not legal advice; a public mirror is not
+  anonymous. The standalone dependency moves to a core with licence families,
+  opt-in upload caps, standing intake and advisory withdrawal; Core still keeps
+  preservation-v1 public copies and refuses PMF invitations on receive.
+
 - Describe installed model inputs, outputs and reasoning from attributed registry
   claims in Library, using the installed file list for companion warnings. Exact
   selected projectors satisfy alternative-precision inventories; unrelated missing

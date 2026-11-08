@@ -7,6 +7,7 @@ from starlette.responses import Response
 
 from skulk.api.mirror_kits import MirrorKitDownload
 from skulk.store.mirror_contracts import (
+    MirrorAddressCheck,
     MirrorJob,
     MirrorJobsPage,
     MirrorKitRemoval,
@@ -30,12 +31,25 @@ def install_mirror_routes(
         "/mirror",
         response_model=MirrorPage,
         summary="Read the managed mirror without starting sharing",
-        description="Read one bounded page of selected public copies, actual resource/transport settings, standing permission and live owned activity. Ports and native worker counts describe local ownership, not public reachability. Reading never starts a controller, follows a source or deletes data; private paths, executable selection and signing custody stay on Core.",
+        description="Read one bounded page of selected public copies, actual resource/transport settings (null upload caps mean no cap), counted usage, the saved standing intake policy, withdrawal advisories, announcement status with reasons, standing permission and live owned activity. Ports and native worker counts describe local ownership, not public reachability. Reading never starts a controller, follows a source or deletes data; private paths, executable selection and signing custody stay on Core.",
     )
     async def mirror(request: Request, offset: int = 0) -> MirrorPage:
         owner = await host(request)
         try:
             return await owner.mirrors.page(offset)
+        except (ValueError, OSError) as error:
+            raise refusal(error) from error
+
+    @router.post(
+        "/mirror/check-address",
+        response_model=MirrorAddressCheck,
+        summary="Check the configured public address, best effort",
+        description="Best effort, from this host only: fetch the configured public URL's peers document and report whether it carries this mirror's own signed card (this_mirror, other_mirror, no_card, not_a_mirror, http_error, private_address, too_slow or unreachable). The request goes to the owner's own address and to no third-party service, follows no redirects and is bounded to thirty seconds. Success shows the address answers from here; it cannot prove that people elsewhere can reach it. Nothing is saved, announced or started.",
+    )
+    async def check_address(request: Request) -> MirrorAddressCheck:
+        owner = await host(request)
+        try:
+            return await owner.mirrors.check_address()
         except (ValueError, OSError) as error:
             raise refusal(error) from error
 
@@ -70,7 +84,7 @@ def install_mirror_routes(
         response_model=MirrorJob,
         status_code=202,
         summary="Start one explicit permanent mirror decision",
-        description="Configure offline, retain an exact already accepted public copy with reviewed every-member terms, recover a complete pending selection offline, prepare its recovery kit, select a finite public run or separately approved standing resume, control pin/block/retry, or confirm exact stopped-owner deletion. Recovery requires a stopped controller and original model authority, verifies every actual object and clears Core restart intent; it never fetches or deletes partial bytes. The immutable client operation observes its original job on replay. Every new effect binds current policy; installation, metadata reads, receiving, or a source file grant no sharing. Configuration and local admission clear restart authority as appropriate; no policy evicts retained copies. Direct public PMF transport remains unavailable.",
+        description="Configure offline (upload caps are optional: null is no cap; a public URL is announced only with a recorded announcement disclosure), set or clear the standing intake policy (kind intake, refused beside a running controller), choose whether to follow catalog withdrawals (kind withdrawals, off by default: withdrawals are advisory), retain an exact already accepted public copy with reviewed every-member terms, recover a complete pending selection offline, prepare its recovery kit, select a finite public run or separately approved standing resume, control pin/block/retry/acknowledge/withhold/release, or confirm exact stopped-owner deletion. Withholding keeps a copy back from serving and from standing intake without clearing the grant; acknowledging records that the operator reviewed a withdrawal advisory. Recovery requires a stopped controller and original model authority, verifies every actual object and clears Core restart intent; it never fetches or deletes partial bytes. The immutable client operation observes its original job on replay. Every new effect binds current policy; installation, metadata reads, receiving, or a source file grant no sharing. Configuration and local admission clear restart authority as appropriate; no policy evicts retained copies. Direct public PMF transport remains unavailable.",
     )
     async def start(request: Request, body: MirrorRequest) -> MirrorJob:
         owner = await host(request)
@@ -179,4 +193,15 @@ def install_mirror_routes(
         except (ValueError, OSError) as error:
             raise refusal(error) from error
 
-    _ = mirror, selection, review, start, jobs, job, stop, kit, remove_kit
+    _ = (
+        mirror,
+        check_address,
+        selection,
+        review,
+        start,
+        jobs,
+        job,
+        stop,
+        kit,
+        remove_kit,
+    )

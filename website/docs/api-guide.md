@@ -6027,7 +6027,26 @@ maximum 86,400) and separate `allow_http` / `allow_private` permissions. Plan
 `accept_owner_capture: true`. It authenticates before contacting mirrors, uses
 pinned-DNS HTTPS and signed object hashes, and never seeds, admits a model or runs
 repository code. Direct mirrors see Core's connecting address and requests;
-receiving is not anonymous.
+receiving is not anonymous. A PMF invitation refuses with
+`public_pmf_transport_unavailable`; Core keeps preservation-v1 public copies.
+
+Receive plans also carry `member_terms`: each signed member's `member`,
+`license_id`, `reference` and, when known, `repository` and `revision`.
+Identical licence, reference and origin entries are listed once; a review that
+cannot fit the plan's bounded view refuses rather than omit any licence. Using
+the pinned core's licence definition, licences with use restrictions or
+conditions to pass on (responsible-AI, non-commercial and makers' own terms)
+and any unidentified licence need explicit acceptance, as Hugging Face's gated
+models do. Start then requires `accepted_terms` to list exactly those licence
+identifiers, or refuses with `terms_acceptance_required`; permissive,
+attribution and copyleft licences need none. An acceptance on a plan without
+member terms refuses with `terms_acceptance_unexpected`. Core records the
+core's `TermsAcceptance` (plan, job, licence-definition version, accepted
+licences, time) with the job in the same transaction that reserves it, before
+any byte is fetched, and the job reports `accepted_terms`. Resuming a stopped
+receive needs no second acceptance when one is on record; a job started before
+acceptance was recorded must send it. This describes licences; it is not legal
+advice.
 
 The owned worker continues after Library disconnects. A stopped receive retains
 its private working directory and conservative accounting. For a new resume
@@ -6115,7 +6134,8 @@ historical work is never replayed.
 
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |
-| GET | `/preservation/mirror` | Optional `offset` (0–1,000). Returns `MirrorPage`: configured/available observations, exact `policy_id`, actual resource/transport configuration, pause and standing-permission observations, live controller job/activity and up to twenty sorted model selections. `next_offset` pages models; pending, retained and removed tombstones are distinct. No network, verification of weight bytes or replay starts on read. |
+| GET | `/preservation/mirror` | Optional `offset` (0–1,000). Returns `MirrorPage`: configured/available observations, exact `policy_id`, actual resource/transport configuration (`egress_daily`/`egress_monthly` are `null` when uploads are uncapped), `usage` (bytes uploaded today and this month, bytes received today; counted even when uncapped), pause and standing-permission observations, live controller job/activity and up to twenty sorted model selections (each with `withheld`). `intake` is the saved standing intake policy (share mode, licences, definition version, withheld copies) or `null`. `follow_withdrawals`, up to 100 `withdrawal_advisories` and `withdrawal_advisory_count` report catalog withdrawals (see below). `dht_announcing` and `nostr_publishing` say what the owned controller announces now; `announce_reasons` lists stable codes when announcing is off or limited (`no_public_url`, `announce_disclosure_required`, `not_serving`, `paused`, `dht_not_selected`, `dht_needs_plain_http_root_url`, `nostr_not_selected`). While a standing-intake admission is between steps, `controller_job_id` names the step in flight; stopping it ends the admission. `next_offset` pages models; pending, retained and removed tombstones are distinct. No network, verification of weight bytes or replay starts on read. |
+| POST | `/preservation/mirror/check-address` | Best effort, from this host only. Fetch the configured `public_url`'s `/.well-known/sovereign/peers.json` with no redirects, plain HTTP allowed, ten-second reads and a thirty-second deadline, and report `MirrorAddressCheck`: `address`, `outcome` (`this_mirror`, `other_mirror`, `no_card`, `not_a_mirror`, `http_error`, `private_address`, `too_slow` or `unreachable`), `http_status` for `http_error`, and `best_effort: true`. The request goes to the owner's own address and to no third-party service; a private or loopback address is not contacted. `this_mirror` shows the address answers here; it cannot prove that people elsewhere can reach it. Nothing is saved, announced or started. Refuses `mirror_address_required` without a configured address. |
 | GET | `/preservation/mirror/models/{manifest_id}` | Exact signed digest. Returns `MirrorSelection`, independently of list pages and original Library copy records. `available: true, model: null` means unknown; unavailable/corrupt storage has `available: false`. Previously authenticated name/count/size hints do not replace current custody or byte verification. |
 | GET | `/preservation/mirror/models/{manifest_id}/review` | Authenticates the original retained manifest, accepted capture keys/threshold and every member's terms/notices without weight IO. Returns a complete `MirrorReview` within 48,000 encoded bytes or refuses entirely. This grants no recipient, registry, runtime or network authority; original opaque card data stays in the archive. |
 | POST | `/preservation/mirror/jobs` | `MirrorRequest` with permanent `owner_id`, `operation_id`, `kind` and the exact reviewed `policy_id` (absent only for initial configuration). Returns a durable `MirrorJob` with HTTP 202. A repeated identical decision observes its original job, including failure/cancellation; changed input refuses. At most two active jobs and 4,096 permanent receipts are admitted. |
@@ -6128,8 +6148,12 @@ historical work is never replayed.
 
 `kind` selects one operation:
 
-- `configure`: supply `configuration` with name and explicit disk, daily ingress,
-  daily egress and monthly egress byte limits. Disk allowance is at least 256 MiB.
+- `configure`: supply `configuration` with name and explicit disk and daily
+  ingress byte limits, and `egress_daily` / `egress_monthly` upload caps, each a
+  byte count or `null` for no cap. Uncapped uploads are still counted and
+  reported in `usage`, but never refused for volume. On metered or paid
+  hosting an uncapped mirror can use a lot of bandwidth and cost money. Disk
+  allowance is at least 256 MiB and is always bounded.
   HTTP, IPFS and BitTorrent all default off. HTTP `exposure` is `loopback` or
   `network`; `port` is 0–65,535. **The exposure setting applies only to HTTP**;
   selected IPFS/BitTorrent are separate public transports. IPFS also binds the
@@ -6138,6 +6162,43 @@ historical work is never replayed.
   duration/reservation and upload rate are explicit bounded settings. Saving is
   offline, requires the controller to stop, retains bytes/caches/accounting and
   clears standing authority. A partial setup failure stays paused and unserved.
+  Optional announcement fields: `public_url` (a credential-free HTTP(S) base URL
+  without a trailing slash), `announce_dht` (also announce a plain-HTTP root
+  URL's address and port on the public BitTorrent DHT), `publish_nostr` (also
+  copy the signed mirror card to third-party Nostr relays) and
+  `announce_disclosure`, the announcement disclosure version the client showed
+  before consent (currently 1). DHT and Nostr need `public_url`. Core announces
+  nothing until a recognized disclosure version is recorded with the
+  configuration it covers: without one the address is saved but no card, DHT
+  announcement or relay publication happens, and the page reports
+  `announce_disclosure_required`. Because the announcement is part of the
+  policy, every later standing grant covers exactly that disclosed
+  configuration. An announced address and the models the mirror probably holds
+  are public; a public mirror is not anonymous.
+- `intake`: supply the reviewed `policy_id` and `intake`, the standing intake
+  policy, or `null` to clear it: `share` (`eligible` or `chosen`), `licenses`
+  (normalized, unique licence identifiers; identifiers that name no licence
+  refuse), `definition` (the licence-definition version reviewed) and
+  `withheld` (exact manifest IDs). It is validated as the core `IntakePolicy`,
+  refuses beside a running controller (`mirror_busy_stop_first`) and is recorded
+  in mirror history. Any effective change clears restart permission exactly as
+  the core does; a change only to `withheld` keeps it and blocks or unblocks
+  those copies. With `share: eligible`, when a publish, receive or import
+  completes and its public copy's signed terms name only listed licences, and a
+  resume controller runs under a valid grant, Core stops that controller,
+  retains the copy (its `MirrorJob` has `admitted_by: intake`) and resumes it,
+  with no new `grant_resume`. Never while paused or left, never for a private,
+  PMF, withheld, already selected or removed copy, never with `share: chosen`
+  or without a policy; such copies are left for the owner's own decision. If
+  Core stops during an admission, sharing stays stopped (nothing replays).
+- `withdrawals`: operator-only; supply the reviewed `policy_id` and
+  `follow_withdrawals` (default off). Off, a catalog withdrawal is advisory: the
+  copy keeps serving and the page lists the advisory. On, a withdrawn copy is not
+  served unless the operator acknowledged its advisory. The setting is policy:
+  a change clears restart permission. No catalog publisher, Foxlight included,
+  is a takedown authority; `block` is the operator's takedown. Core's managed
+  mirror currently retains local public copies only and follows no catalogs, so
+  advisories appear only once source following is available.
 - `retain`: supply `copy_id`, its exact `manifest_id`, and
   `confirm_redistribution: true` after reviewing every member's existing public
   terms. Core rechecks the already accepted public copy and its original keys,
@@ -6157,8 +6218,12 @@ historical work is never replayed.
   nothing, including after restart. `revoke_resume` clears standing permission;
   stop an active controller before using this offline control.
 - `model`: select exact `manifest_id` and `action` (`pin`, `unpin`, `block`,
-  `unblock`, `retry`). These live local controls do not alter accepted model keys
-  or reset allowances. Policy/intake/model-deletion work requires the controller
+  `unblock`, `retry`, `acknowledge`, `withhold`, `release`). These live local
+  controls do not alter accepted model keys or reset allowances. `withhold`
+  keeps a copy back from serving and from standing intake (it needs a saved
+  intake policy) and `release` shares it again; neither changes what the grant
+  covers. `acknowledge` records that the operator reviewed a withdrawal
+  advisory; with following on, the copy then keeps serving. Policy/intake/model-deletion work requires the controller
   to stop first.
 - `recover`: select exact already accepted `manifest_id` and reviewed `policy_id`.
   This is an explicit stopped-controller offline completion check, distinct from

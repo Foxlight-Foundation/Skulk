@@ -339,13 +339,29 @@ async def test_publish_receive_and_complete_restore_after_both_original_cores_ar
             receiver.start(
                 PreservationStart(plan_id=plan.plan_id, operation_id="receive")
             )
+        # Each member's signed licence is on the review. "test-only" names no
+        # licence Sovereign knows, so it needs explicit acceptance first.
+        assert {item.license_id for item in plan.member_terms} == {"test-only"}
+        with pytest.raises(PreservationHostError, match="terms_acceptance_required"):
+            receiver.start(
+                PreservationStart(
+                    plan_id=plan.plan_id,
+                    operation_id="receive",
+                    accept_owner_capture=True,
+                )
+            )
         received = receiver.start(
             PreservationStart(
-                plan_id=plan.plan_id, operation_id="receive", accept_owner_capture=True
+                plan_id=plan.plan_id,
+                operation_id="receive",
+                accept_owner_capture=True,
+                accepted_terms=("test-only",),
             )
         )
         received = await settled(receiver, received.job_id)
         assert received.state == "succeeded" and received.copy_id, received
+        assert received.accepted_terms == ("test-only",)
+        assert receiver.journal.setting("terms-acceptance:" + received.job_id)
         assert not receiver.store.list_models()
         assert received.bytes_received > 0
         kept = receiver.journal.copy(received.copy_id)
@@ -532,6 +548,7 @@ async def test_explicit_receive_resume_reuses_partial_bytes_and_cumulative_allow
             plan_id=plan.plan_id,
             operation_id="receive-original",
             accept_owner_capture=True,
+            accepted_terms=("test-only",),
         )
         job = host.start(submission)
         assert await asyncio.to_thread(blocked.wait, 10)
@@ -812,7 +829,10 @@ async def test_receive_deadline_stops_a_stalled_mirror_and_cleared_work_never_re
             )
         )
         submission = PreservationStart(
-            plan_id=plan.plan_id, operation_id="stalled", accept_owner_capture=True
+            plan_id=plan.plan_id,
+            operation_id="stalled",
+            accept_owner_capture=True,
+            accepted_terms=("test-only",),
         )
         started = time.monotonic()
         job = host.start(submission)
@@ -979,11 +999,10 @@ async def test_one_file_http_export_is_offline_and_keeps_opaque_card_data(
             assert reference.manifest == verify_store(
                 fixture / "archive", identity, trust
             )
+            assert isinstance(reference.manifest, Manifest)
             card = reference.manifest.members[0].retained_card
             assert card is not None
-            assert card["future_property"] == {
-                "nested": [1, 2, 3]
-            }
+            assert card["future_property"] == {"nested": [1, 2, 3]}
             upload = metadata_upload(host, response.content, "invitation")
             preview = host.inspect_invitation(upload)
             assert preview.transport == "http" and preview.publisher_key_ids == tuple(

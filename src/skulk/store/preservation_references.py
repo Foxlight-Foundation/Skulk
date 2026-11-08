@@ -34,11 +34,16 @@ def authenticate_model_reference(
     invitation: ModelInvitation, trust: TrustProfile
 ) -> Manifest:
     """Require independently selected exact-copy trust, regardless of transport."""
-    return (
+    manifest = (
         authenticate_peer_invitation(invitation, trust)
         if isinstance(invitation, PeerInvitation)
         else authenticate_http(invitation, trust)
     )
+    if not isinstance(manifest, Manifest):
+        # The core can carry PMF archives over the network; Core receive keeps
+        # preservation-v1 public copies only.
+        raise PreservationError("public PMF transport is unavailable in Core receive")
+    return manifest
 
 
 def accept_model_reference_keys(
