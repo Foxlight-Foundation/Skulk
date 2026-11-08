@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import inspect
 import socket
+import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -23,6 +24,7 @@ from foxlight_model_preservation.kits import export_kit
 from foxlight_model_preservation.mirror_announce import mirror_key
 from foxlight_model_preservation.mirror_cards import build_peers, issue_card
 from foxlight_model_preservation.mirror_models import MirrorState, WithdrawalAdvisory
+from foxlight_model_preservation.mirror_rendezvous import rendezvous_available
 from foxlight_model_preservation.mirror_state import MirrorLedger, restart_allowed
 from pydantic import ValidationError
 
@@ -830,9 +832,60 @@ async def test_a_native_only_mirror_reports_no_announcement(tmp_path: Path) -> N
         state = MirrorLedger(host.root / "managed-mirror").read()
         serving = state.model_copy(update={"paused": False})
         announcement = host.mirrors._announcement  # pyright: ignore[reportPrivateUsage]
-        assert announcement(serving, live=True) == (True, True, ())
+        # The DHT also needs the core's rendezvous runtime on this host.
+        dht = rendezvous_available()
+        assert announcement(serving, live=True) == (
+            dht,
+            True,
+            () if dht else ("dht_unavailable",),
+        )
         # The core announces only beside its HTTP server: HTTP off is not serving.
         native_only = serving.model_copy(update={"http_enabled": False})
-        assert announcement(native_only, live=True) == (False, False, ("not_serving",))
+        reasons = ("not_serving",) if dht else ("not_serving", "dht_unavailable")
+        assert announcement(native_only, live=True) == (False, False, reasons)
     finally:
         await host.close()
+
+
+def test_check_address_ends_a_trickling_close_delimited_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = socket.create_server(("127.0.0.1", 0))
+    port = cast(int, server.getsockname()[1])
+    stop = threading.Event()
+
+    def trickle() -> None:
+        with server:
+            peer = server.accept()[0]
+            with peer:
+                peer.recv(4096)
+                # HTTP/1.0 without a length: http.client detaches the socket
+                # from the connection and reads the body until close.
+                peer.sendall(b"HTTP/1.0 200 OK\r\n\r\n")
+                while not stop.is_set():
+                    with suppress(OSError):
+                        peer.sendall(b"{")
+                    time.sleep(0.1)
+
+    thread = threading.Thread(target=trickle, daemon=True)
+    thread.start()
+    original_connect = socket.socket.connect
+
+    def resolve(*_: object, **__: object) -> list[tuple[object, ...]]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 80))]
+
+    def local(self: socket.socket, _address: object) -> None:
+        original_connect(self, ("127.0.0.1", port))
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(socket.socket, "connect", local)
+    try:
+        started = time.monotonic()
+        checked = check_address(
+            "http://mirror.example", tmp_path / "no-key.pem", started + 1
+        )
+        assert checked.outcome == "too_slow"
+        assert time.monotonic() - started < 3
+    finally:
+        stop.set()
+        thread.join(5)

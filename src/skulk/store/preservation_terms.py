@@ -10,6 +10,7 @@ This describes licences; it is not legal advice.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Iterable
 
@@ -26,6 +27,9 @@ from skulk.store.preservation_contracts import PlanMemberTerms, PreservationPlan
 
 # As many as an archive has members (v1 and PMF alike), as the core reviews.
 MAX_MEMBER_TERMS = 256
+# The accepted licences travel on the durable job receipt, which the journal
+# bounds at 16 KiB in all; this keeps room for the rest of the receipt.
+MAX_ACCEPTED_BYTES = 4096
 
 
 class TermsRefusedError(ValueError):
@@ -57,13 +61,24 @@ def plan_member_terms(members: Iterable[MemberBase]) -> tuple[PlanMemberTerms, .
             )
     if len(listed) > MAX_MEMBER_TERMS:
         raise TermsRefusedError("terms_review_too_large")
-    return tuple(listed.values())
+    terms = tuple(listed.values())
+    required_for(terms)  # Refuse now, not after a start is reserved.
+    return terms
 
 
 def required_terms(plan: PreservationPlan) -> tuple[str, ...]:
     """The licence identifiers a start of this plan must accept, sorted."""
     if plan.kind != "receive" or not plan.member_terms:
         return ()
+    return required_for(plan.member_terms)
+
+
+def required_for(listed: Iterable[PlanMemberTerms]) -> tuple[str, ...]:
+    """The licence identifiers these member terms need accepted, sorted.
+
+    Refuses a review whose acceptance could not be kept on the job receipt,
+    at review time, so a start can never be reserved and then stuck.
+    """
     review = terms_review(
         MemberTerms(
             member=item.member,
@@ -72,12 +87,15 @@ def required_terms(plan: PreservationPlan) -> tuple[str, ...]:
             repository=item.repository,
             revision=item.revision,
         )
-        for item in plan.member_terms
+        for item in listed
     )
     accept = review["accept"]
     if not isinstance(accept, list):
         raise TermsRefusedError("terms_review_unavailable")
-    return tuple(sorted(str(item) for item in accept))
+    wanted = tuple(sorted(str(item) for item in accept))
+    if len(json.dumps(wanted).encode()) > MAX_ACCEPTED_BYTES:
+        raise TermsRefusedError("terms_review_too_large")
+    return wanted
 
 
 def check_acceptance(

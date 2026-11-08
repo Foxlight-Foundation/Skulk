@@ -35,6 +35,7 @@ from foxlight_model_preservation.mirror_recovery import (
     inspect_selection,
     selection_status,
 )
+from foxlight_model_preservation.mirror_rendezvous import rendezvous_available
 from foxlight_model_preservation.mirror_state import (
     MirrorLedger,
     policy_id,
@@ -278,15 +279,19 @@ class MirrorHost:
             reasons.append("not_serving")
         if state.paused or state.left:
             reasons.append("paused")
+        # The core joins the DHT only where its rendezvous runtime exists.
+        dht = dht_port(announce) is not None and rendezvous_available()
         if not announce.dht:
             reasons.append("dht_not_selected")
         elif dht_port(announce) is None:
             reasons.append("dht_needs_plain_http_root_url")
+        elif not rendezvous_available():
+            reasons.append("dht_unavailable")
         if not announce.nostr:
             reasons.append("nostr_not_selected")
         serving = live and state.http_enabled and not state.paused and not state.left
         return (
-            serving and dht_port(announce) is not None,
+            serving and dht,
             serving and announce.nostr,
             tuple(reasons),
         )
@@ -1459,6 +1464,23 @@ class _DeadlineConnection(PinnedConnection):
     def __init__(self, host: str, port: int, *, tls: bool, deadline: float) -> None:
         super().__init__(host, port, ADDRESS_CHECK_POLICY, tls=tls)
         self._deadline = deadline
+        self.transport: socket.socket | None = None
+        self._lock = threading.Lock()
+        self._expired = False
+
+    def expire(self) -> None:
+        """At the deadline: interrupt any blocked read so the worker returns."""
+        with self._lock:
+            self._expired = True
+            transport = self.transport
+        if transport is not None:
+            with suppress(OSError):
+                transport.shutdown(socket.SHUT_RDWR)
+
+    def expired(self) -> bool:
+        """Whether the deadline interrupted this check."""
+        with self._lock:
+            return self._expired
 
     def remaining(self) -> float:
         """Seconds left for the whole check; refuse once none remain."""
@@ -1482,13 +1504,21 @@ class _DeadlineConnection(PinnedConnection):
             connection.settimeout(self.remaining())
             try:
                 connection.connect(address)
-                self.sock = (
-                    ssl.create_default_context().wrap_socket(
+                if self._tls:
+                    context = ssl.create_default_context()
+                    context.minimum_version = ssl.TLSVersion.TLSv1_2
+                    self.sock = context.wrap_socket(
                         connection, server_hostname=self.host
                     )
-                    if self._tls
-                    else connection
-                )
+                else:
+                    self.sock = connection
+                # Kept after http.client detaches ``sock`` for a
+                # close-delimited response, so the deadline still applies.
+                with self._lock:
+                    self.transport = self.sock
+                    expired = self._expired
+                if expired:
+                    raise TimeoutError("address check deadline exceeded")
                 return
             except OSError as error:
                 connection.close()
@@ -1508,12 +1538,16 @@ def check_address(url: str, key: Path, deadline: float) -> MirrorAddressCheck:
 
     Same outcomes and limits as the desktop community "Check address": plain
     HTTP allowed, no redirects, proxies or credentials, private addresses never
-    contacted. Every connect and read uses only the time that remains.
+    contacted. Every connect and read uses only the time that remains, and a
+    timer interrupts the owned socket at the deadline, so a response that
+    trickles its headers or body, or detaches from the connection when it is
+    close-delimited, still ends on time.
     """
     outcome: AddressOutcome
     status: int | None = None
     parsed = urlsplit(url)
     connection: _DeadlineConnection | None = None
+    timer: threading.Timer | None = None
     try:
         if parsed.hostname is None or parsed.hostname.rstrip(".").lower().endswith(
             (".i2p", ".i2p.alt", ".onion")
@@ -1525,20 +1559,25 @@ def check_address(url: str, key: Path, deadline: float) -> MirrorAddressCheck:
             tls=parsed.scheme == "https",
             deadline=deadline,
         )
+        timer = threading.Timer(
+            max(0.0, deadline - time.monotonic()), connection.expire
+        )
+        timer.daemon = True
+        timer.start()
         connection.request(
             "GET",
             parsed.path.rstrip("/") + "/" + PEERS_PATH,
             headers={"Accept-Encoding": "identity", "User-Agent": "skulk-core"},
         )
-        if connection.sock is not None:
-            connection.sock.settimeout(connection.remaining())
+        if connection.transport is not None:
+            connection.transport.settimeout(connection.remaining())
         received = connection.getresponse()
         if received.status != 200:
             raise MirrorHTTPError(received.status)
         data = b""
         while len(data) <= MAX_PEERS_BYTES:
-            if connection.sock is not None:
-                connection.sock.settimeout(connection.remaining())
+            if connection.transport is not None:
+                connection.transport.settimeout(connection.remaining())
             chunk = received.read1(min(65536, MAX_PEERS_BYTES + 1 - len(data)))
             if not chunk:
                 break
@@ -1559,6 +1598,13 @@ def check_address(url: str, key: Path, deadline: float) -> MirrorAddressCheck:
     else:
         outcome = peers_outcome(data, key)
     finally:
+        if timer is not None:
+            timer.cancel()
         if connection is not None:
             connection.close()
+            if connection.transport is not None:
+                connection.transport.close()
+    if connection is not None and connection.expired() and outcome != "this_mirror":
+        # Interrupted at the deadline: whatever the read raised, it was slow.
+        outcome, status = "too_slow", None
     return MirrorAddressCheck(address=url, outcome=outcome, http_status=status)

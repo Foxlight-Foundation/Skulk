@@ -204,3 +204,12 @@ async def test_the_api_accepts_terms_as_the_library_sends_them(tmp_path: Path) -
             assert json.loads(accepted.text)["accepted_terms"] == ["cc-by-nc-4.0"]
         finally:
             await host.close()
+
+
+def test_an_acceptance_too_large_for_the_job_receipt_refuses_at_review() -> None:
+    # 100 distinct long identifiers fit the plan view but not a job receipt.
+    plan = receive_plan(
+        *((f"custom-{index:03d}-" + "x" * 180, "LICENSE") for index in range(100))
+    )
+    with pytest.raises(TermsRefusedError, match="terms_review_too_large"):
+        required_terms(plan)
