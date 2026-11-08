@@ -3569,8 +3569,7 @@ part of what the restart grant covers, so when a publish, receive or import
 completes with a public copy the policy covers, Core itself stops the running
 resume controller, retains the copy and resumes it under the same grant; an
 operator Stop during those steps ends the admission and nothing replays after
-restart. An announced public address waits for a recorded disclosure. Catalog
-withdrawals are advisory unless the operator chooses to follow them. Receive
+restart. An announced public address waits for a recorded disclosure. Receive
 plans carry each member's licence so restricted terms are accepted, and
 recorded, before any download.
 

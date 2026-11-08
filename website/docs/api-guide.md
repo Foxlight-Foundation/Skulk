@@ -6134,7 +6134,7 @@ historical work is never replayed.
 
 | Method | Path | Parameters and behavior |
 | --- | --- | --- |
-| GET | `/preservation/mirror` | Optional `offset` (0–1,000). Returns `MirrorPage`: configured/available observations, exact `policy_id`, actual resource/transport configuration (`egress_daily`/`egress_monthly` are `null` when uploads are uncapped), `usage` (bytes uploaded today and this month, bytes received today; counted even when uncapped), pause and standing-permission observations, live controller job/activity and up to twenty sorted model selections (each with `withheld`). `intake` is the saved standing intake policy (share mode, licences, definition version, withheld copies) or `null`. `follow_withdrawals`, up to 100 `withdrawal_advisories` and `withdrawal_advisory_count` report catalog withdrawals (see below). `dht_announcing` and `nostr_publishing` say what the owned controller announces now; `announce_reasons` lists stable codes when announcing is off or limited (`no_public_url`, `announce_disclosure_required`, `not_serving`, `paused`, `dht_not_selected`, `dht_needs_plain_http_root_url`, `nostr_not_selected`). While a standing-intake admission is between steps, `controller_job_id` names the step in flight; stopping it ends the admission. `next_offset` pages models; pending, retained and removed tombstones are distinct. No network, verification of weight bytes or replay starts on read. |
+| GET | `/preservation/mirror` | Optional `offset` (0–1,000). Returns `MirrorPage`: configured/available observations, exact `policy_id`, actual resource/transport configuration (`egress_daily`/`egress_monthly` are `null` when uploads are uncapped), `usage` (bytes uploaded today and this month, bytes received today; counted even when uncapped), pause and standing-permission observations, live controller job/activity and up to twenty sorted model selections (each with `withheld`). `intake` is the saved standing intake policy (share mode, licences, definition version, withheld copies) or `null`. `dht_announcing` and `nostr_publishing` say what the owned controller announces now; `announce_reasons` lists stable codes when announcing is off or limited (`no_public_url`, `announce_disclosure_required`, `not_serving`, `paused`, `dht_not_selected`, `dht_needs_plain_http_root_url`, `nostr_not_selected`). While a standing-intake admission is between steps, `controller_job_id` names the step in flight; stopping it ends the admission. `next_offset` pages models; pending, retained and removed tombstones are distinct. No network, verification of weight bytes or replay starts on read. |
 | POST | `/preservation/mirror/check-address` | Best effort, from this host only. Fetch the configured `public_url`'s `/.well-known/sovereign/peers.json` with no redirects, plain HTTP allowed, ten-second reads and a thirty-second deadline, and report `MirrorAddressCheck`: `address`, `outcome` (`this_mirror`, `other_mirror`, `no_card`, `not_a_mirror`, `http_error`, `private_address`, `too_slow` or `unreachable`), `http_status` for `http_error`, and `best_effort: true`. The request goes to the owner's own address and to no third-party service; a private or loopback address is not contacted. `this_mirror` shows the address answers here; it cannot prove that people elsewhere can reach it. Nothing is saved, announced or started. Refuses `mirror_address_required` without a configured address. |
 | GET | `/preservation/mirror/models/{manifest_id}` | Exact signed digest. Returns `MirrorSelection`, independently of list pages and original Library copy records. `available: true, model: null` means unknown; unavailable/corrupt storage has `available: false`. Previously authenticated name/count/size hints do not replace current custody or byte verification. |
 | GET | `/preservation/mirror/models/{manifest_id}/review` | Authenticates the original retained manifest, accepted capture keys/threshold and every member's terms/notices without weight IO. Returns a complete `MirrorReview` within 48,000 encoded bytes or refuses entirely. This grants no recipient, registry, runtime or network authority; original opaque card data stays in the archive. |
@@ -6191,14 +6191,6 @@ historical work is never replayed.
   PMF, withheld, already selected or removed copy, never with `share: chosen`
   or without a policy; such copies are left for the owner's own decision. If
   Core stops during an admission, sharing stays stopped (nothing replays).
-- `withdrawals`: operator-only; supply the reviewed `policy_id` and
-  `follow_withdrawals` (default off). Off, a catalog withdrawal is advisory: the
-  copy keeps serving and the page lists the advisory. On, a withdrawn copy is not
-  served unless the operator acknowledged its advisory. The setting is policy:
-  a change clears restart permission. No catalog publisher, Foxlight included,
-  is a takedown authority; `block` is the operator's takedown. Core's managed
-  mirror currently retains local public copies only and follows no catalogs, so
-  advisories appear only once source following is available.
 - `retain`: supply `copy_id`, its exact `manifest_id`, and
   `confirm_redistribution: true` after reviewing every member's existing public
   terms. Core rechecks the already accepted public copy and its original keys,
@@ -6218,12 +6210,11 @@ historical work is never replayed.
   nothing, including after restart. `revoke_resume` clears standing permission;
   stop an active controller before using this offline control.
 - `model`: select exact `manifest_id` and `action` (`pin`, `unpin`, `block`,
-  `unblock`, `retry`, `acknowledge`, `withhold`, `release`). These live local
+  `unblock`, `retry`, `withhold`, `release`). These live local
   controls do not alter accepted model keys or reset allowances. `withhold`
   keeps a copy back from serving and from standing intake (it needs a saved
   intake policy) and `release` shares it again; neither changes what the grant
-  covers. `acknowledge` records that the operator reviewed a withdrawal
-  advisory; with following on, the copy then keeps serving. Policy/intake/model-deletion work requires the controller
+  covers. Policy/intake/model-deletion work requires the controller
   to stop first.
 - `recover`: select exact already accepted `manifest_id` and reviewed `policy_id`.
   This is an explicit stopped-controller offline completion check, distinct from

@@ -29,7 +29,6 @@ MirrorKind = Literal[
     "prepare_kit",
     "recover",
     "intake",
-    "withdrawals",
 ]
 MirrorAction = Literal[
     "pin",
@@ -37,7 +36,6 @@ MirrorAction = Literal[
     "block",
     "unblock",
     "retry",
-    "acknowledge",
     "withhold",
     "release",
 ]
@@ -309,11 +307,6 @@ class MirrorRequest(PreservationContract):
         exclude_if=_omit_absent,
         description="Standing intake policy for an intake decision; null clears it. Any effective change clears restart permission, except the withheld list, which only narrows.",
     )
-    follow_withdrawals: bool | None = Field(
-        default=None,
-        exclude_if=_omit_absent,
-        description="Operator-only withdrawals decision: stop serving copies a followed catalog withdrew. Off by default, where a withdrawal is advisory only. A change clears restart permission.",
-    )
 
     @model_validator(mode="after")
     def check_decision(self) -> MirrorRequest:
@@ -322,8 +315,6 @@ class MirrorRequest(PreservationContract):
             raise ValueError("configuration belongs only to configure")
         if self.kind != "intake" and self.intake is not None:
             raise ValueError("an intake policy belongs only to intake")
-        if (self.follow_withdrawals is not None) != (self.kind == "withdrawals"):
-            raise ValueError("the withdrawals setting belongs only to withdrawals")
         if self.kind != "configure" and self.policy_id is None:
             raise ValueError("review the current mirror policy first")
         if self.kind == "retain":
@@ -504,33 +495,6 @@ class MirrorModel(PreservationContract):
 
 
 @final
-class MirrorWithdrawalAdvisory(PreservationContract):
-    """A followed catalog stopped listing a retained copy: advice, not a takedown.
-
-    No catalog publisher is a takedown authority. The copy keeps serving unless
-    the operator blocks it, or turned on following withdrawals and has not
-    acknowledged this one.
-    """
-
-    manifest_id: Digest = Field(description="Exact retained copy.")
-    source_id: Digest | None = Field(
-        default=None, description="Withdrawing source, when known."
-    )
-    catalog_id: Digest | None = Field(
-        default=None, description="Exact catalog version that omitted it, when known."
-    )
-    observed_at: int | None = Field(
-        default=None, ge=0, description="First observation, Unix seconds."
-    )
-    acknowledged: bool = Field(description="The operator reviewed this advisory.")
-    serving_withheld: bool = Field(
-        description="Serving stops for it only because the operator follows withdrawals."
-    )
-    blocked: bool = Field(description="The operator's own serving block.")
-    advice: str = Field(max_length=500, description="What the operator can do.")
-
-
-@final
 class MirrorUsage(PreservationContract):
     """Counted transfer volume in the current UTC day and month."""
 
@@ -675,18 +639,6 @@ class MirrorPage(PreservationContract):
     usage: MirrorUsage | None = Field(
         default=None,
         description="Counted uploads and intake, including when uploads are uncapped.",
-    )
-    follow_withdrawals: bool = Field(
-        default=False,
-        description="Operator choice to stop serving withdrawn copies; off means advisory only.",
-    )
-    withdrawal_advisories: tuple[MirrorWithdrawalAdvisory, ...] = Field(
-        default=(),
-        max_length=100,
-        description="Catalog withdrawal advisories, first 100 by manifest. Advice only; blocking is the operator's takedown.",
-    )
-    withdrawal_advisory_count: int = Field(
-        default=0, ge=0, le=1000, description="All current advisories."
     )
     dht_announcing: bool = Field(
         default=False,

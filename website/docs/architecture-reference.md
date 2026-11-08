@@ -2436,8 +2436,7 @@ not enter signed portable evidence or renew the explicit Resume grant.
   stay separate. Lost clients observe the original durable job; restart never
   retries a recovery or deletes partial data.
   Sovereign sharing decisions: `intake` (core `IntakePolicy`, fenced, refused
-  beside a controller), `withdrawals` (operator-only follow setting) and model
-  `acknowledge`/`withhold`/`release`. Nullable upload caps; announcements map to
+  beside a controller) and model `withhold`/`release`. Nullable upload caps; announcements map to
   core `AnnouncePolicy` only with a recorded disclosure. `offer_public_copy`
   (called when a publish/receive/import completes) runs stop, covered retain
   (`admitted_by: intake`) and resume under the unchanged grant, abortable by an

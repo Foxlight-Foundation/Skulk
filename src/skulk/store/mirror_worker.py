@@ -12,7 +12,6 @@ from typing import Literal, final
 
 from foxlight_model_preservation.mirror import (
     configure_intake,
-    configure_mirror,
     model_action,
     run_mirror,
     withhold,
@@ -390,12 +389,6 @@ def run_mirror_worker(request: MirrorWorkerRequest) -> int:
             # to the withheld list keeps it and blocks/unblocks those copies.
             configure_intake(
                 ledger, decision.intake.core() if decision.intake else None
-            )
-        elif decision.kind == "withdrawals":
-            if decision.follow_withdrawals is None:
-                raise ValueError("withdrawals setting required")
-            configure_mirror(
-                ledger, {"follow_withdrawals": decision.follow_withdrawals}
             )
         elif decision.kind == "model":
             if decision.manifest_id is None or decision.action is None:
