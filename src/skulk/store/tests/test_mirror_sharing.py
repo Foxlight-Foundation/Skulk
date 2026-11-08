@@ -1,4 +1,4 @@
-"""Sovereign sharing on Core's persistent mirror: caps, intake and announcements.
+"""Sovereign sharing on Core's persistent mirror: caps, intake, announcements, advisories.
 
 Every effect runs through the real owner and its known worker. Nothing here
 starts sharing without an explicit decision, and a Core-started admission never
@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from foxlight_model_preservation.kits import export_kit
 from foxlight_model_preservation.mirror_announce import mirror_key
 from foxlight_model_preservation.mirror_cards import build_peers, issue_card
+from foxlight_model_preservation.mirror_models import WithdrawalAdvisory
 from foxlight_model_preservation.mirror_state import MirrorLedger, restart_allowed
 from pydantic import ValidationError
 
@@ -203,6 +204,13 @@ def test_intake_belongs_only_to_its_decision_and_matches_the_core_policy() -> No
         MirrorIntake.model_validate(
             {"share": "eligible", "licenses": ["other"], "definition": 1},
             strict=False,
+        )
+    with pytest.raises(ValidationError, match="withdrawals setting"):
+        MirrorRequest(
+            owner_id="library",
+            operation_id="x",
+            kind="withdrawals",
+            policy_id="a" * 64,
         )
 
 
@@ -406,7 +414,7 @@ async def test_standing_intake_leaves_uncovered_withheld_and_stopped_copies_alon
 
 
 @pytest.mark.asyncio
-async def test_withhold_and_release_keep_the_grant(
+async def test_withhold_release_and_withdrawal_advisories_never_take_down_alone(
     tmp_path: Path,
 ) -> None:
     host = empty_host(tmp_path)
@@ -456,6 +464,75 @@ async def test_withhold_and_release_keep_the_grant(
             # Withholding only narrows: the policy and its grant stay.
             assert page.policy_id == policy and page.restart_expires == expires
 
+        # No catalog has withdrawn it, so there is nothing to acknowledge.
+        refused = await decide(
+            host,
+            MirrorRequest(
+                owner_id="library",
+                operation_id="acknowledge-none",
+                kind="model",
+                policy_id=policy,
+                manifest_id=identity,
+                action="acknowledge",
+            ),
+        )
+        assert refused.state == "failed"
+        ledger = MirrorLedger(host.root / "managed-mirror")
+        advisory = WithdrawalAdvisory(
+            source_id="d" * 64, catalog_id="e" * 64, observed_at=1
+        )
+        ledger.update(
+            lambda state: state.model_copy(
+                update={
+                    "models": {
+                        **state.models,
+                        identity: state.models[identity].model_copy(
+                            update={"withdrawal": advisory}
+                        ),
+                    }
+                }
+            )
+        )
+        page = await host.mirrors.page()
+        assert page.withdrawal_advisory_count == 1 and not page.follow_withdrawals
+        (shown,) = page.withdrawal_advisories
+        # Advisory by default: still served, not blocked, nothing taken down.
+        assert shown.manifest_id == identity and not shown.serving_withheld
+        assert not shown.blocked and "you decide" in shown.advice
+
+        follow = await decide(
+            host,
+            MirrorRequest(
+                owner_id="library",
+                operation_id="follow",
+                kind="withdrawals",
+                policy_id=policy,
+                follow_withdrawals=True,
+            ),
+        )
+        assert follow.state == "succeeded", follow
+        page = await host.mirrors.page()
+        assert (
+            page.follow_withdrawals and page.withdrawal_advisories[0].serving_withheld
+        )
+        # Following withdrawals is policy: it clears the grant.
+        assert page.policy_id != policy and not page.restart_allowed
+        assert host.journal.setting("mirror-approved-resume") is None
+        assert page.policy_id is not None
+        acknowledged = await decide(
+            host,
+            MirrorRequest(
+                owner_id="library",
+                operation_id="acknowledge",
+                kind="model",
+                policy_id=page.policy_id,
+                manifest_id=identity,
+                action="acknowledge",
+            ),
+        )
+        assert acknowledged.state == "succeeded", acknowledged
+        (shown,) = (await host.mirrors.page()).withdrawal_advisories
+        assert shown.acknowledged and not shown.serving_withheld
     finally:
         await host.close()
 

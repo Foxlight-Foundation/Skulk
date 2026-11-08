@@ -34,6 +34,7 @@ from foxlight_model_preservation.mirror_state import (
     MirrorLedger,
     policy_id,
     restart_allowed,
+    withdrawal_withholds,
 )
 from foxlight_model_preservation.models import Manifest, PreservationError
 from foxlight_model_preservation.operations import failure_code
@@ -58,6 +59,7 @@ from skulk.store.mirror_contracts import (
     MirrorReview,
     MirrorSelection,
     MirrorUsage,
+    MirrorWithdrawalAdvisory,
 )
 from skulk.store.mirror_kits import KitSeal, MirrorKitStore, kit_fingerprint
 from skulk.store.mirror_process import MirrorProcess, remove_mirror_request
@@ -83,6 +85,11 @@ RuntimeProvider = Callable[[str], Awaitable[MirrorNativeRuntime]]
 # Same bounds as the desktop community "Check address": plain HTTP allowed,
 # ten-second reads and a thirty-second whole-check deadline, no redirects.
 ADDRESS_CHECK_POLICY = TransferPolicy(allow_http=True, timeout=10, deadline_seconds=30)
+WITHDRAWAL_ADVICE = (
+    "A publisher withdrew this listing; you decide. Catalogs are discovery, not "
+    "authority: this verified copy, its signed manifest, licence and notices are "
+    "unchanged. To stop serving it (for example after a legal notice), block it."
+)
 
 
 @dataclass
@@ -210,6 +217,20 @@ class MirrorHost:
             )
             for identity, held in selections[offset : offset + 20]
         )
+        advisories = [
+            MirrorWithdrawalAdvisory(
+                manifest_id=identity,
+                source_id=held.withdrawal.source_id,
+                catalog_id=held.withdrawal.catalog_id,
+                observed_at=held.withdrawal.observed_at,
+                acknowledged=held.withdrawal.acknowledged,
+                serving_withheld=withdrawal_withholds(state, held),
+                blocked=held.blocked,
+                advice=WITHDRAWAL_ADVICE,
+            )
+            for identity, held in selections
+            if held.withdrawal is not None and held.state != "removed"
+        ]
         return MirrorPage(
             configured=True,
             available=True,
@@ -227,6 +248,9 @@ class MirrorHost:
                 uploaded_month_bytes=state.egress_month_used,
                 received_today_bytes=state.ingress_used,
             ),
+            follow_withdrawals=state.follow_withdrawals,
+            withdrawal_advisories=tuple(advisories[:100]),
+            withdrawal_advisory_count=len(advisories),
         )
 
     def _announcement(
@@ -714,7 +738,7 @@ class MirrorHost:
                     )
             elif decision.kind == "retain" and error is None:
                 await self._keep_covered_approval(decision, result, prior_approval)
-            elif decision.kind == "intake" and error is None:
+            elif decision.kind in {"intake", "withdrawals"} and error is None:
                 if result.policy_id != decision.policy_id:
                     # Exactly as the core: a changed policy clears restart
                     # permission. A withheld-list change alone keeps it.
