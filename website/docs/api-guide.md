@@ -3744,6 +3744,24 @@ catalog truth apart from a snapshot-only publication stamp; unknown aliases
 return `404`, and stale or forged content returns `409` without dispatching a
 download.
 
+| Body field | Meaning |
+| --- | --- |
+| `targetNodeId` | Node that should stage this exact artifact. |
+| `shardMetadata` | Server-defined shard metadata containing the current authorized model card. |
+
+A successful response returns `commandId` after dispatch; it does not certify
+completed bytes. Inspect the node's download outcome in `/state`. Repeating this
+explicit request after a terminal failure starts a fresh attempt with a new
+attempt identity, retaining local files for the normal verifier/resume path.
+Active same-artifact downloads are not duplicated, and verified completed ones
+remain completed. If the failed task is still cleaning up, the new attempt waits
+for its existing ownership handoff. Offline and capacity checks still apply.
+
+The target node must support the explicit-retry command; upgrade participating
+nodes before relying on this behavior. Periodic planner starts retain terminal
+failures, and ordinary placement recovery is a separate path. No retry requires
+calling the destructive delete endpoint.
+
 ### Delete a node download
 
 **DELETE** `/download/{node_id}/{model_id}`
@@ -6842,6 +6860,180 @@ a recipient must still explicitly confirm the exact I2P policy to Resume.
 
 
 ### Experimental capability chat gateway
+
+#### Client-owned continuation (experimental)
+
+Continuation is an explicit opt-in on **POST** `/v1/chat/completions`. Ordinary
+full-history clients retain the existing gateway contract. A native model or a
+capability without an advertised continuation destination refuses this opt-in.
+
+`inference_capability.continuation` in **GET** `/v1/models` advertises the contract,
+authorization, exact `target`, callable version, proof header and receipt path.
+The destination must declare `chat.continuation@0.1.0`,
+`caller.ed25519@0.1.0`, and `inference.chat=<chat-id>@0.2.0`, and share the actual
+local provider instance with that exact chat callable. Ambiguous relationships
+refuse. Existing v1/v2 catalog serialization is unchanged.
+
+Each client generates its own Ed25519 key and separately obtains capability-owner
+approval of its **public** key, models and expiry. Core never generates this
+identity, reuses its gateway key for it, or receives the client's private key.
+Direct owner API access remains required; paired-device/LAN access does not
+inherit continuation authority.
+
+Send `Skulk-Continuation-Proof` as unpadded base64url of a UTF-8 JSON object
+`{caller_id, request, signature}` (at most 4,096 header characters). `caller_id`
+is the approved 32-character lowercase hexadecimal ID; `signature` is the
+128-character lowercase hexadecimal Ed25519 signature. Sign canonical JSON of
+`{caller_id, request}` with sorted object keys, ASCII escaping, no whitespace,
+and no nonfinite numbers. Expiry uses Python JSON float representation, including
+`.0` for whole values; browser clients use an exact fractional epoch timestamp
+to avoid an integer/float serialization mismatch. The `request` contains:
+
+| Field | Meaning |
+| --- | --- |
+| `contract` | Exactly `chat.continuation@0.1.0`. |
+| `mode`, `handle` | Both fields are required in the signed object: `start` with explicit `handle: null`, or `continue` with the exact prior `ct1_` plus 64-hex handle. An omitted handle is rejected before dispatch, so validation cannot silently insert a signed field. |
+| `conversation_id` | Explicit random 64-hex conversation identity. |
+| `target` | Exact advertised `target_node`, `callable_id`, 16-hex `descriptor_revision`, and provider model slug. Callable version is fixed to `0.1.0`. |
+| `body` | `size_bytes` (2 bytes–16 MiB), lowercase SHA-256 `sha256`, and `media_type: application/vnd.skulk.chat-request+json` of the **original HTTP body**, including its exact public `model` ID. |
+| `nonce`, `expires_at` | Fresh 64-hex attempt ID and finite Unix admission deadline within the next 60 seconds. |
+
+Serialize the HTTP body once, sign its byte digest and length, and send those same
+bytes. Whitespace and Unicode encoding are preserved. Full public message history
+is required, including matching earlier assistant text/tool calls and tool results.
+The API checks exact body/destination/deadline and hard inference policy; the
+capability independently verifies the registered client signature, current scope,
+revocation, history and storage before any provider request. No normalization,
+fallback, destination migration or automatic retry occurs.
+
+Chat persists each verified public assistant round together with its receipt,
+and saves client tool results with the next pending attempt before dispatch.
+Received output remains available after lost terminal delivery; recovery still
+requires an exact committed-history match. A receipt lookup cannot overwrite a
+newer pending attempt that began while the lookup was in flight.
+
+Successful collected JSON includes `skulk_continuation`. For SSE, that field is
+on the final successful finish chunk before optional usage and `[DONE]`. It
+contains only `contract`, `conversation_id`, opaque `handle`, public-history
+`{count, sha256}`, original `request_nonce`, and checkpoint `expires_at`. Success
+and this receipt are withheld until semantic commit and transport completion.
+Failures can include a fixed `error.continuation_error` category such as
+`scope_mismatch`, `history_mismatch` or `recovery_required`; no provider state is
+returned. An early authentication refusal survives input half-close races.
+
+**POST** `/v1/chat/continuation/receipt` accepts a fresh `{caller_id, request,
+signature}` JSON proof under the separate `chat.continuation.receipt@0.1.0`
+request contract. Its request contains the same `conversation_id` and exact
+`target`, original `request_nonce`, a fresh query `nonce`, and admission
+`expires_at`. Signing rules are identical. No media/body reference or generation
+parameters are accepted. It returns `{receipt, error}` with exactly one non-null:
+a current committed receipt or a bounded capability refusal. Invalid/changed
+destinations return 409; invalid deadlines return 400; uncertain/invalid transport
+returns 503. Direct owner access and independent client authorization still apply.
+A half-close, receive, iterator-close or provider-cancellation failure also returns
+the fixed 503 uncertainty response, without publishing a semantic receipt. Lookup
+has a 30-second deadline and bounded cleanup; provider cancellation is attempted
+even if closing its output iterator fails. Receipt cleanup requires an
+acknowledgement from the selected provider, including a successful, matching HTTP
+result for a remote provider; a missing peer or unsuccessful response is
+uncertainty. Ordinary chat retains best-effort cancellation. Disconnect cancellation remains
+cancellation, and none of these failures authorizes an inference retry.
+A recovered receipt cannot recover lost assistant text. Do not invent that text
+or replay inference; continuation still requires the matching committed history.
+
+Streaming retains bounded frames and imposes no aggregate generation ceiling.
+Collected responses have a separate 262,144 serialized-delta-character memory
+guard and return `response_too_large` when exceeded; use streaming for larger
+responses. This guard is separate from capability-owner output allowances and
+provider limits. The existing whole-call deadline and provider frame bounds apply.
+
+In dashboard Chat, **Conversation continuity** appears for an advertised
+destination. **Get browser public key** creates or reads a nonextractable
+Ed25519 key in origin-local IndexedDB. Approve only its public key in the
+capability's management page, then paste the returned public enrollment JSON
+and select **Enable for this conversation**. The dashboard checks the approved
+key, model, destination and expiry. It does not proxy management cookies or CSRF
+across origins. Existing conversations can explicitly opt in using full history.
+
+Public grants, attempt IDs and receipts live with the conversation metadata;
+private keys and provider/account state do not. A pending attempt is durably
+recorded before dispatch. Chat preserves exact public assistant/tool turns and
+summaries separately from display text, checks their fingerprint before accepting
+a receipt, and requires a clean SSE terminal plus EOF. Reload, cancellation or
+missing delivery cannot silently replay an attempt. **Recover receipt** performs
+only the signed lookup and verifies retained public history; missing assistant
+text remains blocked. **Use full history instead** explicitly abandons this
+continuation and starts a fresh provider context on the next request. Editing or
+deleting committed messages likewise requires an explicit new context.
+
+Chat coordinates same-origin tabs using browser Web Locks on HTTPS or localhost.
+In secure contexts, one tab owns a conversation through preparation, streaming,
+client tools and final persistence; other conversations can proceed independently.
+Ordinary chat over private-network HTTP remains supported with transactional
+persistence and per-tab submission ownership. Protected continuation and shared
+cross-tab writer ownership require HTTPS or localhost. Another tab shows
+that ownership and retains its draft. All durable saves atomically merge changed fields in an IndexedDB transaction,
+refusing stale history or receipt changes. Before sending,
+a tab adopts current saved state. Continuation and document preparation must be
+acknowledged before their drafts are cleared or inference is submitted; ordinary
+native image requests retain their existing storage-independent input bounds.
+
+The authoritative snapshot lives in browser-local IndexedDB
+`skulk-chat-history-v2`. A `skulk-chat-v2` localStorage mirror is a startup cache;
+its quota or delayed cross-renderer visibility cannot authorize a stale write.
+The first transaction imports legacy history if no current snapshot exists.
+Older tabs cannot replace the committed snapshot through legacy writes; reload
+all tabs after upgrading to share current history. Migration does not delete the
+legacy snapshot. Authoritative storage failure is visible and preserves the last
+saved transaction; new durable preparation is refused until it succeeds. Browser
+storage quota still applies. Committed revisions fence out-of-order refreshes;
+closed-tab ownership is detected without retrying inference. Temporary database
+failures retain ordinary edits in the current tab until they can be saved. If
+another tab deletes the active conversation or changes its model, sending pauses
+until you explicitly choose or start a conversation; your draft is retained.
+Switching models selects or creates a separate conversation even when the old
+one is empty. A conversation ID retains its original model. Receipt recovery
+checks public history again after acquiring ownership and refreshing storage;
+it cannot acknowledge a receipt against newly changed history.
+
+**Retained local edits** appears when a conflicting ordinary conversation edit
+can be saved separately. **Review versions** shows your local messages alongside
+the saved history. **Save as separate conversation** creates a new conversation
+with the same explicit model and visible messages/documents, with continuity
+off. It carries no old pending attempt, client grant, receipt, opaque tool history
+or origin binding. **Use saved version** discards only the retained local copy;
+**Accept deletion** adopts a conversation's deletion by another tab. These
+choices are atomic: storage refusal or another tab resolving the same record
+cannot report a successful fork or silently discard either version. Independent
+conversations continue after conflict quarantine. Up to 64 local versions are
+retained without automatic expiry; resolve existing records before saving more.
+If browser storage cannot retain a conflict, keep the current tab open until
+storage recovers: in-process edits are not a successful durable save.
+Message, attempt and receipt writes requiring acknowledgement refuse when they
+conflict with a pending ordinary edit; quarantining that earlier edit cannot
+acknowledge a new mutation. Recovery controls remain available without a ready
+model or an active canonical conversation.
+
+History, document bytes and retained versions now share schema version two of
+`skulk-chat-history-v2`. Legacy document import is resumable and retires the old
+blob database only after copying completes. Reload older dashboard tabs after
+this upgrade; their schema-one writers cannot overwrite current history. Newly
+submitted documents have durable staging ownership and a 24-hour unused lease.
+Cleanup atomically checks canonical and retained references, preserving referenced
+documents regardless of age and active foreign staging until expiry. If cleanup
+wins before an expired staged document is committed, publication refuses and the
+draft remains available; it never saves a dangling reference or submits inference.
+Unreadable reference metadata preserves document bytes and surfaces a cleanup
+failure. Browser keys remain in their separate nonextractable-key database.
+
+Recovery/reset controls remain visible for retained continuation state even after
+a destination withdraws its advertisement. New enrollment still requires a current
+advertisement. Stop during a client tool preserves the last submitted attempt;
+no following model nonce is published for an already canceled request. If Stop
+occurs during pending storage before HTTP dispatch, Chat restores the preceding
+attempt. A failed restoration preserves the pending fence rather than claiming
+the request is safe to repeat.
+
 
 **GET** `/v1/inference/gateway` returns `contract: chat.completions@0.1.0`
 and this API host's Ed25519 `public_key`. It accepts no parameters and exposes

@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 
 import anyio
+import httpx
 import pytest
 
 from skulk.api.inference_gateway import chat_response
@@ -30,6 +31,105 @@ from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.telemetry import TelemetryView
 from skulk.utils.channels import channel
+
+
+@pytest.mark.parametrize("strict", [False, True])
+async def test_stream_cancellation_confirmation_is_opt_in(
+    strict: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Receipt cleanup exposes production callback failure; ordinary chat stays best effort."""
+    api = _build_api(_TtsProvider())
+    requested: list[bool] = []
+
+    async def fail_cancel(
+        call: CapabilityCall, *, require_confirmation: bool = False
+    ) -> None:
+        requested.append(require_confirmation)
+        raise OSError("synthetic cancellation failure")
+
+    async with api._tg as group:  # pyright: ignore[reportPrivateUsage]
+        group.start_soon(api._apply_provider_data)  # pyright: ignore[reportPrivateUsage]
+        session = await api._stream_capability(  # pyright: ignore[reportPrivateUsage]
+            NodeId("api-node"),
+            "tts",
+            "1.0.0",
+            _TTS_REVISION,
+            {"text": "hello"},
+            require_cancel_confirmation=strict,
+        )
+        assert session.open_result.ok and session.cancel_output is not None
+        monkeypatch.setattr(api, "_cancel_remote_capability_stream", fail_cancel)
+        if strict:
+            with pytest.raises(OSError):
+                await session.cancel_output()
+        else:
+            await session.cancel_output()
+        assert requested == [strict]
+        assert not api._provider_stream_receivers  # pyright: ignore[reportPrivateUsage]
+        group.cancel_scope.cancel()
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "missing_peer",
+        "timeout",
+        "http_failure",
+        "invalid_body",
+        "wrong_call",
+        "refused",
+        "success",
+    ],
+)
+async def test_remote_receipt_cancellation_requires_verified_acknowledgement(
+    condition: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing peers, transport and unsuccessful HTTP/semantic results are uncertainty."""
+    api = _build_api(_TtsProvider())
+    call = CapabilityCall(
+        call_id="cancel-proof",
+        capability_id="fixture",
+        version="1.0.0",
+        descriptor_revision="a" * 16,
+        caller_node="api-node",
+        target_node="remote",
+        timeout_seconds=30.0,
+        payload={},
+    )
+
+    async def peer(node_id: NodeId) -> str | None:
+        return None if condition == "missing_peer" else "http://provider.invalid"
+
+    async def transport(request: httpx.Request) -> httpx.Response:
+        if condition == "timeout":
+            raise httpx.ReadTimeout("synthetic timeout", request=request)
+        if condition == "http_failure":
+            return httpx.Response(503)
+        if condition == "invalid_body":
+            return httpx.Response(200, content=b"invalid")
+        return httpx.Response(
+            200,
+            json={
+                "call_id": "other" if condition == "wrong_call" else call.call_id,
+                "ok": condition != "refused",
+                "result": {"cancelled": False},
+            },
+        )
+
+    client_class = httpx.AsyncClient
+
+    def client(**kwargs: object) -> httpx.AsyncClient:
+        return client_class(transport=httpx.MockTransport(transport))
+
+    monkeypatch.setattr(api, "_peer_api_url_for", peer)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    if condition == "success":
+        await api._cancel_remote_capability_stream(call, require_confirmation=True)  # pyright: ignore[reportPrivateUsage]
+    else:
+        with pytest.raises(OSError, match="not confirmed"):
+            await api._cancel_remote_capability_stream(call, require_confirmation=True)  # pyright: ignore[reportPrivateUsage]
+    await api._cancel_remote_capability_stream(call)  # pyright: ignore[reportPrivateUsage]
+
 
 _TTS = CapabilityDescriptor(
     id="tts",
@@ -1358,7 +1458,9 @@ class _DynamicStreamingProvider(_MixedStreamingProvider):
             direction="provider_to_caller",
             sequence=2 if call.capability_id == _BIDIRECTIONAL.id else 1,
             kind="completed",
-            payload={"text": "heard"} if call.capability_id == _CLIENT_STREAMING.id else None,
+            payload={"text": "heard"}
+            if call.capability_id == _CLIENT_STREAMING.id
+            else None,
         )
 
 

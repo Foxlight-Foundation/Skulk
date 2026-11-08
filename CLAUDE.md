@@ -21,6 +21,53 @@ stored in browser-local IndexedDB (`store/chatDocuments.ts`) and hydrated into
 one request; localStorage holds conversation references, not document bodies.
 Missing files and unsupported destinations must never be silently omitted.
 
+Explicit client continuation uses `api/inference_continuation.py`: detached
+client proofs bind the exact HTTP body and a same-provider continuation/chat
+descriptor relationship. Core holds no continuation private keys or provider
+checkpoints. Receipt lookup uses its own signed operation domain and cannot
+replay inference. Hold receipts and success until transport completion. Preserve
+fixed 503 uncertainty for lookup half-close, receive and cleanup failures. Bound
+iterator cleanup and attempt provider cancellation even after a close failure;
+never convert caller task cancellation into successful receipt delivery. Preserve
+early provider refusals when their output closes input during upload. Streaming
+has no aggregate generation cap; collected responses retain a memory guard.
+Dashboard client keys stay nonextractable in origin-local IndexedDB
+(`store/chatContinuation.ts`). Only public grants, receipts and pending attempt
+fences enter conversation metadata. Preserve exact public tool rounds, summaries
+and whitespace separately from display content; verify committed fingerprints.
+Never silently recover missing assistant text or restart an uncertain request.
+
+Browser history, document blobs and retained conflicts share schema version two
+of `skulk-chat-history-v2` (`store/chatDatabase.ts`). Resume legacy blob migration
+before retiring old storage. Validate/claim new references atomically with history
+and check canonical plus retained references in the GC deletion transaction.
+Preserve unexpired foreign staging; expire unused staging after 24 hours and
+abort collection on unreadable references. Quarantine complete local conversation
+intent durably before clearing conflicting writes. `ChatRetainedEdits` explicitly
+forks visible history or adopts canonical state; forks reset identity, continuity,
+tool history and affinity. Failed custody stays in-process, never a successful save.
+
+All ordinary/acknowledged chat saves share `store/chatCoordination.ts`: changed-field
+CAS in authoritative versioned IndexedDB
+`skulk-chat-history-v2` snapshots. `skulk-chat-v2` localStorage is only a bootstrap
+cache; first migration imports legacy history. Fence asynchronous adoption by
+committed revision. Preserve per-conversation writer ownership through tools
+and final storage on HTTPS/localhost, while allowing other conversations to run.
+Ordinary HTTP keeps transactional saves/per-tab ownership; protected continuation
+requires a secure context. Retain ordered local edits across database-open failure.
+Foreign deletion/reassignment requires explicit selection and retains the draft.
+Keep conversation model identity immutable even while empty; substantive field
+writes compare it too. Reverify recovered receipts against refreshed public
+history under conversation writer ownership before acknowledging them.
+Refresh committed
+history before send; a stale subscriber must never replace a pending nonce.
+Require preparation acknowledgment for continuation/documents, retain drafts on
+refusal, keep reset controls after withdrawal, and check cancellation before
+creating another model attempt. Restore the preceding attempt if canceled before
+HTTP invocation; failed restoration keeps the pending fence. Native image input
+keeps its existing bounds.
+
+
 Native installed preservation lives in `store/preservation_export.py`; complete
 card-selected mappings live in `store/preservation_closure.py`. Offline recovery
 lives in `store/preservation.py` and
@@ -250,6 +297,58 @@ publication. Keep both native publication APIs covered when changing this helper
 ## Architecture
 
 ### Node Composition
+
+Local control delivery retains admitted producer sequences until the master's
+echo or authenticated consumption receipt, with count/byte bounds, one queued
+event per producer, capped backoff and
+bounded retry batches. `LOCAL_EVENTS` has rendezvous admission and a one-packet
+egress loop; a master's own local events bypass peer egress. Pending connectivity
+readings coalesce, then re-enroll after snapshot replacement or self-timeout.
+
+Worker info ingress forwards heartbeats and resource telemetry independently of
+ordered-control admission. A separate owned publisher drains one latest queued
+value per typed connectivity/info kind; a full reliable outbox cannot stall that
+telemetry consumer or create an unbounded FIFO of changed connectivity readings.
+Snapshot replacement and self-timeout invalidate queued, pending and confirmed
+control readings. Normal input closure drains offered values; worker shutdown
+cancels its blocked publisher.
+
+
+Self-master control admission bypasses the serialized topic loop before queueing,
+including after promotion while an earlier follower publication is blocked. The
+master also reports newly consumed prefixes directly to its local EventRouter
+after the whole ordered batch has applied/persisted. That in-process retirement
+performs no peer send, so blocked remote receipt replies cannot strand local
+skipped events. Remote receipts retain their authenticated retry path.
+Local producers reject encoded frames above the conservative 8-MiB transport
+budget (4 KiB reserved for framing and envelope growth) before enqueueing or
+allocating a source sequence. The producer receives an explicit size error;
+cloned handles retain the guard. Retention never waits for an untransmittable
+frame to obtain an acknowledgement.
+
+`LOCAL_EVENT_RECEIPTS` is an ephemeral control topic for retry-time cumulative
+consumption probes. Only authenticated session-master responses can release the
+requesting node's retained source prefix. The master advances that prefix after
+applying/persisting the whole ordered batch, including skipped stale task events;
+receipts themselves never enter State or the event log. Each authenticated reply
+also retains a monotonic global replay target, even after its local source was
+retired. An independent bounded-backoff task retries from the current global
+cursor until that target is reached, surviving lost requests and missing final
+replay frames without depending on local outbox activity, while those events
+remain in the master's retained log. Local self-master probes short-circuit peer
+egress. Origin-aware receipt subscriptions coalesce by transport origin,
+requester, source, session and request/response kind. Responses preserve the
+highest acknowledged prefix and highest global head independently, so a delayed
+older reply cannot erase replay work after outbox retirement. Requests retain
+latest metadata. Each subscription holds at most 256 frames of 4 KiB each (at most 1 MiB encoded); oversized metadata is not admitted.
+Admission never blocks the shared network receive loop. A full queue evicts its
+oldest disposable metadata, which ordinary idempotent retry repairs.
+
+A same-session cursor older than the compacted master tail is a separate recovery
+limit: existing replay clamps to the retained range and does not acquire another
+snapshot for a running follower. This bounded local-delivery path does not add
+live snapshot recovery. Complete the documented same-build fleet deployment
+before resuming workloads.
 
 GGUF hybrid cache admission uses `ModelCard.gguf_cache_geometry` from the exact
 artifact header. Qwen3.5 scalar metadata separates attention, recurrent and NextN
@@ -1918,6 +2017,12 @@ review threads remain:
 
 ## Testing
 
+The real two-rank MLX composition test waits for child results under one 60-second
+startup/execution deadline before checking clean exits. Spawn includes strict
+schema imports. Its cleanup drains only its owned child ranks before removing
+the rendezvous file; it never relies on `multiprocessing.Queue.empty()` as a
+completion signal.
+
 Tests use pytest-asyncio with `asyncio_mode = "auto"`. Tests are in `tests/` subdirectories alongside the code they test. The `SKULK_TESTS=1` env var (fallback: `SKULK_TESTS=1`) is set during tests.
 
 ## Dashboard UI Testing & Screenshots
@@ -3159,3 +3264,22 @@ readback plus a same-session private engine-wheel ledger entry are still require
 CPU and Mac Metal packages do not imply Linux CUDA/ROCm separator packages or
 qualified model/hardware/music behavior. Actual device probes, trust and live
 resources remain independent requirements.
+
+## Explicit node-download retry
+
+The operator-authorized `POST /download/start` dispatches `RetryDownload` on
+`DOWNLOAD_COMMANDS` after validating exact catalog truth. This distinct typed
+variant preserves the existing `StartDownload` wire shape and automatic planner
+semantics. `DownloadCoordinator` consumes only a same-artifact terminal failure
+for an explicit retry, clears that attempt's progress throttle and starts a new
+attempt identity through the normal verifier/offline/capacity path. A retry
+arriving during failure publication suppresses old callbacks and waits on the
+existing cleanup-to-queued-start handoff; it does not overlap owners or delete
+files. One admission lock orders the entire handoff preflight and registration
+with targeted start, cancel and delete commands, so a second request cannot
+create a competing owner. Unscoped cancellation also withdraws a queued retry;
+an old attempt-scoped cancellation cannot withdraw that new intent.
+Active/completed starts remain idempotent. Deploy compatible target
+readers before using the new command. This does not reset coordinator state for
+master-generated `DownloadPending` placement recovery; that cross-component
+recovery remains a separate contract and test obligation.

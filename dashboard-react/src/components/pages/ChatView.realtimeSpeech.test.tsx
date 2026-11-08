@@ -17,7 +17,7 @@ type RealtimeTranscriptHandler = (text: string, final: boolean) => void;
 
 const chatFormCapture = vi.hoisted(() => ({
   onRealtimeTranscript: null as RealtimeTranscriptHandler | null,
-  autoSubmitVoice: false,
+  autoSubmitVoice: false, canSendMessages: false,
   propNames: [] as string[],
 }));
 
@@ -25,9 +25,11 @@ vi.mock('../chat/ChatForm', () => ({
   ChatForm: (props: {
     onRealtimeTranscript?: RealtimeTranscriptHandler;
     autoSubmitVoice?: boolean;
+    canSendMessages?: boolean;
   }) => {
     chatFormCapture.onRealtimeTranscript = props.onRealtimeTranscript ?? null;
     chatFormCapture.autoSubmitVoice = props.autoSubmitVoice ?? false;
+    chatFormCapture.canSendMessages = props.canSendMessages ?? false;
     chatFormCapture.propNames = Object.keys(props);
     return null;
   },
@@ -137,7 +139,7 @@ describe('ChatView realtime voice auto-send', () => {
     });
 
     await waitFor(
-      () => chatFormCapture.autoSubmitVoice
+      () => chatFormCapture.autoSubmitVoice && chatFormCapture.canSendMessages
         && chatFormCapture.onRealtimeTranscript !== null,
       'realtime transcript callback did not become ready',
     );

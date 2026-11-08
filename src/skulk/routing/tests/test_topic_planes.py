@@ -9,6 +9,7 @@ def test_every_runtime_topic_has_one_explicit_plane() -> None:
     assert {
         "global_events": MessagePlane.Control,
         "local_events": MessagePlane.Control,
+        "local_event_receipts": MessagePlane.Control,
         "commands": MessagePlane.Control,
         "election_messages": MessagePlane.Control,
         "authority_messages": MessagePlane.Authority,

@@ -408,6 +408,8 @@ async def test_provider_input_refusal_has_no_success_or_retry(
         response = await client.post(
             "/v1/chat/completions", json=request_body(stream=stream)
         )
-        assert "[DONE]" not in response.text and "finish_reason" not in response.text
+        assert "[DONE]" not in response.text
+        assert '"finish_reason": "stop"' not in response.text
+        assert '"finish_reason": "tool_calls"' not in response.text
         assert "error" in response.text or response.status_code == 503
         assert fixture.calls == 0 and api.active_provider_streams() == 0

@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
+from math import isfinite
 from random import random
+from typing import final
 
 import anyio
 from anyio import BrokenResourceError, ClosedResourceError
@@ -14,16 +16,79 @@ from skulk.shared.types.events import (
     GlobalForwarderEvent,
     IndexedEvent,
     LocalForwarderEvent,
+    NodeGatheredInfo,
     StateSnapshotHydrated,
+    is_persistable_control_event,
 )
-from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
+from skulk.shared.types.state_sync import (
+    LocalEventReceipt,
+    StateSnapshot,
+    StateSyncMessage,
+)
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.event_buffer import ConflictingDuplicateIndexError, OrderedBuffer
 from skulk.utils.task_group import TaskGroup
 
+_MAX_LOCAL_CONTROL_FRAME_BYTES = 8 * 1024 * 1024 - 4096
+"""Leave framing/global-envelope headroom below Rust's 8-MiB gossipsub limit."""
+
+
+@final
+@dataclass(eq=False)
+class _LocalEventSender(Sender[Event]):
+    """Reject unsendable control before queue admission or sequence allocation."""
+
+    source: SystemId = field(kw_only=True)
+    session: SessionId = field(kw_only=True)
+
+    @classmethod
+    def adopt_control(
+        cls, stream: Sender[Event], source: SystemId, session: SessionId
+    ) -> "_LocalEventSender":
+        """Take ownership with the producer identity used for wire validation."""
+        adopted = cls(_state=stream._state, source=source, session=session)
+        stream.close()
+        return adopted
+
+    def send_nowait(self, item: Event) -> None:
+        """Validate the wire budget and report oversize to the actual producer."""
+        if self._closed:
+            raise ClosedResourceError
+        frame = LocalForwarderEvent(
+            # Account for a full-width long-lived producer counter up front;
+            # actual admission must not reject a near-limit event just because
+            # its real index gained a digit after validation.
+            origin_idx=2**64 - 1,
+            origin=self.source,
+            session=self.session,
+            event=item,
+        )
+        size = len(frame.model_dump_json().encode("utf-8"))
+        if size > _MAX_LOCAL_CONTROL_FRAME_BYTES:
+            raise ValueError(
+                f"Local control event is too large for transport: {size} bytes; "
+                f"maximum {_MAX_LOCAL_CONTROL_FRAME_BYTES} bytes"
+            )
+        super().send_nowait(item)
+
+    def clone(self) -> "_LocalEventSender":
+        """Clone admission without losing the wire-size validation policy."""
+        if self._closed:
+            raise ClosedResourceError
+        return _LocalEventSender(
+            _state=self._state, source=self.source, session=self.session
+        )
+
 
 @dataclass
 class EventRouter:
+    """Bound local control delivery to one master session and release indexed events.
+
+    Unacknowledged local events retain their original source sequence until the
+    master echoes them. Admission and retry batches are bounded so a partition
+    applies backpressure without discarding an ordering dependency.
+    """
+
     node_id: NodeId
     session_id: SessionId
     command_sender: Sender[ForwarderCommand]
@@ -31,6 +96,8 @@ class EventRouter:
     state_sync_receiver: Receiver[tuple[str | None, StateSyncMessage]]
     external_inbound: Receiver[GlobalForwarderEvent]
     external_outbound: Sender[LocalForwarderEvent]
+    receipt_sender: Sender[LocalEventReceipt] | None = None
+    receipt_receiver: Receiver[tuple[str | None, LocalEventReceipt]] | None = None
     _system_id: SystemId = field(init=False, default_factory=SystemId)
     internal_outbound: list[Sender[IndexedEvent]] = field(
         init=False, default_factory=list
@@ -40,18 +107,33 @@ class EventRouter:
     )
     # event_id -> (next retry deadline, attempts so far, event). Entries are
     # popped when the event round-trips back from the master as an indexed
-    # broadcast; until then _simple_retry re-sends with exponential backoff
-    # and gives up after RETRY_MAX_ATTEMPTS — an unbounded fixed-interval
-    # resend amplified event volume under backpressure (#278).
+    # broadcast. Forgetting one event creates a permanent hole in the master's
+    # per-source ordering buffer, so later publications cannot repair membership.
+    # Storage, producer queues and retry batches must bound pressure instead.
     out_for_delivery: dict[EventId, tuple[float, int, LocalForwarderEvent]] = field(
         init=False, default_factory=dict
     )
     retry_base_seconds: float = 5.0
-    retry_max_attempts: int = 6
+    retry_cap_seconds: float = 30.0
+    retry_batch_size: int = 16
+    pending_event_limit: int = 256
+    pending_byte_limit: int = 16 * 1024 * 1024
+    _pending_event_bytes: dict[EventId, int] = field(init=False, default_factory=dict)
+    _pending_bytes: int = field(init=False, default=0)
+    _warned_delivery_ids: set[EventId] = field(init=False, default_factory=set)
+    _rejected_event_types: set[tuple[type[Event], type[object] | None]] = field(
+        init=False, default_factory=set
+    )
+    _delivery_capacity: anyio.Condition = field(
+        init=False, default_factory=anyio.Condition
+    )
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     _nack_cancel_scope: CancelScope | None = field(init=False, default=None)
     _nack_attempts: int = field(init=False, default=0)
+    _receipt_replay_target: int = field(init=False, default=0)
+    _receipt_replay_deadline: float = field(init=False, default=0.0)
+    _receipt_replay_attempts: int = field(init=False, default=0)
     nack_base_seconds: float = 0.5
     nack_cap_seconds: float = 10.0
     snapshot_request_timeout_seconds: float = 1.0
@@ -59,54 +141,205 @@ class EventRouter:
     _bootstrap_complete: anyio.Event = field(init=False, default_factory=anyio.Event)
     _release_lock: anyio.Lock = field(init=False, default_factory=anyio.Lock)
 
+    def __post_init__(self) -> None:
+        """Reject invalid admission limits or retry delays before starting tasks."""
+        if (
+            min(
+                self.pending_event_limit, self.pending_byte_limit, self.retry_batch_size
+            )
+            <= 0
+        ):
+            raise ValueError(
+                "local control admission and retry limits must be positive"
+            )
+        if (
+            not isfinite(self.retry_base_seconds)
+            or not isfinite(self.retry_cap_seconds)
+            or min(self.retry_base_seconds, self.retry_cap_seconds) <= 0
+        ):
+            raise ValueError("local control retry delays must be finite and positive")
+
     async def run(self):
+        """Run bootstrap, ordered delivery and receipt replay until shutdown.
+
+        Starts independent local-delivery and global-replay retry tasks. On exit,
+        closes owned outbound and state-sync/receipt endpoints. Returns when the
+        owned task group stops; processor failures propagate.
+        """
         try:
             async with self._tg as tg:
                 tg.start_soon(self._bootstrap)
                 tg.start_soon(self._run_ext_in)
                 tg.start_soon(self._simple_retry)
+                tg.start_soon(self._retry_receipt_replay)
+                if self.receipt_receiver is not None:
+                    tg.start_soon(
+                        self._receive_delivery_receipts, self.receipt_receiver
+                    )
         finally:
             self.external_outbound.close()
             self.state_sync_receiver.close()
+            if self.receipt_sender is not None:
+                self.receipt_sender.close()
+            if self.receipt_receiver is not None:
+                self.receipt_receiver.close()
             for send in self.internal_outbound:
                 send.close()
 
     async def _simple_retry(self):
         while True:
             await anyio.sleep(1 + random())
-            # list here is a shallow clone for shared mutation
+            sent = 0
+            retried_sources: set[SystemId] = set()
+            # Snapshot entries because indexed echoes can remove them while a
+            # network send yields. Oldest due entries repair sequence gaps first.
             for e_id, (deadline, attempts, event) in list(
                 self.out_for_delivery.items()
             ):
                 if anyio.current_time() <= deadline:
                     continue
-                if attempts >= self.retry_max_attempts:
-                    # The master never echoed this event back (dead session,
-                    # sustained partition, or saturation). Give up: endless
-                    # fixed-interval resend only adds volume to whatever is
-                    # already wrong (#278).
-                    logger.warning(
-                        f"Dropping undeliverable event after "
-                        f"{attempts} retries: {type(event.event).__name__} "
-                        f"({e_id})"
-                    )
-                    self.out_for_delivery.pop(e_id, None)
+                if self.out_for_delivery.get(e_id) != (deadline, attempts, event):
                     continue
-                backoff = self.retry_base_seconds * (2.0**attempts)
+                if attempts >= 6 and e_id not in self._warned_delivery_ids:
+                    self._warned_delivery_ids.add(e_id)
+                    logger.warning(
+                        "Local control acknowledgement is still pending; "
+                        "retaining the ordered event for bounded retry: "
+                        f"{type(event.event).__name__} ({e_id})"
+                    )
+                # Saturating the exponent avoids overflow in a long partition.
+                # A capped delay preserves recovery without fixed-rate storms.
+                backoff = min(
+                    self.retry_cap_seconds,
+                    self.retry_base_seconds * (2.0 ** min(attempts, 6)),
+                )
                 self.out_for_delivery[e_id] = (
                     anyio.current_time() + backoff,
-                    attempts + 1,
+                    min(attempts + 1, 6),
                     event,
                 )
                 await self.external_outbound.send(event)
+                retried_sources.add(event.origin)
+                sent += 1
+                if sent >= self.retry_batch_size:
+                    break
+            # A skipped stale task has no indexed echo. Ask once per retried
+            # source for the master's fully consumed prefix, never per poll.
+            if self.receipt_sender is not None:
+                for source in retried_sources:
+                    await self.receipt_sender.send(
+                        LocalEventReceipt(
+                            kind="request",
+                            requester=self.node_id,
+                            source=source,
+                            session_id=self.session_id,
+                        )
+                    )
+
+    async def _receive_delivery_receipts(
+        self,
+        receiver: Receiver[tuple[str | None, LocalEventReceipt]],
+    ) -> None:
+        """Retire authenticated source prefixes and retain missing replay work."""
+        with receiver as receipts:
+            async for origin, receipt in receipts:
+                if (
+                    receipt.kind != "response"
+                    or receipt.requester != self.node_id
+                    or receipt.session_id != self.session_id
+                    or not self._is_trusted_snapshot_origin(origin)
+                ):
+                    continue
+                matched = [
+                    identifier
+                    for identifier, (_, _, frame) in self.out_for_delivery.items()
+                    if frame.origin == receipt.source
+                    and frame.origin_idx <= receipt.through_idx
+                ]
+                for identifier in matched:
+                    await self._acknowledge_local_event(identifier)
+                # A consumption receipt is not replicated-state delivery. If
+                # indexed echoes were lost, replay must survive retirement of
+                # the last local frame and loss of a request or final response.
+                # Even an already-retired source can carry a newer trusted head.
+                self._receipt_replay_target = max(
+                    self._receipt_replay_target, receipt.next_global_idx
+                )
+                await self._request_receipt_replay_if_due()
+
+    async def _retry_receipt_replay(self) -> None:
+        """Repair a known global tail independently of local delivery pressure."""
+        while True:
+            await anyio.sleep(0.5)
+            await self._request_receipt_replay_if_due()
+
+    async def _request_receipt_replay_if_due(self) -> None:
+        """Retry from the current cursor until the authenticated head is reached."""
+        cursor = self.event_buffer.next_idx_to_release
+        if cursor >= self._receipt_replay_target:
+            self._receipt_replay_attempts = 0
+            self._receipt_replay_deadline = 0.0
+            return
+        now = anyio.current_time()
+        if now < self._receipt_replay_deadline:
+            return
+        delay = min(
+            self.nack_cap_seconds,
+            self.nack_base_seconds * (2.0**self._receipt_replay_attempts),
+        )
+        # Both receipt ingestion and the retry task call this helper. Reserve
+        # the deadline before yielding so they cannot duplicate one due request.
+        self._receipt_replay_deadline = now + delay
+        self._receipt_replay_attempts = min(self._receipt_replay_attempts + 1, 6)
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=RequestEventLog(since_idx=cursor),
+            )
+        )
+
+    async def acknowledge_master_consumption(
+        self, source: SystemId, through_idx: int, next_global_idx: int
+    ) -> None:
+        """Retire this local master's consumed source prefix without peer egress.
+
+        Args:
+            source: Producer whose ordered batch finished applying/persisting.
+            through_idx: Last consumed source sequence, including skipped events.
+            next_global_idx: Authoritative master's next global log index.
+
+        Returns:
+            None. Releases matching local retention and records replay work.
+            The independent replay task owns any potentially blocked command send.
+        """
+        if self.node_id != self.session_id.master_node_id:
+            raise ValueError("Only the local session master can report consumption")
+        matched = [
+            identifier
+            for identifier, (_, _, frame) in self.out_for_delivery.items()
+            if frame.origin == source and frame.origin_idx <= through_idx
+        ]
+        for identifier in matched:
+            await self._acknowledge_local_event(identifier)
+        self._receipt_replay_target = max(self._receipt_replay_target, next_global_idx)
 
     def sender(self) -> Sender[Event]:
-        send, recv = channel[Event]()
+        """Create a backpressured control producer with one queued event.
+
+        The small queue permits initialization before ``run`` starts while
+        keeping an admitted-outbox wait from moving unbounded storage upstream.
+        An unsendable encoded frame raises ``ValueError`` to the producer before
+        queueing, retaining payloads or consuming a sequence number. Clones keep
+        that validation policy.
+        """
+        send, recv = channel[Event](1)
+        source = SystemId()
+        validated = _LocalEventSender.adopt_control(send, source, self.session_id)
         if self._tg.is_running():
-            self._tg.start_soon(self._ingest, SystemId(), recv)
+            self._tg.start_soon(self._ingest, source, recv)
         else:
-            self._tg.queue(self._ingest, SystemId(), recv)
-        return send
+            self._tg.queue(self._ingest, source, recv)
+        return validated
 
     def receiver(self) -> Receiver[IndexedEvent]:
         send, recv = channel[IndexedEvent]()
@@ -120,19 +353,81 @@ class EventRouter:
         idx = 0
         with recv as events:
             async for event in events:
+                if not is_persistable_control_event(event):
+                    # The master never echoes rejected data/telemetry events.
+                    # They cannot enter a reliable control outbox or consume a
+                    # sequence that valid events would then wait behind.
+                    payload_type = (
+                        type(event.info)
+                        if isinstance(event, NodeGatheredInfo)
+                        else None
+                    )
+                    rejected_type = (type(event), payload_type)
+                    if rejected_type not in self._rejected_event_types:
+                        self._rejected_event_types.add(rejected_type)
+                        logger.warning(
+                            "Rejected non-control event before local sequencing: "
+                            f"{type(event).__name__}"
+                            + (
+                                f" carrying {payload_type.__name__}"
+                                if payload_type
+                                else ""
+                            )
+                        )
+                    continue
                 f_ev = LocalForwarderEvent(
                     origin_idx=idx,
                     origin=system_id,
                     session=self.session_id,
                     event=event,
                 )
+                event_bytes = len(f_ev.model_dump_json().encode("utf-8"))
+                if event_bytes > _MAX_LOCAL_CONTROL_FRAME_BYTES:
+                    # Normal producers fail before enqueueing. Defend against
+                    # mutation after handoff without poisoning this source or
+                    # tearing down unrelated EventRouter producers.
+                    logger.error("Rejected oversized local control after handoff")
+                    continue
+                async with self._delivery_capacity:
+                    duplicate = False
+                    while True:
+                        if event.event_id in self.out_for_delivery:
+                            duplicate = True
+                            break
+                        if not self.out_for_delivery or (
+                            len(self.out_for_delivery) < self.pending_event_limit
+                            and self._pending_bytes + event_bytes
+                            <= self.pending_byte_limit
+                        ):
+                            break
+                        await self._delivery_capacity.wait()
+                    if duplicate:
+                        # Re-submitting the same in-flight event must not mint
+                        # a second local index with one shared acknowledgement.
+                        continue
+                    # An individually larger legal message is admitted alone;
+                    # the existing transport limit still bounds that message.
+                    self._pending_event_bytes[event.event_id] = event_bytes
+                    self._pending_bytes += event_bytes
+                    self.out_for_delivery[event.event_id] = (
+                        anyio.current_time() + self.retry_base_seconds,
+                        0,
+                        f_ev,
+                    )
                 idx += 1
+                # Retain before publication: a local-master echo may arrive
+                # before this await returns and must release actual capacity.
                 await self.external_outbound.send(f_ev)
-                self.out_for_delivery[event.event_id] = (
-                    anyio.current_time() + self.retry_base_seconds,
-                    0,
-                    f_ev,
-                )
+
+    async def _acknowledge_local_event(self, event_id: EventId) -> None:
+        """Release retained payload accounting after an authenticated master echo."""
+        async with self._delivery_capacity:
+            if event_id not in self.out_for_delivery:
+                return
+            self.out_for_delivery.pop(event_id)
+            self._warned_delivery_ids.discard(event_id)
+            self._pending_bytes -= self._pending_event_bytes.pop(event_id, 0)
+            self._delivery_capacity.notify_all()
 
     async def _run_ext_in(self):
         with self.external_inbound as events:
@@ -156,8 +451,7 @@ class EventRouter:
                     self._recover_from_conflicting_event(exc.idx)
                     continue
                 event_id = event.event.event_id
-                if event_id in self.out_for_delivery:
-                    self.out_for_delivery.pop(event_id)
+                await self._acknowledge_local_event(event_id)
 
                 if not self._bootstrap_complete.is_set():
                     continue

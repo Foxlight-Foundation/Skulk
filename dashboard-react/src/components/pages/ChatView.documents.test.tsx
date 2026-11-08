@@ -1,3 +1,4 @@
+import { flushChatStorage } from '../../store/chatCoordination';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
@@ -62,13 +63,28 @@ afterEach(async () => {
   await act(async () => { root?.unmount(); });
   root = null;
   container?.remove(); container = null;
+  for (const id of Object.keys(store.getState().chat.conversations)) await navigator.locks.request('skulk-chat-conversation-v2:' + id, () => {});
   const ids = chatDocumentIds(store.getState().chat.conversations);
   Object.keys(store.getState().chat.conversations).forEach(id => store.dispatch(chatActions.deleteConversation(id)));
   await removeChatDocuments(ids);
+  await act(async () => { await flushChatStorage().catch(() => {}); });
   vi.restoreAllMocks(); vi.unstubAllGlobals();
+  store.dispatch(chatActions.setRetainedEdits([]));
 });
 
 describe('Chat document submission', () => {
+  it('exposes retained local history when no model or canonical conversation is available', async () => {
+    store.dispatch(chatActions.setRetainedEdits([{ id: 'a'.repeat(32), conversationId: 'missing', createdAt: 1,
+      conversation: { id: 'missing', name: 'Recovered local history', modelId: 'unavailable', messages: [] } }]));
+    container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+    await act(async () => {
+      root!.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ChatView readyInstances={[]} catalog={{ loaded: true, models: {} }} /></ThemeProvider></Provider>);
+    });
+    expect(container.textContent).toContain('No models are ready');
+    expect(container.textContent).toContain('Recovered local history');
+    expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Save as separate conversation')).toBe(true);
+    expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Accept deletion')).toBe(true);
+  });
   it('sends large text and PDF files, retains small history metadata and resends exact files on the next turn', async () => {
     const requests: Array<{ messages: Array<{ content: unknown }> }> = [];
     vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -96,7 +112,13 @@ describe('Chat document submission', () => {
   it('retains the draft and selected document when browser storage fails, without sending inference', async () => {
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
     await renderChat();
-    vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(() => { throw new DOMException('Full', 'QuotaExceededError'); });
+    for (const method of ['add', 'put'] as const) {
+      const write = IDBObjectStore.prototype[method];
+      vi.spyOn(IDBObjectStore.prototype, method).mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (this.name === 'documents') throw new DOMException('Full', 'QuotaExceededError');
+        return write.call(this, value, key);
+      });
+    }
     await select([new File(['MARIGOLD'], 'notes.txt', { type: 'text/plain' })], 'Keep this draft.');
     await waitFor(() => container!.textContent!.includes('Could not save documents'));
     expect(fetch).not.toHaveBeenCalled();
@@ -108,13 +130,14 @@ describe('Chat document submission', () => {
     const fetch = vi.fn(async () => new Response('data: {"choices":[{"delta":{"content":"Saved"}}]}\n\ndata: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } }));
     vi.stubGlobal('fetch', fetch);
     await renderChat();
-    const original = Storage.prototype.setItem;
-    const failure = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key, value) {
-      if (key === 'skulk-chat') throw new DOMException('Full', 'QuotaExceededError');
-      original.call(this, key, value);
+    const original = IDBObjectStore.prototype.put;
+    const failure = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+      if (this.name === 'snapshot') throw new DOMException('Full', 'QuotaExceededError');
+      return original.call(this, value, key!);
     });
     await select([new File(['JUNIPER'], 'notes.txt', { type: 'text/plain' })], 'Keep this document.');
     await waitFor(() => container!.textContent!.includes('Could not save conversation history'));
+    await waitFor(() => !container!.textContent!.includes('Preparing attachments…'));
     expect(fetch).not.toHaveBeenCalled();
     expect(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!.value).toBe('Keep this document.');
     expect(container!.querySelector('[title="notes.txt"]')).not.toBeNull();
@@ -123,7 +146,7 @@ describe('Chat document submission', () => {
     await waitFor(() => !container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.disabled);
     await act(async () => { await userEvent.click(container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!); });
     await waitFor(() => fetch.mock.calls.length === 1);
-    expect(window.localStorage.getItem('skulk-chat')).toContain('documentId');
+    expect(window.localStorage.getItem('skulk-chat-v2')).toContain('documentId');
   });
 
   it('keeps selected files visible when switching to an unsupported model and back', async () => {

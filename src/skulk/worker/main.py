@@ -1328,11 +1328,17 @@ class Worker:
 
         self.state: State = State()
         # Event-log-bound readings (connectivity) confirmed indexed by the
-        # master: keyed by reading type, holding the payload we saw echoed
-        # back as an indexed event. _forward_info gates re-sends on THIS (not
-        # on "last sent"), so a change dropped after bounded delivery retries
-        # keeps being re-sent each poll until it truly lands in the log.
+        # master. The reliable event router owns retries, so unchanged pending
+        # readings also coalesce instead of occupying its bounded outbox once
+        # per poll during a partition. All coalescing is invalidated when its
+        # event-log membership context is replaced or our node times out.
         self._confirmed_forwarded_info: dict[type[GatheredInfo], GatheredInfo] = {}
+        self._pending_forwarded_info: dict[type[GatheredInfo], GatheredInfo] = {}
+        # At most one latest value per typed reading kind waits outside the
+        # reliable outbox. Control admission must never block the telemetry
+        # consumer, whose heartbeats keep otherwise healthy placements alive.
+        self._queued_forwarded_info: dict[type[GatheredInfo], GatheredInfo] = {}
+        self._control_info_wakeup = anyio.Event()
         self.runners: dict[RunnerId, RunnerSupervisor] = {}
         # Staging DIRECTORY NAMES (forward-sanitized) of models evicted by
         # startup reconciliation whose DownloadCompleted entries may still
@@ -3660,38 +3666,70 @@ class Worker:
         self._realtime_audio_pending_since.pop(command_id, None)
         self._mark_realtime_command_finished(command_id)
 
-    async def _forward_info(self, recv: Receiver[GatheredInfo]):
-        # Connectivity readings (network interfaces, thunderbolt) ride the ordered
-        # event log. They rarely change, but were emitted every poll, so on a
-        # long-lived cluster they filled the master's replay tail and stormed the
-        # AMD nodes on join (the 5-node gossip storm). Forward a reading only when
-        # its value differs from the last value the master CONFIRMED (echoed back
-        # as an indexed event; see _event_applier, which records the echo into
-        # _confirmed_forwarded_info). Gating on confirmation rather than on "last
-        # sent" matters: the delivery retry (event_router ``out_for_delivery``) is
-        # bounded (retry_max_attempts), so a change sent during a long masterless
-        # window can be dropped permanently; gating on the echo means we simply
-        # re-send it on the next poll until it actually lands in the log, and go
-        # quiet once it does. No periodic keepalive is needed; node liveness is
-        # carried by the telemetry plane (the master prune and node-health read
-        # the explicit telemetry heartbeat), not by these events.
-        with recv as info_stream:
-            async for info in info_stream:
-                try:
-                    # Telemetry plane (#279): live readings are gossiped on the
-                    # telemetry topic, off the event log.
-                    if (
-                        isinstance(info, TELEMETRY_PLANE_INFO)
-                        and self._telemetry_sender is not None
+    async def _forward_info(self, recv: Receiver[GatheredInfo]) -> None:
+        """Route telemetry independently of bounded ordered-control admission.
+
+        The ingress consumer never waits for the reliable outbox. Connectivity
+        offers replace an older queued value of the same finite reading kind;
+        a separate task owns their potentially blocked event publication.
+        """
+        finished = anyio.Event()
+        async with anyio.create_task_group() as forwarders:
+            forwarders.start_soon(
+                self._forward_control_info, finished, forwarders.cancel_scope
+            )
+            try:
+                with recv as info_stream:
+                    async for info in info_stream:
+                        if (
+                            isinstance(info, TELEMETRY_PLANE_INFO)
+                            and self._telemetry_sender is not None
+                        ):
+                            await self._telemetry_sender.send(
+                                NodeTelemetry(node_id=self.node_id, info=info)
+                            )
+                            continue
+                        kind = type(info)
+                        pending = self._pending_forwarded_info.get(kind)
+                        if pending == info or (
+                            pending is None
+                            and self._confirmed_forwarded_info.get(kind) == info
+                        ):
+                            # If observations return to the in-flight value,
+                            # an intermediate queued change is already stale.
+                            self._queued_forwarded_info.pop(kind, None)
+                            continue
+                        self._queued_forwarded_info[kind] = info
+                        self._control_info_wakeup.set()
+            except (ClosedResourceError, BrokenResourceError):
+                logger.debug("Worker info forwarding stopped on a closed stream")
+                forwarders.cancel_scope.cancel()
+            finally:
+                # Normal EOF drains offered control values. Worker shutdown
+                # cancellation still interrupts a blocked publisher promptly.
+                finished.set()
+                self._control_info_wakeup.set()
+
+    async def _forward_control_info(
+        self, finished: anyio.Event, cancel_scope: anyio.CancelScope
+    ) -> None:
+        """Publish coalesced control readings without suppressing live telemetry."""
+        try:
+            while True:
+                await self._control_info_wakeup.wait()
+                self._control_info_wakeup = anyio.Event()
+                while self._queued_forwarded_info:
+                    kind = next(iter(self._queued_forwarded_info))
+                    info = self._queued_forwarded_info.pop(kind)
+                    pending = self._pending_forwarded_info.get(kind)
+                    if pending == info or (
+                        pending is None
+                        and self._confirmed_forwarded_info.get(kind) == info
                     ):
-                        await self._telemetry_sender.send(
-                            NodeTelemetry(node_id=self.node_id, info=info)
-                        )
                         continue
-                    # Event-log-bound reading: skip only when the log already
-                    # holds this exact value (confirmed by the master's echo).
-                    if self._confirmed_forwarded_info.get(type(info)) == info:
-                        continue
+                    # Set before yielding. Snapshot/self-timeout invalidation
+                    # during backpressure must not be overwritten on return.
+                    self._pending_forwarded_info[kind] = info
                     await self.event_sender.send(
                         NodeGatheredInfo(
                             node_id=self.node_id,
@@ -3699,12 +3737,11 @@ class Worker:
                             info=info,
                         )
                     )
-                except (ClosedResourceError, BrokenResourceError):
-                    logger.debug(
-                        "Worker info forwarding stopped because the event stream "
-                        "was already closed"
-                    )
+                if finished.is_set():
                     return
+        except (ClosedResourceError, BrokenResourceError):
+            logger.debug("Worker control info forwarding stopped on a closed stream")
+            cancel_scope.cancel()
 
     async def _event_applier(self):
         with self.event_receiver as events:
@@ -3767,15 +3804,19 @@ class Worker:
                     isinstance(event, NodeTimedOut) and event.node_id == self.node_id
                 ):
                     self._confirmed_forwarded_info.clear()
+                    self._pending_forwarded_info.clear()
+                    self._queued_forwarded_info.clear()
 
                 # Confirm our own connectivity readings once the master echoes
-                # them back indexed; _forward_info gates on this so an
-                # unconfirmed change keeps re-sending (see its comment).
+                # them back indexed. An older acknowledgement must not
+                # discard a newer pending value of the same reading type.
                 if (
                     isinstance(event, NodeGatheredInfo)
                     and event.node_id == self.node_id
                 ):
                     self._confirmed_forwarded_info[type(event.info)] = event.info
+                    if self._pending_forwarded_info.get(type(event.info)) == event.info:
+                        self._pending_forwarded_info.pop(type(event.info))
 
                 # Prune telemetry for timed-out nodes from the worker applier.
                 # The API applier does the same; together they cover --no-api

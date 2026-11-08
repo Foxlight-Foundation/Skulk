@@ -1,6 +1,9 @@
 import { createSlice, nanoid, type PayloadAction } from '@reduxjs/toolkit';
 import { DEFAULT_CONVERSATION_NAME, type ChatMessage, type Conversation } from '../../types/chat';
 import { chatDocumentIds, pruneChatDocuments, removeChatDocuments } from '../chatDocuments';
+import type { ChatContinuation } from '../chatContinuation';
+import { chatStorageChanges, readChatStorage, readCommittedChatSnapshot, writeChatStorage, flushChatStorage, CHAT_STORAGE_KEY, ChatStorageUnavailable, hasUnsavedChatChanges, type ChatStorageObject } from '../chatCoordination';
+import { readRetainedChatEdits, type RetainedChatEdit } from '../chatRetainedEdits';
 
 /* ── Helpers ──────────────────────────────────────────── */
 
@@ -14,7 +17,7 @@ function autoName(content: string): string {
 /**
  * Drop transient per-message fields that should not survive a reload (token
  * counters, in-progress generated images). The persistence layer applies this
- * before writing to localStorage.
+ * before writing to durable browser storage.
  */
 function stripTransientFields(
   conversations: Record<string, Conversation>,
@@ -41,11 +44,16 @@ function stripTransientFields(
 
 /* ── State ────────────────────────────────────────────── */
 
-const DURABLE_STORAGE_KEY = 'skulk-chat';
 const SESSION_STORAGE_KEY = 'skulk-chat-session';
 
 export interface ChatState {
   conversations: Record<string, Conversation>;
+  /** Visible persistence conflict/failure; no successful save is implied. */
+  persistenceError?: string;
+  /** Separately saved local versions awaiting explicit adoption or a clean fork. */
+  retainedEdits?: RetainedChatEdit[];
+  /** Per-tab explicit selection required after a foreign deletion or model reassignment. */
+  selectionNeedsReview?: boolean;
   activeConversationId: string | null;
   selectedModelId: string | null;
   selectedTranscriptionModelId: string | null;
@@ -70,6 +78,7 @@ interface PersistedDurable {
 }
 
 interface PersistedSession {
+  selectionNeedsReview?: boolean;
   activeConversationId?: string | null;
   selectedModelId?: string | null;
   selectedTranscriptionModelId?: string | null;
@@ -79,10 +88,7 @@ interface PersistedSession {
 function loadDurable(): PersistedDurable {
   if (typeof window === 'undefined') return {};
   try {
-    const raw = window.localStorage.getItem(DURABLE_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as { state?: PersistedDurable };
-    return parsed.state ?? {};
+    return readChatStorage() as PersistedDurable;
   } catch {
     return {};
   }
@@ -107,6 +113,7 @@ function initialState(): ChatState {
     conversations: durable.conversations ?? {},
     modelToConversationId: durable.modelToConversationId ?? {},
     activeConversationId: session.activeConversationId ?? null,
+    selectionNeedsReview: session.selectionNeedsReview ?? false,
     selectedModelId: session.selectedModelId ?? null,
     selectedTranscriptionModelId: session.selectedTranscriptionModelId ?? null,
     selectedSpeechModelId: session.selectedSpeechModelId ?? null,
@@ -124,7 +131,44 @@ const slice = createSlice({
   name: 'chat',
   initialState: initialState(),
   reducers: {
+    /** Adopt committed browser data while retaining this tab's current selection. */
+    refreshDurable(state, action: PayloadAction<PersistedDurable>) {
+      const durable = action.payload;
+      const conversations = durable.conversations ?? {};
+      for (const id of Object.keys(state.conversations)) if (!conversations[id]) delete state.conversations[id];
+      for (const [id, conversation] of Object.entries(conversations)) {
+        const live = state.conversations[id];
+        const durable = live ? stripTransientFields({ [id]: live })[id] : undefined;
+        if (!live || JSON.stringify(durable) !== JSON.stringify(conversation)) {
+          // Metadata adoption must not erase process-local image URLs, token
+          // counters or staged file bytes for unchanged public messages.
+          const previousMessages = new Map(live?.messages.map((message, index) => [message.id, { live: message, durable: durable!.messages[index] }]));
+          state.conversations[id] = { ...conversation, messages: conversation.messages.map(message => {
+            const previous = previousMessages.get(message.id);
+            return previous && live?.modelId === conversation.modelId && JSON.stringify(previous.durable) === JSON.stringify(message) ? previous.live : message;
+          }) };
+        }
+      }
+      state.modelToConversationId = durable.modelToConversationId ?? {};
+      state.selectedVoice = durable.selectedVoice ?? null;
+      state.autoSpeakAssistant = durable.autoSpeakAssistant ?? false;
+      state.narrateCodeBlocks = durable.narrateCodeBlocks ?? true;
+      state.realtimeVoiceEnabled = durable.realtimeVoiceEnabled ?? true;
+      state.autoSubmitVoice = durable.autoSubmitVoice ?? false;
+      const active = state.activeConversationId ? state.conversations[state.activeConversationId] : undefined;
+      if (state.activeConversationId && (!active || active.modelId !== state.selectedModelId)) {
+        // Retain this tab's chosen processing destination. Silently following
+        // another tab's reassignment could send its draft to a different model.
+        state.activeConversationId = null;
+        state.selectionNeedsReview = true;
+      }
+    },
+    /** Surface failed custody without losing the saved browser snapshot. */
+    setPersistenceError(state, action: PayloadAction<string | undefined>) { state.persistenceError = action.payload; },
+    /** Publish the bounded list of independently retained local versions. */
+    setRetainedEdits(state, action: PayloadAction<RetainedChatEdit[]>) { state.retainedEdits = action.payload; },
     selectModel(state, action: PayloadAction<string>) {
+      state.selectionNeedsReview = false;
       const modelId = action.payload;
       const now = Date.now();
 
@@ -132,20 +176,10 @@ const slice = createSlice({
       const currentConvo = currentId ? state.conversations[currentId] : null;
 
       // Same model + active conversation: no-op.
-      if (modelId === state.selectedModelId && currentId) return;
+      if (modelId === state.selectedModelId && currentConvo?.modelId === modelId) return;
 
-      // Empty current conversation — re-assign it to the new model rather
-      // than leaving an unused conversation behind.
-      if (currentConvo && currentConvo.messages.length === 0 && !state.conversations[state.modelToConversationId[modelId]]) {
-        if (state.modelToConversationId[currentConvo.modelId] === currentConvo.id) {
-          delete state.modelToConversationId[currentConvo.modelId];
-        }
-        currentConvo.modelId = modelId;
-        currentConvo.updatedAt = now;
-        state.modelToConversationId[modelId] = currentConvo.id;
-        state.selectedModelId = modelId;
-        return;
-      }
+      // A conversation ID permanently identifies its processing destination,
+      // even while empty: another tab may already be preparing its first send.
 
       // Save the existing conversation's updatedAt, then switch.
       if (currentConvo) {
@@ -154,7 +188,7 @@ const slice = createSlice({
 
       // Find or create the new model's conversation.
       const existingId = state.modelToConversationId[modelId];
-      if (existingId && state.conversations[existingId]) {
+      if (existingId && state.conversations[existingId]?.modelId === modelId) {
         state.activeConversationId = existingId;
         state.selectedModelId = modelId;
       } else {
@@ -232,7 +266,10 @@ const slice = createSlice({
       const convo = state.conversations[convoId];
       if (!convo) return;
       const target = convo.messages.find((m) => m.id === action.payload.messageId);
-      if (target) target.content = action.payload.content;
+      if (target) {
+        target.content = action.payload.content;
+        delete target.continuationMessages;
+      }
       convo.updatedAt = Date.now();
     },
 
@@ -259,6 +296,7 @@ const slice = createSlice({
      */
     newConversation: {
       reducer(state, action: PayloadAction<{ id: string; modelId: string }>) {
+        state.selectionNeedsReview = false;
         const { id, modelId } = action.payload;
         const now = Date.now();
         state.conversations[id] = {
@@ -301,6 +339,23 @@ const slice = createSlice({
       conversation.updatedAt = Date.now();
     },
 
+    /** Pin continuation state to the originating chat, never the current selection. */
+    setConversationContinuation(state, action: PayloadAction<{ conversationId: string; continuation?: ChatContinuation }>) {
+      const conversation = state.conversations[action.payload.conversationId];
+      if (conversation) conversation.continuation = action.payload.continuation;
+    },
+
+    /** Publish an acknowledged round and its receipt as one state transition. */
+    saveContinuationMessage(state, action: PayloadAction<{ conversationId: string; continuation: ChatContinuation; message: ChatMessage }>) {
+      const conversation = state.conversations[action.payload.conversationId];
+      if (!conversation) return;
+      const index = conversation.messages.findIndex(message => message.id === action.payload.message.id);
+      if (index < 0) conversation.messages.push(action.payload.message);
+      else conversation.messages[index] = action.payload.message;
+      conversation.continuation = action.payload.continuation;
+      conversation.updatedAt = action.payload.message.timestamp;
+    },
+
     /** Rename a saved conversation without replacing its messages or selection. */
     renameConversation(state, action: PayloadAction<{ conversationId: string; name: string }>) {
       const conversation = state.conversations[action.payload.conversationId];
@@ -311,6 +366,7 @@ const slice = createSlice({
     selectConversation(state, action: PayloadAction<string>) {
       const convo = state.conversations[action.payload];
       if (!convo) return;
+      state.selectionNeedsReview = false;
       state.activeConversationId = action.payload;
       state.selectedModelId = convo.modelId;
       state.modelToConversationId[convo.modelId] = action.payload;
@@ -370,97 +426,139 @@ export const selectConversationsForModel =
 
 /* ── Persistence ──────────────────────────────────────── */
 
-function durableChatJson(chat: ChatState): string {
-  return JSON.stringify({
-    state: {
-      conversations: stripTransientFields(chat.conversations),
-      modelToConversationId: chat.modelToConversationId,
-      selectedVoice: chat.selectedVoice,
-      autoSpeakAssistant: chat.autoSpeakAssistant,
-      narrateCodeBlocks: chat.narrateCodeBlocks,
-      realtimeVoiceEnabled: chat.realtimeVoiceEnabled,
-      autoSubmitVoice: chat.autoSubmitVoice,
-    },
-    version: 1,
-  });
+/** Normalize durable fields before comparison; transient data cannot cause a false conflict. */
+function durableChatState(chat: ChatState): ChatStorageObject {
+  return JSON.parse(JSON.stringify({
+    conversations: stripTransientFields(chat.conversations),
+    modelToConversationId: chat.modelToConversationId,
+    selectedVoice: chat.selectedVoice,
+    autoSpeakAssistant: chat.autoSpeakAssistant,
+    narrateCodeBlocks: chat.narrateCodeBlocks,
+    realtimeVoiceEnabled: chat.realtimeVoiceEnabled,
+    autoSubmitVoice: chat.autoSubmitVoice,
+  })) as ChatStorageObject;
 }
 
-/** Persist a document message before accepting its draft or starting inference. */
-export function persistDocumentMessage(chat: ChatState, conversationId: string, message: ChatMessage): void {
+/** Persist a new message before accepting its draft or starting inference. */
+export async function persistDocumentMessage(chat: ChatState, conversationId: string, message: ChatMessage): Promise<void> {
   const conversation = chat.conversations[conversationId];
   if (!conversation) throw new Error('The conversation is no longer available.');
-  // The ordinary subscriber is best effort; document handles need an explicit
-  // acknowledged write so successful blob storage cannot hide lost history.
   const next: Conversation = {
-    ...conversation,
-    messages: [...conversation.messages, message],
+    ...conversation, messages: [...conversation.messages, message],
     name: conversation.name === DEFAULT_CONVERSATION_NAME ? autoName(message.content) : conversation.name,
     updatedAt: message.timestamp,
   };
-  try {
-    window.localStorage.setItem(DURABLE_STORAGE_KEY, durableChatJson({
-      ...chat, conversations: { ...chat.conversations, [conversationId]: next },
-    }));
-  } catch {
-    throw new Error('Could not save conversation history in this browser. Free browser storage and try again.');
-  }
+  await writeChatStorage(chatStorageChanges(durableChatState(chat), durableChatState({ ...chat, conversations: { ...chat.conversations, [conversationId]: next } })));
 }
 
-/**
- * Wires localStorage (durable) and sessionStorage (per-tab) writes to the chat
- * slice. Strips transient message fields before writing to localStorage so
- * token counters and in-progress images don't bloat persisted state.
- *
- * Wraps writes with a dirty check so the subscriber doesn't hammer storage on
- * dispatches that don't affect chat state.
- */
+/** Atomically acknowledge continuation state and its exact public history. */
+export async function persistChatContinuation(chat: ChatState, conversationId: string, continuation?: ChatContinuation, message?: ChatMessage): Promise<void> {
+  const conversation = chat.conversations[conversationId];
+  if (!conversation) throw new Error('The conversation is no longer available.');
+  const messages = message
+    ? conversation.messages.some(existing => existing.id === message.id)
+      ? conversation.messages.map(existing => existing.id === message.id ? message : existing)
+      : [...conversation.messages, message]
+    : conversation.messages;
+  const changes = chatStorageChanges(durableChatState(chat), durableChatState({ ...chat,
+    conversations: { ...chat.conversations, [conversationId]: { ...conversation, continuation, messages } },
+  }));
+  // Receipt-only acknowledgment must still compare the verified transcript:
+  // ordinary message edits can commit without the long-lived writer lock.
+  if (continuation?.receipt && !message) changes.push({ path: ['conversations', conversationId, 'messages'], before: messages, after: messages });
+  await writeChatStorage(changes);
+}
+
+let refreshCommittedChat: (() => Promise<void>) | undefined;
+/** Flush queued writes and adopt the latest saved conversations before acquiring new work. */
+export async function synchronizeChatPersistence(): Promise<void> {
+  await flushChatStorage().catch(() => {});
+  await refreshCommittedChat?.();
+}
+
+/** Coordinate every ordinary and acknowledged save, preserving unrelated tab changes. */
 export function subscribeChatPersistence(
-  store: { subscribe: (listener: () => void) => () => void; getState: () => ChatRootState },
+  store: { subscribe: (listener: () => void) => () => void; getState: () => ChatRootState; dispatch: (action: ReturnType<typeof chatActions.refreshDurable> | ReturnType<typeof chatActions.setPersistenceError> | ReturnType<typeof chatActions.setRetainedEdits>) => unknown },
 ): () => void {
   if (typeof window === 'undefined') return () => {};
-  let lastDurableJson: string | null = null;
+  let previous = durableChatState(store.getState().chat);
   let lastSessionJson: string | null = null;
-  let documentReferences = chatDocumentIds(store.getState().chat.conversations);
-  void pruneChatDocuments(documentReferences).catch(() => {
-    console.warn('Abandoned chat document cleanup is unavailable.');
-  });
-
-  return store.subscribe(() => {
-    const chat = store.getState().chat;
-
-    const durableJson = durableChatJson(chat);
-    if (durableJson !== lastDurableJson) {
-      try {
-        window.localStorage.setItem(DURABLE_STORAGE_KEY, durableJson);
-        lastDurableJson = durableJson;
-        const current = chatDocumentIds(chat.conversations);
-        const removed = [...documentReferences].filter(id => !current.has(id));
-        documentReferences = current;
-        void removeChatDocuments(removed).catch(() => {
-          console.warn('Deleted chat document cleanup is unavailable.');
-        });
-      } catch {
-        /* ignore */
+  let adopting = false;
+  let active = true;
+  let localRevision = 0;
+  let committedRevision = 0;
+  const refresh = async () => {
+    if (!active) return;
+    let resumedOrdinaryEdits = false;
+    // A refresh queued before a newer local action cannot discard that action.
+    // Recheck after draining so adoption and its revision share one JS turn.
+    let revision: number;
+    do {
+      revision = localRevision;
+      await flushChatStorage().catch(() => {});
+      if (hasUnsavedChatChanges()) {
+        try { await writeChatStorage([]); resumedOrdinaryEdits = true; }
+        catch (error) { store.dispatch(chatActions.setPersistenceError(String(error))); }
       }
+    } while (revision !== localRevision);
+    if (!active) return;
+    if (hasUnsavedChatChanges()) {
+      // Resolution of an independent retained version may still succeed.
+      // Refresh that list without adopting history over this tab's drafts.
+      const retainedEdits = await readRetainedChatEdits();
+      if (active) store.dispatch(chatActions.setRetainedEdits(retainedEdits));
+      return;
     }
-
-    const session = {
-      state: {
-        activeConversationId: chat.activeConversationId,
-        selectedModelId: chat.selectedModelId,
-        selectedTranscriptionModelId: chat.selectedTranscriptionModelId,
-        selectedSpeechModelId: chat.selectedSpeechModelId,
-      },
-      version: 1,
-    };
-    const sessionJson = JSON.stringify(session);
+    const revisionBeforeRead = localRevision;
+    const [snapshot, retainedEdits] = await Promise.all([readCommittedChatSnapshot(), readRetainedChatEdits()]);
+    if (!active) return;
+    if (revisionBeforeRead !== localRevision) return refresh();
+    if (snapshot.revision < committedRevision) return;
+    committedRevision = snapshot.revision;
+    const committed = snapshot.state;
+    adopting = true;
+    try {
+      store.dispatch(chatActions.refreshDurable(committed as PersistedDurable));
+      store.dispatch(chatActions.setRetainedEdits(retainedEdits));
+      if (resumedOrdinaryEdits) store.dispatch(chatActions.setPersistenceError(undefined));
+      previous = durableChatState(store.getState().chat);
+    } finally { adopting = false; }
+  };
+  refreshCommittedChat = refresh;
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === CHAT_STORAGE_KEY) void refresh().catch(error => store.dispatch(chatActions.setPersistenceError(String(error))));
+  };
+  window.addEventListener('storage', onStorage);
+  const channel = typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel('skulk-chat-writers-v2');
+  if (channel) channel.onmessage = event => { if (event.data === 'committed') void refresh().catch(error => store.dispatch(chatActions.setPersistenceError(String(error)))); };
+  void refresh().then(() => { if (active) return pruneChatDocuments(); }).catch(error => { if (active) store.dispatch(chatActions.setPersistenceError(String(error))); });
+  const unsubscribe = store.subscribe(() => {
+    const chat = store.getState().chat;
+    const current = durableChatState(chat);
+    const before = previous;
+    const changes = chatStorageChanges(before, current);
+    previous = current;
+    if (!adopting && changes.length) {
+      localRevision++;
+      void writeChatStorage(changes, true, current).then(committed => {
+        // Only delete blobs dropped by this successful mutation, after checking
+        // the merged snapshot. Never prune another tab's uncommitted uploads.
+        const oldReferences = chatDocumentIds((before.conversations ?? {}) as Record<string, Conversation>);
+        const retained = chatDocumentIds((committed.conversations ?? {}) as Record<string, Conversation>);
+        return removeChatDocuments([...oldReferences].filter(id => !retained.has(id)));
+      }).catch(async error => {
+        store.dispatch(chatActions.setPersistenceError(error instanceof Error ? error.message : 'Conversation storage is unavailable.'));
+        if (!(error instanceof ChatStorageUnavailable)) await refresh().catch(() => {});
+      });
+    }
+    const sessionJson = JSON.stringify({ state: {
+      activeConversationId: chat.activeConversationId, selectedModelId: chat.selectedModelId, selectionNeedsReview: chat.selectionNeedsReview,
+      selectedTranscriptionModelId: chat.selectedTranscriptionModelId, selectedSpeechModelId: chat.selectedSpeechModelId,
+    }, version: 1 });
     if (sessionJson !== lastSessionJson) {
       lastSessionJson = sessionJson;
-      try {
-        window.sessionStorage.setItem(SESSION_STORAGE_KEY, sessionJson);
-      } catch {
-        /* ignore */
-      }
+      try { window.sessionStorage.setItem(SESSION_STORAGE_KEY, sessionJson); } catch { /* Per-tab selection is best effort. */ }
     }
   });
+  return () => { active = false; unsubscribe(); channel?.close(); window.removeEventListener('storage', onStorage); if (refreshCommittedChat === refresh) refreshCommittedChat = undefined; };
 }

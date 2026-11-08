@@ -11,6 +11,7 @@ import { v4 as uuidv4 } from 'uuid';
 import styled from 'styled-components';
 import { ChatMessages } from '../chat/ChatMessages';
 import { ChatForm } from '../chat/ChatForm';
+import { Button } from '../common/Button';
 import type {
   AudioResponseFormat,
   ChatMessage,
@@ -23,6 +24,11 @@ import type { InstanceCardData } from '../layout/InstancePanel';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { chatActions, persistDocumentMessage } from '../../store/slices/chatSlice';
+import { persistChatContinuation, synchronizeChatPersistence } from '../../store/slices/chatSlice';
+import { acquireChatConversation, flushChatStorage, observeChatConversation } from '../../store/chatCoordination';
+import { prepareContinuationRequest, publicHistoryFingerprint, readContinuationReceipt, verifyContinuationHistory } from '../../store/chatContinuation';
+import { ChatContinuationControls } from '../chat/ChatContinuationControls';
+import { ChatRetainedEdits } from '../chat/ChatRetainedEdits';
 import { useStore } from 'react-redux';
 import type { RootState } from '../../store';
 import { tolgee, useSkulkTranslation } from '../../i18n/tolgee';
@@ -520,6 +526,14 @@ export function ChatView({
   const realtimeVoiceEnabled = useAppSelector((s) => s.chat.realtimeVoiceEnabled);
   const autoSubmitVoice = useAppSelector((s) => s.chat.autoSubmitVoice);
   const activeConversationId = useAppSelector((s) => s.chat.activeConversationId);
+  const persistenceError = useAppSelector((s) => s.chat.persistenceError);
+  const selectionNeedsReview = useAppSelector(s => s.chat.selectionNeedsReview);
+  const activeContinuation = useAppSelector(s => s.chat.activeConversationId ? s.chat.conversations[s.chat.activeConversationId]?.continuation : undefined);
+  const [conversationBusyElsewhere, setConversationBusyElsewhere] = useState(false);
+  useEffect(() => {
+    setConversationBusyElsewhere(false);
+    if (activeConversationId) return observeChatConversation(activeConversationId, setConversationBusyElsewhere);
+  }, [activeConversationId]);
   const messages = useAppSelector((s) =>
     s.chat.activeConversationId
       ? s.chat.conversations[s.chat.activeConversationId]?.messages ?? EMPTY_MESSAGES
@@ -709,14 +723,14 @@ export function ChatView({
 
   // Keep a saved capability conversation while its first catalog is loading.
   useEffect(() => {
-    if (selectedModelId?.startsWith('capability/') && !modelCatalogLoaded) return;
+    if (selectionNeedsReview || activeContinuation || (selectedModelId?.startsWith('capability/') && !modelCatalogLoaded)) return;
     if (
       readyModels.length > 0
       && (!selectedModelId || !readyModels.some((model) => model.modelId === selectedModelId))
     ) {
       selectModel(readyModels[0].modelId);
     }
-  }, [selectedModelId, readyModels, selectModel, modelCatalogLoaded]);
+  }, [selectedModelId, readyModels, selectModel, modelCatalogLoaded, activeContinuation, selectionNeedsReview]);
 
   useEffect(() => {
     if (readyTranscriptionModels.length === 0) {
@@ -797,7 +811,7 @@ export function ChatView({
   const selectedImageProfile = selectedModelId ? modelCatalogById[selectedModelId]?.image : null;
   const nativeImageSelected = readyRunnableInstances.some((instance) => instance.modelId === selectedModelId && instance.engine === 'stable_diffusion_cpp');
   const canSendMessages = Boolean(
-    selectedModelId && readyModels.some((model) => model.modelId === selectedModelId) && (!nativeImageSelected || selectedImageProfile),
+    !selectionNeedsReview && selectedModelId && readyModels.some((model) => model.modelId === selectedModelId) && (!nativeImageSelected || selectedImageProfile),
   );
 
   const stopSpeechPlayback = useCallback(() => {
@@ -1080,12 +1094,12 @@ export function ChatView({
   useEffect(() => stopSpeechPlayback, [stopSpeechPlayback]);
 
   const handleSend = useCallback(async (text: string, files: ChatUploadedFile[]) => {
-    if (!selectedModelId || !canSendMessages || isLoading) return;
+    if (!selectedModelId || !canSendMessages || isLoading) throw new Error('The conversation is not ready to send. Your draft was retained.');
     stopSpeechPlayback();
     // Async conversion and streaming may outlive the selected model or this view.
     // Pin both messages to their origin; deleted conversations stay deleted.
     const conversationId = store.getState().chat.activeConversationId;
-    if (!conversationId) return;
+    if (!conversationId) throw new Error('Choose or start a conversation before sending. Your draft was retained.');
 
     // Convert image files to base64 data URLs for the API and message history
     const imageAttachments: { dataUrl: string; file: ChatUploadedFile }[] = [];
@@ -1110,12 +1124,20 @@ export function ChatView({
       attachments: attachments.length ? attachments : undefined,
     };
 
+    const releaseConversation = await acquireChatConversation(conversationId);
+    try {
+    await synchronizeChatPersistence();
     const currentChat = store.getState().chat;
-    if (currentChat.activeConversationId !== conversationId || currentChat.selectedModelId !== selectedModelId) {
+    if (currentChat.selectionNeedsReview || currentChat.activeConversationId !== conversationId || currentChat.selectedModelId !== selectedModelId || currentChat.conversations[conversationId]?.modelId !== selectedModelId) {
       throw new Error('The conversation changed while preparing attachments. Your draft was retained.');
     }
-    if (documentAttachments.length) persistDocumentMessage(currentChat, conversationId, userMsg);
+    const retainedContinuation = currentChat.conversations[conversationId]?.continuation;
+    if (retainedContinuation && !navigator.locks) throw new Error('Protected continuation requires HTTPS or localhost. Use full history instead to continue ordinary chat. Your draft was retained.');
+    if (retainedContinuation && retainedContinuation.phase !== 'ready') throw new Error('Recover this conversation’s receipt or explicitly use full history before sending. Your draft was retained.');
+    if (retainedContinuation && !modelCatalogById[selectedModelId]?.inference_capability?.continuation) throw new Error('This destination no longer advertises continuation. Use the continuity controls to recover or start a new context. Your draft was retained.');
+    if (documentAttachments.length || retainedContinuation) await persistDocumentMessage(currentChat, conversationId, userMsg);
     dispatch(chatActions.appendConversationMessage({ conversationId, message: userMsg }));
+    } catch (error) { await releaseConversation(); throw error; }
     setIsLoading(true);
     setStreamingContent('');
     setStreamingThinking(null);
@@ -1125,6 +1147,7 @@ export function ChatView({
     // Acknowledge submission after durable preparation, independently of the
     // long-running inference, so the composer can safely clear this draft.
     void (async () => {
+    try {
     if (selectedImageProfile) {
       const controller = new AbortController();
       abortRef.current = controller;
@@ -1146,7 +1169,6 @@ export function ChatView({
         }
       } finally {
         if (abortRef.current === controller) {
-          setIsLoading(false);
           setStreamingContent(null);
           abortRef.current = null;
         }
@@ -1163,6 +1185,11 @@ export function ChatView({
       return;
     }
     const allMessages = activeConvo.messages;
+    let continuation = activeConvo.continuation;
+    const continuationDestination = modelCatalogById[selectedModelId]?.inference_capability?.continuation?.target;
+    const continuationMessages: ApiMessagePayload[] = [];
+    const continuationAssistantId = uuidv4();
+    let continuationRound: { content: string; summary: string; tools: StreamToolCall[] } | undefined;
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -1263,6 +1290,7 @@ export function ChatView({
     };
 
     try {
+      if (continuation && !continuationDestination) throw new Error('The selected destination no longer advertises continuation. Explicitly choose a new context; no request was sent.');
       const apiMessages: ApiMessagePayload[] = buildApiMessages(await hydrateChatDocuments(allMessages), {
         text: modelCatalogById[selectedModelId]?.inference_capability?.features?.includes('text_file_input') ?? false,
         pdf: modelCatalogById[selectedModelId]?.inference_capability?.features?.includes('pdf_input') ?? false,
@@ -1272,6 +1300,9 @@ export function ChatView({
         : undefined;
 
       for (let toolRound = 0; toolRound < MAX_TOOL_ROUNDS; toolRound++) {
+        // Cancellation during a client tool leaves the previous committed
+        // receipt recoverable; never publish a nonce for an aborted dispatch.
+        controller.signal.throwIfAborted();
         resetStallTimer();
         speechVisibleContent = '';
         speechTail = '';
@@ -1279,7 +1310,12 @@ export function ChatView({
 
         let iterationRawContent = '';
         let iterationThinking = '';
+        let publicSummary = '';
         const iterationToolCalls: StreamToolCall[] = [];
+        continuationRound = continuation ? { content: '', summary: '', tools: iterationToolCalls } : undefined;
+        let receivedReceipt: unknown;
+        let receivedDone = false;
+        let receivedFinish: string | null = null;
 
         const requestBody = JSON.stringify({
           model: selectedModelId, messages: apiMessages, stream: true,
@@ -1289,9 +1325,37 @@ export function ChatView({
         if (selectedModelId.startsWith('capability/') && new TextEncoder().encode(requestBody).byteLength > MAX_CHAT_REQUEST_BYTES) {
           throw new Error('The conversation exceeds the 16 MiB chat transport limit. Remove older attachments or start a new conversation.');
         }
+        let continuationHeader: string | undefined;
+        if (continuation && continuationDestination) {
+          const submittedContinuation = continuation;
+          await verifyContinuationHistory(continuation, apiMessages);
+          controller.signal.throwIfAborted();
+          const prepared = await prepareContinuationRequest(continuation, continuationDestination, requestBody);
+          controller.signal.throwIfAborted();
+          const priorAssistant = store.getState().chat.conversations[conversationId]?.messages.find(message => message.id === continuationAssistantId);
+          if (continuationMessages.length && !priorAssistant) throw new Error('The committed assistant history is no longer available.');
+          const pendingMessage = priorAssistant ? { ...priorAssistant, continuationMessages: [...continuationMessages] } : undefined;
+          // Client tool results must survive reload before their following model
+          // request can begin. They join the same durable pending-attempt write.
+          await persistChatContinuation(store.getState().chat, conversationId, prepared.pending, pendingMessage);
+          if (pendingMessage) dispatch(chatActions.saveContinuationMessage({ conversationId, continuation: prepared.pending, message: pendingMessage }));
+          else dispatch(chatActions.setConversationContinuation({ conversationId, continuation: prepared.pending }));
+          continuation = prepared.pending;
+          continuationHeader = prepared.header;
+          if (controller.signal.aborted) {
+            // No HTTP invocation has begun. Restore the preceding submitted
+            // attempt rather than strand recovery on a nonce the provider
+            // cannot know. Failed restoration keeps the durable pending fence.
+            await persistChatContinuation(store.getState().chat, conversationId, submittedContinuation, pendingMessage);
+            if (pendingMessage) dispatch(chatActions.saveContinuationMessage({ conversationId, continuation: submittedContinuation, message: pendingMessage }));
+            else dispatch(chatActions.setConversationContinuation({ conversationId, continuation: submittedContinuation }));
+            continuation = submittedContinuation;
+          }
+        }
+        controller.signal.throwIfAborted();
         const res = await operatorSession.fetch('/v1/chat/completions', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Skulk-Dashboard': 'pairing-v1' },
+          headers: { 'Content-Type': 'application/json', 'X-Skulk-Dashboard': 'pairing-v1', ...(continuationHeader ? { 'Skulk-Continuation-Proof': continuationHeader } : {}) },
           body: requestBody,
           signal: controller.signal,
         });
@@ -1327,13 +1391,15 @@ export function ChatView({
             if (!trimmed || trimmed.startsWith(':')) continue;
             if (!trimmed.startsWith('data: ')) continue;
             const data = trimmed.slice(6);
-            if (data === '[DONE]') continue;
+            if (data === '[DONE]') { receivedDone = true; continue; }
 
             try {
               const parsed = JSON.parse(data) as {
                 id?: string;
                 error?: { message?: string; code?: string };
+                skulk_continuation?: unknown;
                 choices?: Array<{
+                  finish_reason?: string | null;
                   delta?: {
                     content?: string;
                     reasoning_content?: string;
@@ -1342,6 +1408,12 @@ export function ChatView({
                 }>;
               };
               if (parsed.error) throw new Error(parsed.error.message ?? 'Capability inference failed.');
+              if (parsed.skulk_continuation !== undefined) {
+                if (receivedReceipt !== undefined) throw new Error('Duplicate continuation receipt.');
+                receivedReceipt = parsed.skulk_continuation;
+              }
+              const finish = parsed.choices?.[0]?.finish_reason;
+              if (finish) receivedFinish = finish;
               if (parsed.id) {
                 activeCommandIdRef.current = parsed.id;
               }
@@ -1354,6 +1426,7 @@ export function ChatView({
               }
 
               if (delta?.reasoning_content) {
+                publicSummary += delta.reasoning_content;
                 iterationThinking += delta.reasoning_content;
                 const combinedThinking = mergeThinkingContent(fullThinking, iterationThinking);
                 setStreamingThinking(combinedThinking);
@@ -1400,6 +1473,10 @@ export function ChatView({
               if (delta?.tool_calls?.length) {
                 mergeToolCallDeltas(iterationToolCalls, delta.tool_calls);
               }
+              if (continuationRound) {
+                continuationRound.content = iterationRawContent;
+                continuationRound.summary = publicSummary;
+              }
 
               if (hasToken) {
                 tokenCount++;
@@ -1415,6 +1492,37 @@ export function ChatView({
               if (!(error instanceof SyntaxError)) throw error;
             }
           }
+        }
+
+        let publicAssistant: ApiMessagePayload | undefined;
+        if (continuation) {
+          iterationToolCalls.sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
+          if (!receivedDone || !['stop', 'tool_calls'].includes(receivedFinish ?? '') || receivedReceipt === undefined) throw new Error('Continuation delivery did not complete. Recover the receipt before continuing; no request will be replayed.');
+          const tools = iterationToolCalls.map(call => {
+            if (!call.id || !call.function?.name || call.type !== 'function') throw new Error('Invalid committed function call.');
+            return { id: call.id, type: 'function', function: { name: call.function.name, arguments: call.function.arguments ?? '' } };
+          });
+          publicAssistant = { role: 'assistant', content: iterationRawContent || null,
+            ...(publicSummary ? { reasoning_content: publicSummary } : {}), ...(tools.length ? { tool_calls: tools } : {}),
+          };
+          const receipt = readContinuationReceipt(receivedReceipt, continuation);
+          const history = await publicHistoryFingerprint([...apiMessages, publicAssistant]);
+          if (history.count !== receipt.history.count || history.sha256 !== receipt.history.sha256) throw new Error('The committed public response does not match its receipt. Continuation is uncertain.');
+          const committed = { ...continuation, phase: 'ready' as const, receipt };
+          const committedMessage: ChatMessage = { id: continuationAssistantId, role: 'assistant',
+            content: splitReasoningDecoratedContent(iterationRawContent).content.trim(),
+            thinkingContent: mergeThinkingContent(fullThinking, iterationThinking) || undefined,
+            timestamp: Date.now(), continuationMessages: [...continuationMessages, publicAssistant],
+          };
+          // Never acknowledge a receipt independently of its public history.
+          // The next tool round may outlive this page or fail local storage.
+          await persistChatContinuation(store.getState().chat, conversationId, committed, committedMessage);
+          continuation = committed;
+          dispatch(chatActions.saveContinuationMessage({ conversationId, continuation, message: committedMessage }));
+          continuationMessages.push(publicAssistant);
+          continuationRound = undefined;
+          setStreamingContent(null);
+          setStreamingThinking(null);
         }
 
         const separatedContent = splitReasoningDecoratedContent(iterationRawContent);
@@ -1433,6 +1541,7 @@ export function ChatView({
 
         fullThinking = mergeThinkingContent(fullThinking, iterationThinking);
 
+        if (publicAssistant) apiMessages.push(publicAssistant);
         for (const toolCall of iterationToolCalls) {
           const toolName = toolCall.function?.name ?? 'unknown';
           const toolCallId = toolCall.id || uuidv4();
@@ -1447,7 +1556,7 @@ export function ChatView({
             toolOutput = JSON.stringify({ error: message });
           }
 
-          apiMessages.push({
+          if (!publicAssistant) apiMessages.push({
             role: 'assistant',
             content: '',
             tool_calls: [{
@@ -1459,11 +1568,13 @@ export function ChatView({
               },
             }],
           });
-          apiMessages.push({
+          const toolResult: ApiMessagePayload = {
             role: 'tool',
             tool_call_id: toolCallId,
             content: toolOutput,
-          });
+          };
+          apiMessages.push(toolResult);
+          if (continuation) continuationMessages.push(toolResult);
         }
 
         setStreamingContent(null);
@@ -1479,6 +1590,29 @@ export function ChatView({
         );
       }
     } catch (err) {
+      let retainedContinuationOutput = false;
+      if (continuation?.phase === 'pending') {
+        if (continuationRound && (continuationRound.content || continuationRound.summary || continuationRound.tools.length)) {
+          // Received output is evidence, even when its terminal was lost. Keep
+          // partial tool data without executing it; recovery must match the
+          // provider's committed fingerprint before another request is allowed.
+          const tools = [...continuationRound.tools]
+            .sort((left, right) => (left.index ?? 0) - (right.index ?? 0))
+            .map(({ index: _index, ...call }) => call);
+          continuationMessages.push({ role: 'assistant', content: continuationRound.content || null,
+            ...(continuationRound.summary ? { reasoning_content: continuationRound.summary } : {}),
+            ...(tools.length ? { tool_calls: tools } : {}),
+          });
+          finalRawContent = continuationRound.content;
+          fullThinking = mergeThinkingContent(fullThinking, continuationRound.summary);
+          retainedContinuationOutput = true;
+        }
+        continuation = { ...continuation, phase: 'uncertain' };
+        // The pending attempt was acknowledged before dispatch. If this update
+        // cannot be persisted, the older pending state also refuses replay.
+        try { await persistChatContinuation(store.getState().chat, conversationId, continuation); } catch { /* Pending remains durable. */ }
+        dispatch(chatActions.setConversationContinuation({ conversationId, continuation }));
+      }
       // A rejected provider event or tool delta ends our ownership of the
       // response even when the server is still producing output.
       controller.abort();
@@ -1487,7 +1621,7 @@ export function ChatView({
         speechSentenceQueueRef.current = null;
       }
       setIsAutoSpeaking(false);
-      if ((err as Error).name === 'AbortError') {
+      if (!retainedContinuationOutput && (err as Error).name === 'AbortError') {
         // User cancelled
         if (requestTimedOut) {
           finalRawContent = t(
@@ -1496,7 +1630,7 @@ export function ChatView({
             { seconds: Math.round(lastStallTimeoutMs / 1000) },
           );
         }
-      } else {
+      } else if (!retainedContinuationOutput) {
         finalRawContent = finalRawContent || t(
           'chat.view.errors.generic',
           'Error: {message}',
@@ -1516,18 +1650,24 @@ export function ChatView({
     }
     const finalAssistantContent = separatedContent.content.trim();
 
-    if (finalAssistantContent || fullThinking) {
+    if (finalAssistantContent || fullThinking || continuationMessages.length) {
       const assistantMsg: ChatMessage = {
-        id: uuidv4(),
+        id: continuation ? continuationAssistantId : uuidv4(),
         role: 'assistant',
         content: finalAssistantContent,
         timestamp: Date.now(),
         ttftMs: firstTokenTime ? firstTokenTime - startTime : undefined,
         tps: lastTps,
         thinkingContent: fullThinking || undefined,
+        ...(continuationMessages.length ? { continuationMessages } : {}),
       };
 
-      dispatch(chatActions.appendConversationMessage({ conversationId, message: assistantMsg }));
+      if (continuation) {
+        // Verified rounds are already durable. Also retain interrupted output
+        // when space permits; a failed write keeps the earlier recovery fence.
+        try { await persistChatContinuation(store.getState().chat, conversationId, continuation, assistantMsg); } catch { /* Earlier acknowledged state remains durable. */ }
+        dispatch(chatActions.saveContinuationMessage({ conversationId, continuation, message: assistantMsg }));
+      } else dispatch(chatActions.appendConversationMessage({ conversationId, message: assistantMsg }));
       if (sentenceQueue) {
         // Settle any pending code closer ahead of the trailing prose so the
         // acknowledgement precedes the final explanation.
@@ -1551,10 +1691,17 @@ export function ChatView({
     sentenceQueue?.finish();
     setStreamingContent(null);
     setStreamingThinking(null);
-    setIsLoading(false);
     abortRef.current = null;
     activeCommandIdRef.current = null;
-    })();
+    } finally {
+      await flushChatStorage().catch(() => {});
+      await releaseConversation();
+      setIsLoading(false);
+    }
+    })().catch(error => {
+      setIsLoading(false); setStreamingContent(null);
+      setSpeechError(error instanceof Error ? error.message : 'Conversation storage is unavailable.');
+    });
   }, [
     dispatch,
     imageParams,
@@ -1615,7 +1762,7 @@ export function ChatView({
       if (!convo) return;
       const lastUser = convo.messages.filter((m) => m.role === 'user').pop();
       if (lastUser) {
-        handleSend(lastUser.content, []);
+        void handleSend(lastUser.content, []).catch(error => setSpeechError(error instanceof Error ? error.message : 'Conversation submission was refused.'));
       }
     }, 50);
   }, [handleSend, removeLastAssistantMessages]);
@@ -1639,16 +1786,19 @@ export function ChatView({
 
   const handleRealtimeTranscript = useCallback((text: string, final: boolean) => {
     if (!final || !autoSubmitVoice || !canSendMessages || !text.trim()) return;
-    void handleSend(text.trim(), []);
+    void handleSend(text.trim(), []).catch(error => setSpeechError(error instanceof Error ? error.message : 'Conversation submission was refused.'));
   }, [autoSubmitVoice, canSendMessages, handleSend]);
 
-  if (!stewardStatus?.enabled && readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
+  if (!selectionNeedsReview && !activeContinuation && messages.length === 0 && !stewardStatus?.enabled && readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
     return (
       <NoModels>
-        {t(
-          'chat.view.noReadyModels',
-          'No models are ready. Launch a model from the Model Store to start chatting.',
-        )}
+        <span>
+          {t(
+            'chat.view.noReadyModels',
+            'No models are ready. Launch a model from the Model Store to start chatting.',
+          )}
+        </span>
+        <ChatRetainedEdits disabled={false} />
       </NoModels>
     );
   }
@@ -1677,6 +1827,19 @@ export function ChatView({
         />
       </MessagesScroll>
       <InputArea>
+        {persistenceError && <p role="alert">{persistenceError}</p>}
+        <ChatRetainedEdits disabled={isLoading} />
+        {selectionNeedsReview && <>
+          <p role="alert">{t('chat.selection.changedElsewhere', 'This conversation was removed or changed to another model in another tab. Choose a conversation or explicitly start a new one. Your draft was retained.')}</p>
+          <Button size="sm" disabled={!selectedModelId || !readyModels.some(model => model.modelId === selectedModelId)} onClick={() => { if (selectedModelId) dispatch(chatActions.newConversation(selectedModelId)); }}>{t('chat.selection.newConversation', 'Start a new conversation')}</Button>
+        </>}
+        {conversationBusyElsewhere && <p role="status">{t('chat.continuation.otherTab', 'This conversation is active in another tab. Its saved history will refresh when that turn finishes.')}</p>}
+        {activeConversationId && (modelCatalogById[selectedModelId ?? '']?.inference_capability?.continuation || activeContinuation) && <ChatContinuationControls
+          key={activeConversationId}
+          conversationId={activeConversationId}
+          target={modelCatalogById[selectedModelId ?? '']?.inference_capability?.continuation?.target}
+          disabled={isLoading || conversationBusyElsewhere}
+        />}
         {modelCatalogById[selectedModelId ?? '']?.inference_capability && <p role="status">
           {modelCatalogById[selectedModelId ?? ''].inference_capability?.usage_label}
           {' · '}{modelCatalogById[selectedModelId ?? ''].inference_capability?.processing_domain} processing
@@ -1684,6 +1847,7 @@ export function ChatView({
         </p>}
         {selectedImageProfile && <ImageParamsPanel params={imageParams} onChange={setImageParams} imageProfile={selectedImageProfile} streamingAvailable={false} />}
         <ChatForm
+          acknowledgesSubmission
           onSend={handleSend}
           onCancel={handleCancel}
           isLoading={isLoading}
@@ -1699,7 +1863,7 @@ export function ChatView({
           supportsTextAttachments={canSendMessages && (modelCatalogById[selectedModelId ?? '']?.inference_capability?.features?.includes('text_file_input') ?? false)}
           supportsPdfAttachments={canSendMessages && (modelCatalogById[selectedModelId ?? '']?.inference_capability?.features?.includes('pdf_input') ?? false)}
           attachmentContext={`${activeConversationId}:${selectedModelId}`}
-          canSendMessages={canSendMessages}
+          canSendMessages={canSendMessages && !conversationBusyElsewhere}
           transcriptionModels={readyTranscriptionModels}
           realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}
           speechModels={readySpeechModels}
