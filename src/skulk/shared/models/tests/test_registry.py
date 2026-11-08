@@ -2026,3 +2026,20 @@ async def test_startup_scan_follows_the_store_over_a_stale_installed_copy(
         assert model_cards_module.get_card(current.model_id) == current
     finally:
         saved.restore()
+
+
+def test_registry_metadata_carries_a_licence_and_tolerates_new_fields() -> None:
+    """A licence is optional metadata; a field this build lacks is ignored."""
+    payload = cast("dict[str, object]", json.loads(_catalog_payload()))
+    metadata = cast("dict[str, dict[str, object]]", payload["card_metadata"])
+    entry = metadata[f"card_{'a' * 52}"]
+    entry["license"] = "apache-2.0"
+    entry["a_field_from_a_newer_registry"] = {"anything": True}
+    catalog = RegistryCatalog.model_validate_json(json.dumps(payload))
+    parsed = catalog.card_metadata[f"card_{'a' * 52}"]
+    assert parsed.license == "apache-2.0"
+    assert registry_model_cards(catalog)
+
+    entry["license"] = "Not An Identifier"
+    with pytest.raises(ValueError):
+        RegistryCatalog.model_validate_json(json.dumps(payload))
