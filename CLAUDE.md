@@ -2480,8 +2480,8 @@ decisions keep the core `IntakePolicy` under the grant; `offer_public_copy`
 admits a covered new public copy with stop, retain (`admitted_by: intake`),
 resume and no new grant, never while paused/left or for private copies, and an
 operator Stop on any step aborts it. Announcements need a recorded disclosure.
-Withdrawals are advisory unless the operator-only `withdrawals` decision turns
-following on. Receive plans carry `member_terms`; `preservation_terms.py`
+Withdrawals are advisory unless the operator-only `follow_withdrawals`
+configuration turns following on. Receive plans carry `member_terms`; `preservation_terms.py`
 checks exact `accepted_terms` and records the core `TermsAcceptance` before
 download.
 

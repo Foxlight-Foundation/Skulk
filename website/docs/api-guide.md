@@ -6175,6 +6175,16 @@ historical work is never replayed.
   policy, every later standing grant covers exactly that disclosed
   configuration. An announced address and the models the mirror probably holds
   are public; a public mirror is not anonymous.
+  `follow_withdrawals` (default `false`) is the operator's choice whether a
+  catalog withdrawal stops serving. Off, a withdrawal is advisory: the copy
+  keeps serving and the page lists the advisory. On, a withdrawn copy is not
+  served unless the operator acknowledged its advisory. It is part of the
+  reviewed configuration and policy, so changing it clears restart permission,
+  and the page reports it with the rest of the configuration for exact
+  comparison. No catalog publisher, Foxlight included, is a takedown
+  authority; `block` is the operator's takedown. Core's managed mirror
+  currently retains local public copies only and follows no catalogs, so
+  advisories appear only once source following is available.
 - `intake`: supply the reviewed `policy_id` and `intake`, the standing intake
   policy, or `null` to clear it: `share` (`eligible` or `chosen`), `licenses`
   (normalized, unique licence identifiers; identifiers that name no licence
@@ -6191,14 +6201,6 @@ historical work is never replayed.
   PMF, withheld, already selected or removed copy, never with `share: chosen`
   or without a policy; such copies are left for the owner's own decision. If
   Core stops during an admission, sharing stays stopped (nothing replays).
-- `withdrawals`: operator-only; supply the reviewed `policy_id` and
-  `follow_withdrawals` (default off). Off, a catalog withdrawal is advisory: the
-  copy keeps serving and the page lists the advisory. On, a withdrawn copy is not
-  served unless the operator acknowledged its advisory. The setting is policy:
-  a change clears restart permission. No catalog publisher, Foxlight included,
-  is a takedown authority; `block` is the operator's takedown. Core's managed
-  mirror currently retains local public copies only and follows no catalogs, so
-  advisories appear only once source following is available.
 - `retain`: supply `copy_id`, its exact `manifest_id`, and
   `confirm_redistribution: true` after reviewing every member's existing public
   terms. Core rechecks the already accepted public copy and its original keys,

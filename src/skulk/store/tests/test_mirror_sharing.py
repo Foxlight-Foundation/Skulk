@@ -205,13 +205,8 @@ def test_intake_belongs_only_to_its_decision_and_matches_the_core_policy() -> No
             {"share": "eligible", "licenses": ["other"], "definition": 1},
             strict=False,
         )
-    with pytest.raises(ValidationError, match="withdrawals setting"):
-        MirrorRequest(
-            owner_id="library",
-            operation_id="x",
-            kind="withdrawals",
-            policy_id="a" * 64,
-        )
+    # Following catalog withdrawals is the operator's choice, off by default.
+    assert not configuration().follow_withdrawals
 
 
 @pytest.mark.asyncio
@@ -500,21 +495,16 @@ async def test_withhold_release_and_withdrawal_advisories_never_take_down_alone(
         assert shown.manifest_id == identity and not shown.serving_withheld
         assert not shown.blocked and "you decide" in shown.advice
 
-        follow = await decide(
-            host,
-            MirrorRequest(
-                owner_id="library",
-                operation_id="follow",
-                kind="withdrawals",
-                policy_id=policy,
-                follow_withdrawals=True,
-            ),
+        await configured(
+            host, configuration().model_copy(update={"follow_withdrawals": True})
         )
-        assert follow.state == "succeeded", follow
         page = await host.mirrors.page()
         assert (
             page.follow_withdrawals and page.withdrawal_advisories[0].serving_withheld
         )
+        # Reported with the configuration, so an exact comparison sees it.
+        assert page.configuration is not None
+        assert page.configuration.follow_withdrawals
         # Following withdrawals is policy: it clears the grant.
         assert page.policy_id != policy and not page.restart_allowed
         assert host.journal.setting("mirror-approved-resume") is None

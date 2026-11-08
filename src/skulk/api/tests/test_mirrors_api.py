@@ -360,7 +360,7 @@ async def test_sharing_decisions_and_address_check_through_the_operator_api(
             # The Library negotiates "Standing intake" and "Uncapped uploads"
             # from these generated schema facts.
             schema = (await client.get("/openapi.json")).text
-            assert '"intake"' in schema and '"withdrawals"' in schema
+            assert '"intake"' in schema and '"follow_withdrawals"' in schema
             assert '"egress_daily":{"anyOf"' in schema.replace(" ", "")
         finally:
             await host.close()

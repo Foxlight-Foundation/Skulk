@@ -29,7 +29,6 @@ MirrorKind = Literal[
     "prepare_kit",
     "recover",
     "intake",
-    "withdrawals",
 ]
 MirrorAction = Literal[
     "pin",
@@ -150,6 +149,10 @@ class MirrorConfiguration(PreservationContract):
     publish_nostr: bool = Field(
         default=False,
         description="Also copy the signed card to third-party Nostr relays.",
+    )
+    follow_withdrawals: bool = Field(
+        default=False,
+        description="Operator choice to stop serving a copy a followed catalog withdrew, unless acknowledged. Off by default: a withdrawal is advisory only and no catalog publisher can take a copy down. Part of the reviewed policy; changing it clears restart permission.",
     )
     announce_disclosure: int | None = Field(
         default=None,
@@ -309,11 +312,6 @@ class MirrorRequest(PreservationContract):
         exclude_if=_omit_absent,
         description="Standing intake policy for an intake decision; null clears it. Any effective change clears restart permission, except the withheld list, which only narrows.",
     )
-    follow_withdrawals: bool | None = Field(
-        default=None,
-        exclude_if=_omit_absent,
-        description="Operator-only withdrawals decision: stop serving copies a followed catalog withdrew. Off by default, where a withdrawal is advisory only. A change clears restart permission.",
-    )
 
     @model_validator(mode="after")
     def check_decision(self) -> MirrorRequest:
@@ -322,8 +320,6 @@ class MirrorRequest(PreservationContract):
             raise ValueError("configuration belongs only to configure")
         if self.kind != "intake" and self.intake is not None:
             raise ValueError("an intake policy belongs only to intake")
-        if (self.follow_withdrawals is not None) != (self.kind == "withdrawals"):
-            raise ValueError("the withdrawals setting belongs only to withdrawals")
         if self.kind != "configure" and self.policy_id is None:
             raise ValueError("review the current mirror policy first")
         if self.kind == "retain":

@@ -203,6 +203,7 @@ class MirrorHost:
             publish_nostr=announce.nostr
             if announce is not None
             else bool(old and saved_url and old.publish_nostr),
+            follow_withdrawals=state.follow_withdrawals,
             announce_disclosure=old.announce_disclosure
             if old is not None and (announce is not None or saved_url is not None)
             else None,
@@ -738,7 +739,7 @@ class MirrorHost:
                     )
             elif decision.kind == "retain" and error is None:
                 await self._keep_covered_approval(decision, result, prior_approval)
-            elif decision.kind in {"intake", "withdrawals"} and error is None:
+            elif decision.kind == "intake" and error is None:
                 if result.policy_id != decision.policy_id:
                     # Exactly as the core: a changed policy clears restart
                     # permission. A withheld-list change alone keeps it.
