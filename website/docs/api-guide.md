@@ -3451,6 +3451,24 @@ catalog truth apart from a snapshot-only publication stamp; unknown aliases
 return `404`, and stale or forged content returns `409` without dispatching a
 download.
 
+| Body field | Meaning |
+| --- | --- |
+| `targetNodeId` | Node that should stage this exact artifact. |
+| `shardMetadata` | Server-defined shard metadata containing the current authorized model card. |
+
+A successful response returns `commandId` after dispatch; it does not certify
+completed bytes. Inspect the node's download outcome in `/state`. Repeating this
+explicit request after a terminal failure starts a fresh attempt with a new
+attempt identity, retaining local files for the normal verifier/resume path.
+Active same-artifact downloads are not duplicated, and verified completed ones
+remain completed. If the failed task is still cleaning up, the new attempt waits
+for its existing ownership handoff. Offline and capacity checks still apply.
+
+The target node must support the explicit-retry command; upgrade participating
+nodes before relying on this behavior. Periodic planner starts retain terminal
+failures, and ordinary placement recovery is a separate path. No retry requires
+calling the destructive delete endpoint.
+
 ### Delete a node download
 
 **DELETE** `/download/{node_id}/{model_id}`

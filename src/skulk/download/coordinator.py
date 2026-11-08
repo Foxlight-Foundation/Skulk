@@ -34,6 +34,7 @@ from skulk.shared.types.commands import (
     ForwarderDownloadCommand,
     PurgeStagingCache,
     RestartNode,
+    RetryDownload,
     StartDownload,
     SyncConfig,
 )
@@ -114,6 +115,9 @@ class DownloadCoordinator:
     _pending_download_starts: dict[ModelId, ShardMetadata] = field(
         default_factory=dict
     )
+    # A cleanup handoff can run outside the command actor. Keep its complete
+    # preflight and registration ordered with starts, cancellation and deletion.
+    _download_admission_lock: anyio.Lock = field(default_factory=anyio.Lock)
 
     # Emit an in_progress update only after the download advances this fraction
     # (so ~20 readings total), never faster than the min interval (no bursts on a
@@ -366,25 +370,32 @@ class DownloadCoordinator:
                     )
                     continue
 
-                match cmd.command:
-                    case StartDownload(shard_metadata=shard):
-                        logger.info(
-                            f"DownloadCoordinator: received StartDownload for {shard.model_card.model_id}"
-                        )
-                        await self._start_download(shard)
-                    case DeleteDownload(model_id=model_id):
-                        await self._delete_download(model_id)
-                    case CancelDownload(model_id=model_id, attempt_id=attempt_id):
-                        await self._cancel_download(model_id, attempt_id)
-                    case RestartNode():
-                        await self._restart_node()
+                async with self._download_admission_lock:
+                    match cmd.command:
+                        case RetryDownload(shard_metadata=shard):
+                            await self._start_download(shard, retry_failed=True)
+                        case StartDownload(shard_metadata=shard):
+                            logger.info(
+                                f"DownloadCoordinator: received StartDownload for {shard.model_card.model_id}"
+                            )
+                            await self._start_download(shard)
+                        case DeleteDownload(model_id=model_id):
+                            await self._delete_download(model_id)
+                        case CancelDownload(model_id=model_id, attempt_id=attempt_id):
+                            await self._cancel_download(model_id, attempt_id)
+                        case RestartNode():
+                            await self._restart_node()
 
     async def _cancel_download(
         self,
         model_id: ModelId,
         attempt_id: DownloadAttemptId | None = None,
     ) -> None:
-        """Cancel the current model download when its attempt identity matches."""
+        """Cancel current work or withdraw an unscoped queued start."""
+        if attempt_id is None:
+            # Explicit cancellation also withdraws intent held by old cleanup.
+            # A stale attempt-scoped cancellation must not cancel a fresh retry.
+            self._pending_download_starts.pop(model_id, None)
         if model_id in self.active_downloads and model_id in self.download_status:
             current_status = self.download_status[model_id]
             if attempt_id is not None and current_status.attempt_id != attempt_id:
@@ -588,7 +599,10 @@ class DownloadCoordinator:
 
             logger.info(f"PurgeStagingCache: purged {total_purged} model directories")
 
-    async def _start_download(self, shard: ShardMetadata) -> None:
+    async def _start_download(
+        self, shard: ShardMetadata, *, retry_failed: bool = False
+    ) -> None:
+        """Admit one shard attempt, consuming failures only on explicit retry."""
         model_id = shard.model_card.model_id
         status = self.download_status.get(model_id)
         artifact_changed = (
@@ -600,11 +614,22 @@ class DownloadCoordinator:
         )
 
         active_scope = self.active_downloads.get(model_id)
+        retrying_failed = (
+            retry_failed and isinstance(status, DownloadFailed) and not artifact_changed
+        )
         if active_scope is not None:
-            if active_scope.cancel_called:
+            if active_scope.cancel_called or retrying_failed:
                 # Cancellation cleanup can outlive the command-loop tick that
                 # requested it. Retain the replacement command so the active
                 # task's finally block can start it after releasing ownership.
+                if retrying_failed:
+                    # Failure publication can precede the old task's finally
+                    # block. Suppress its tail callbacks and consume only that
+                    # failure; the existing cleanup handoff starts the retry.
+                    self._begin_reset(model_id)
+                    self._reset_progress_throttle(model_id)
+                    del self.download_status[model_id]
+                    active_scope.cancel()
                 self._pending_download_starts[model_id] = shard
                 logger.info(
                     f"DownloadCoordinator: queued restart for {model_id} until "
@@ -625,6 +650,13 @@ class DownloadCoordinator:
             )
             return
 
+        if retrying_failed:
+            # Only an explicit operator start consumes this terminal outcome.
+            # Periodic planner commands must not create a repeated-failure loop.
+            self._reset_progress_throttle(model_id)
+            del self.download_status[model_id]
+            status = None
+
         # Check if already downloading, complete, or recently failed
         if status is not None:
             if artifact_changed:
@@ -638,10 +670,7 @@ class DownloadCoordinator:
             # clear the stale status and re-download from scratch.
             elif isinstance(status, DownloadCompleted) and status.model_directory:
                 model_dir = Path(status.model_directory)
-                if (
-                    not model_dir.is_dir()
-                    or not (model_dir / "config.json").exists()
-                ):
+                if not model_dir.is_dir() or not (model_dir / "config.json").exists():
                     logger.info(
                         f"DownloadCoordinator: {model_id} was DownloadCompleted but "
                         "its directory is stale; re-downloading"
@@ -801,10 +830,11 @@ class DownloadCoordinator:
                 # ignore cancellation - let cleanup do its thing
                 pass
             finally:
-                self.active_downloads.pop(model_id, None)
-                pending_start = self._pending_download_starts.pop(model_id, None)
-                if pending_start is not None:
-                    await self._start_download(pending_start)
+                async with self._download_admission_lock:
+                    self.active_downloads.pop(model_id, None)
+                    pending_start = self._pending_download_starts.pop(model_id, None)
+                    if pending_start is not None:
+                        await self._start_download(pending_start)
 
         scope = anyio.CancelScope()
         self._tg.start_soon(download_wrapper, scope)

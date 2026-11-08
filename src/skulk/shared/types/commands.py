@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, final
 from uuid import UUID
 
 from pydantic import ConfigDict, Field
@@ -286,6 +286,15 @@ class StartDownload(BaseCommand):
     shard_metadata: ShardMetadata
 
 
+@final
+class RetryDownload(StartDownload):
+    """Operator-requested start that may consume a terminal same-artifact failure.
+
+    Active and completed downloads remain idempotent. Keeping explicit retry as
+    a distinct command preserves ordinary planner starts and their wire shape.
+    """
+
+
 class DeleteDownload(BaseCommand):
     target_node_id: NodeId
     model_id: ModelId
@@ -357,6 +366,7 @@ class DeleteCustomModelCard(BaseCommand):
 
 DownloadCommand = (
     StartDownload
+    | RetryDownload
     | DeleteDownload
     | CancelDownload
     | SyncConfig
