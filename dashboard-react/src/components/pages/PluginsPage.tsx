@@ -1,5 +1,5 @@
 import { derivePluginHealth, type PluginFilter } from './pluginHealth';
-import { useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
 import styled from 'styled-components';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 import {
@@ -23,6 +23,7 @@ import { NodeSetupActionsPanel } from './NodeSetupActionsPanel';
 import { NodeProposalsPanel } from './NodeProposalsPanel';
 import { OperatorAccessPanel } from './OperatorAccessPanel';
 import { PluginCatalogBrowse, type BrowseRetryHandoff, type BrowseReviewHandoff } from './PluginCatalogBrowse';
+import { installRequestFromSearch } from './installLink';
 import type { RetryRequest } from './catalogJourney';
 import { PluginServiceSetup } from './PluginServiceSetup';
 import { operatorSession } from '../../auth/operatorSession';
@@ -32,8 +33,18 @@ import { dashboardUrlOn, pluginsPath, tailnetAddress } from '../../utils/hostDas
 
 type PluginsView = 'installed' | 'browse';
 
+// A storefront install link (`/plugins?install=<id>&version=<semver>`, opened
+// by Skulk Desktop) is reviewed in Browse; it is read once, when the page opens.
+function initialInstallLink(): BrowseReviewHandoff | null {
+  const request = installRequestFromSearch(window.location.search);
+  return request ? { id: Date.now(), bundleId: request.bundleId, version: request.version, fromLink: true } : null;
+}
+
 function initialView(): PluginsView {
-  try { return new URLSearchParams(window.location.search).get('view') === 'browse' ? 'browse' : 'installed'; } catch { return 'installed'; }
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('view') === 'browse' || params.has('install') ? 'browse' : 'installed';
+  } catch { return 'installed'; }
 }
 
 // Another node's "Manage on {host}" link opens this page on one plugin.
@@ -263,8 +274,16 @@ function PluginInventory() {
   const operationIds = installOperationIds(runtimes.data?.installations);
   const installs = useGetInstallOperationsQuery(operationIds, { skip: operationIds.length === 0 });
   const [retryHandoff, setRetryHandoff] = useState<BrowseRetryHandoff | null>(null);
-  // An update chosen in an installed plugin's drawer is reviewed in Browse.
-  const [reviewHandoff, setReviewHandoff] = useState<BrowseReviewHandoff | null>(null);
+  // An update chosen in an installed plugin's drawer, or a storefront install
+  // link this page was opened with, is reviewed in Browse.
+  const [reviewHandoff, setReviewHandoff] = useState<BrowseReviewHandoff | null>(initialInstallLink);
+  // The link is taken once: the address keeps only the Browse view, so a
+  // reload or a shared address does not open the review again.
+  useEffect(() => {
+    try {
+      if (new URLSearchParams(window.location.search).has('install')) history.replaceState(null, '', `${window.location.pathname}?view=browse`);
+    } catch { /* the review still opens */ }
+  }, []);
   const counts: Record<PluginFilter, number> = { all: 0, healthy: 0, attention: 0, uninstalled: 0 };
   for (const runtime of runtimes.data?.installations ?? []) {
     counts.all += 1;

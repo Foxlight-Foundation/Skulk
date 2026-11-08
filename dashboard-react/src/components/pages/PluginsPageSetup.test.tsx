@@ -355,3 +355,12 @@ it('reviews the update an installed plugin\'s drawer offers in Browse', async ()
   expect([...host.querySelectorAll('[role=tab]')].find((tab) => tab.textContent === 'Browse')?.getAttribute('aria-selected')).toBe('true');
   expect(posts).toEqual([]);
 });
+
+it('opens Browse at the review a storefront install link names, then forgets the link', async () => {
+  await renderAt('/plugins?install=example.studio&version=0.1.0');
+  await contains('Review Example Studio');
+  // A reload or a shared address shows Browse, not the review again.
+  expect(window.location.search).toBe('?view=browse');
+  // Opening the review installs nothing; consent still comes first.
+  expect(posts).toEqual([]);
+});

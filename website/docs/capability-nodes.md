@@ -167,6 +167,18 @@ this host, and installs one after you review its permissions. Check a plugin's
 supported platforms, permissions, required services, costs, and cleanup before
 installing.
 
+A capability's page in the store's web catalog has an **Install** button. It
+opens a `skulk://install?bundle=BUNDLE_ID&version=VERSION` link, which Skulk
+Desktop hands to this dashboard as `/plugins?install=BUNDLE_ID&version=VERSION`.
+Browse looks the bundle up in this host's own verified catalog and opens its
+ordinary review; nothing installs until you consent there. The link names only
+the listing: if the catalog offers a different version, the review says so and
+shows the one it offers, and if the capability is already installed, has an
+unfinished install, has no release built for this host, or is not in this
+host's catalog, Browse says which instead. On a host without the desktop app,
+such as a headless node, paste the `skulk://install` link into the field at the
+top of **Browse**.
+
 Skulk verifies and renews the store's publisher trust by itself. A publisher can also give you a private catalog: an
 address and the publisher trust to verify it, often as a single invitation
 code. Add it under **Browse** with **Add a private catalog**; it replaces the

@@ -20,6 +20,7 @@ import {
   startInstallRetry, type BoundJourney, type CatalogOffer, type InstallStartRefusal, type RetryRequest,
 } from './catalogJourney';
 import { hostedCapabilityNodes, installedCardAction } from './installedCapability';
+import { parseInstallLink, resolveInstallLink, type InstallLinkOutcome } from './installLink';
 
 type BrowseView =
   | { kind: 'list' }
@@ -45,8 +46,19 @@ function resumedView(): BrowseView {
 /** A retry asked for from another view, such as a card under Installed; `id` tells one click from the next. */
 export interface BrowseRetryHandoff { id: number; request: RetryRequest }
 
-/** An update asked for from another view, such as an installed plugin's drawer: review the newer release of this bundle. */
-export interface BrowseReviewHandoff { id: number; bundleId: string }
+/**
+ * A review asked for from elsewhere: an update chosen in an installed
+ * plugin's drawer, or (`fromLink`) an install link from the capability
+ * storefront, which may name any listed release of the bundle.
+ */
+export interface BrowseReviewHandoff {
+  id: number;
+  bundleId: string;
+  /** The version the install link named, if any; Browse reviews what this host's catalog offers. */
+  version?: string | null;
+  /** Set for a storefront install link: also opens a fresh install, and explains when it cannot. */
+  fromLink?: boolean;
+}
 
 /** Props for the Browse view of the Plugins page. */
 export interface PluginCatalogBrowseProps {
@@ -63,8 +75,9 @@ export interface PluginCatalogBrowseProps {
   /** Called when Browse takes the handed-off retry, so it is not started again. */
   onRetryTaken?: () => void;
   /**
-   * An update to open for review once the catalog is read. Browse opens it at
-   * most once per `id`; the page drops the handoff when the owner changes tab.
+   * An update or install link to open for review once the catalog is read.
+   * Browse opens it at most once per `id`; the page drops the handoff when
+   * the owner changes tab.
    */
   review?: BrowseReviewHandoff | null;
 }
@@ -111,15 +124,40 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
   // installation beside it.
   const installsKnown = operationIds.length === 0 || (installs.data !== undefined && !installs.isFetching);
   const inventoryKnown = (runtimes.data !== undefined || !!runtimes.error) && installsKnown;
-  // An update asked for elsewhere opens its review once the offers are known,
-  // and only while the bundle is still offered as an update. Adjusted while
-  // rendering, as React recommends for state that follows a changing input.
+  // An install link pasted here is handled like one the page was opened with.
+  const [pasted, setPasted] = useState<BrowseReviewHandoff | null>(null);
+  const [linkText, setLinkText] = useState('');
+  const [linkInvalid, setLinkInvalid] = useState(false);
+  // What became of the last install link, shown above the list or review.
+  const [linkOutcome, setLinkOutcome] = useState<InstallLinkOutcome | null>(null);
+  // An update or install link asked for elsewhere opens its review once the
+  // offers are known. An update opens only while the bundle is still offered
+  // as one; an install link also opens a fresh install, and otherwise says
+  // why it cannot. Adjusted while rendering, as React recommends for state
+  // that follows a changing input.
   const [takenReview, setTakenReview] = useState<number | null>(null);
-  if (review && takenReview !== review.id && catalog.data && inventoryKnown && view.kind === 'list') {
-    setTakenReview(review.id);
-    const offer = offers.find((item) => item.entry.bundle_id === review.bundleId && item.state === 'update');
-    if (offer) setView({ kind: 'review', offer, listing: catalog.data });
+  const handoff = pasted && (!review || pasted.id > review.id) ? pasted : review;
+  if (handoff && takenReview !== handoff.id && catalog.data && inventoryKnown && view.kind === 'list') {
+    setTakenReview(handoff.id);
+    if (handoff.fromLink) {
+      const outcome = resolveInstallLink({ bundleId: handoff.bundleId, version: handoff.version ?? null }, offers);
+      setLinkOutcome(outcome);
+      if (outcome.kind === 'review') setView({ kind: 'review', offer: outcome.offer, listing: catalog.data });
+    } else {
+      const offer = offers.find((item) => item.entry.bundle_id === handoff.bundleId && item.state === 'update');
+      if (offer) setView({ kind: 'review', offer, listing: catalog.data });
+    }
   }
+  const openPastedLink = () => {
+    const request = parseInstallLink(linkText);
+    if (!request) {
+      setLinkInvalid(true);
+      return;
+    }
+    setLinkInvalid(false);
+    setLinkText('');
+    setPasted({ id: Math.max(Date.now(), (review?.id ?? 0) + 1), bundleId: request.bundleId, version: request.version, fromLink: true });
+  };
   // A read that failed leaves its installation out. One that never selected a
   // release names no bundle until its install is read, so while any such read
   // is missing, a new install might duplicate a stopped one: fresh installs
@@ -167,6 +205,7 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [retry]);
   const toList = () => {
+    setLinkOutcome(null);
     setView({ kind: 'list' });
     // A query that has not started yet (Browse opened on a resumed install)
     // has nothing to refetch; it starts when the list needs it.
@@ -178,6 +217,7 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
   // records it, so the revision this page loaded with may be behind.
   const openConnect = () => {
     setStoreNotice('');
+    setLinkOutcome(null);
     setView({ kind: 'connect' });
     void source.refetch();
   };
@@ -220,7 +260,11 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
   }
   if (view.kind === 'setup') return <CapabilitySetupPanel target={view.target} onManage={onManage} onDone={toList} />;
   if (view.kind === 'review') {
-    return <CatalogReviewPanel offer={view.offer} onCancel={toList} onInstall={() => void beginInstall(view.offer, view.listing)} />;
+    const differs = linkOutcome?.kind === 'review' && linkOutcome.versionDiffers && linkOutcome.offer.entry.bundle_id === view.offer.entry.bundle_id ? linkOutcome : null;
+    return <>
+      {differs ? <Info role="status">{t('plugins.catalog.linkVersionDiffers', 'The install link named version {requested}. This host’s catalog offers {offered}, which is the release reviewed here.', { requested: differs.requestedVersion ?? '', offered: differs.offer.entry.bundle_version })}</Info> : null}
+      <CatalogReviewPanel offer={view.offer} onCancel={toList} onInstall={() => void beginInstall(view.offer, view.listing)} />
+    </>;
   }
   if (source.isLoading) return <Centered><Spinner size={22} /></Centered>;
   if (source.error) return <Notice role="alert">{pluginRefusalDetail(source.error) ?? t('plugins.catalog.sourceUnavailable', 'The catalog settings of this host could not be read.')}</Notice>;
@@ -247,6 +291,25 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
           </>}
       </SourceActions>
     </Heading>
+    <LinkForm onSubmit={(event) => { event.preventDefault(); openPastedLink(); }}>
+      <LinkInput aria-label={t('plugins.catalog.linkLabel', 'Install link from the capability store')} value={linkText} spellCheck={false}
+        placeholder={t('plugins.catalog.linkPlaceholder', 'Paste an install link: skulk://install?bundle=…&version=…')}
+        aria-invalid={linkInvalid} onChange={(event) => { setLinkText(event.target.value); setLinkInvalid(false); }} />
+      <Button variant="outline" size="sm" type="submit" disabled={!linkText.trim()}>{t('plugins.catalog.linkOpen', 'Open')}</Button>
+    </LinkForm>
+    {linkInvalid ? <Notice role="alert">{t('plugins.catalog.linkInvalid', 'That is not a Skulk install link. Copy it again from the capability’s page in the store.')}</Notice> : null}
+    {linkOutcome && linkOutcome.kind !== 'review' ? <Info role="status">
+      {linkOutcome.kind === 'missing'
+        ? t('plugins.catalog.linkMissing', 'This host’s catalog does not list {bundle}. Its publisher may have withdrawn it, or this host reads a private catalog.', { bundle: linkOutcome.bundleId })
+        : linkOutcome.kind === 'installed'
+          ? t('plugins.catalog.linkInstalled', '{title} is already installed on this host.', { title: displayTitle(linkOutcome.offer.entry) })
+          : linkOutcome.kind === 'unfinished'
+            ? t('plugins.catalog.linkUnfinished', 'An install of {title} has not finished on this host. Continue it from its card below.', { title: displayTitle(linkOutcome.offer.entry) })
+            : t('plugins.catalog.linkUnfit', '{title} is listed, but no release of it is built for this host’s platform and Skulk version.', { title: displayTitle(linkOutcome.offer.entry) })}
+      {linkOutcome.kind === 'missing' && !onStore && storeAvailable
+        ? <Button variant="outline" size="sm" disabled={storeSwitch.isLoading} onClick={() => void switchToStore()}>{t('plugins.catalog.useStore', 'Use the Foxlight store')}</Button>
+        : null}
+    </Info> : null}
     {storeNotice ? <Notice role="alert">{storeNotice}</Notice> : null}
     {catalog.isFetching && !catalog.data ? <Centered><Spinner size={22} /><span>{t('plugins.catalog.reading', 'Reading and verifying the catalog…')}</span></Centered> : null}
     {catalog.error ? <Notice role="alert">
@@ -286,6 +349,15 @@ const Heading = styled.div`
 const SourceActions = styled.div`display: flex; flex-wrap: wrap; gap: 8px;`;
 const Offers = styled.div`display: flex; flex-direction: column; gap: 12px;`;
 const Centered = styled.div`display: flex; align-items: center; gap: 12px; padding: 24px 4px; color: ${({ theme }) => theme.colors.textSecondary}; font-size: 14px;`;
+const LinkForm = styled.form`display: flex; gap: 8px; align-items: center; margin-bottom: 12px;`;
+const LinkInput = styled.input`
+  flex: 1; min-width: 0; box-sizing: border-box; border-radius: 10px; padding: 8px 12px; font-size: 13px; font-family: ${({ theme }) => theme.fonts.mono};
+  background: ${({ theme }) => theme.colors.surfaceHover}; color: ${({ theme }) => theme.colors.text}; border: 1px solid ${({ theme }) => theme.colors.borderControl};
+`;
+const Info = styled.div`
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 14px 16px; margin-bottom: 12px; border-radius: 12px; font-size: 14px; line-height: 1.5;
+  border: 1px solid ${({ theme }) => theme.colors.border}; background: ${({ theme }) => theme.colors.infoBg}; color: ${({ theme }) => theme.colors.text};
+`;
 const Notice = styled.div`
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 14px 16px; margin-bottom: 12px; border-radius: 12px; font-size: 14px; line-height: 1.5;
   border: 1px solid ${({ theme }) => theme.colors.borderDanger}; background: ${({ theme }) => theme.colors.errorBg}; color: ${({ theme }) => theme.colors.text};
