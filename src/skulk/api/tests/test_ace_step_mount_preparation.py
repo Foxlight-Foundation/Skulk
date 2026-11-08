@@ -306,6 +306,40 @@ async def test_failed_verification_or_changed_capacity_does_not_advertise_readin
     assert view.node_resources[NODE] is before and not preparer._pending
 
 
+async def test_public_storage_reason_survives_barrier_and_fresh_retry() -> None:
+    """Storage refusal reaches the caller unchanged and releases the API's mount slot."""
+    requests: list[PrepareAceStep] = []
+    reason = "Native music preparation needs more free disk space on the selected worker; free storage and retry."
+
+    async def send(request: PrepareAceStep) -> None:
+        requests.append(request)
+        event = completion(request)
+        if len(requests) == 1:
+            event = event.model_copy(
+                update={
+                    "success": False,
+                    "resources": None,
+                    "error": reason,
+                }
+            )
+        preparer.record(event)
+
+    preparer, state, view = fixture(send)
+    before = view.node_resources[NODE]
+    with pytest.raises(HTTPException) as failed:
+        await preparer.prepare(card_with_layouts(), set())
+    assert failed.value.status_code == 503 and reason in failed.value.detail
+    assert not preparer._pending and not state.instances and not state.tasks
+    assert view.node_resources[NODE] is before and not before.backends
+
+    assert await preparer.prepare(card_with_layouts(), set()) == (
+        NODE,
+        ready(MAC, "cpu"),
+    )
+    assert len(requests) == 2 and requests[0].command_id != requests[1].command_id
+    assert not preparer._pending and view.node_resources[NODE] is before
+
+
 async def test_all_candidate_attempts_keep_original_absolute_deadline() -> None:
     """A second candidate receives remaining time, including first-attempt queue/work."""
     now = [100.0]

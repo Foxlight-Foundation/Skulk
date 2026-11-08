@@ -3013,6 +3013,10 @@ the original indexed owner, including companions reached through a cached base.
   `native_runtime_manager.py`; short observation publication, serialized cache
   reservation, queue-inclusive deadlines, cancellation withdrawal, retained drain
   retry and immutable published generations. Demucs CPU/Metal semantics remain.
+- Native ACE/separator preparation maps `DemucsStorageError` to a path-free
+  public free-disk-space/remedy message. Failed ordered completion exposes no
+  ready resources; arbitrary exception details remain in worker logs. Fresh
+  request identities can retry on the same owner after capacity recovers.
 - Trusted storage profiles (package/installed GiB): CPU 1/4, CUDA 4/8, ROCm 3/10.
   GPU archive member limit 768 MiB; expanded member limit 1 GiB. Installed totals
   include nested archives plus expanded imports. Manifest cannot expand limits.

@@ -43,7 +43,10 @@ from skulk.provisioning.ace_step_inventory import (
 from skulk.provisioning.ace_step_manager import AceStepRuntimeManager
 from skulk.provisioning.demucs_inventory import DEMUCS_PACKAGES, select_demucs_package
 from skulk.provisioning.demucs_manager import DemucsRuntimeManager
-from skulk.provisioning.demucs_runtime import DemucsBuildMismatchError
+from skulk.provisioning.demucs_runtime import (
+    DemucsBuildMismatchError,
+    DemucsStorageError,
+)
 from skulk.routing.connection_message import ConnectionMessage
 from skulk.routing.output_media import OutputMediaPacket
 from skulk.routing.realtime_audio import RealtimeAudioPacket
@@ -1605,7 +1608,13 @@ class Worker:
             await self._telemetry_sender.send(NodeTelemetry(node_id=self.node_id, info=resources))
         except Exception as failure:  # noqa: BLE001 - settle only this preparation
             resources = None
-            error = "Native music package/device preparation failed; inspect worker diagnostics, verified cache availability and offline policy."
+            # Classify the known storage refusal without publishing exception
+            # text, which can contain private cache paths or command details.
+            error = (
+                "Native music preparation needs more free disk space on the selected worker; free storage and retry."
+                if isinstance(failure, DemucsStorageError)
+                else "Native music package/device preparation failed; inspect worker diagnostics, verified cache availability and offline policy."
+            )
             logger.opt(exception=failure).warning("native music preparation failed")
             # Failed revalidation withdraws the manager's old receipt. Publish
             # that withdrawal promptly without letting a telemetry problem
@@ -1660,7 +1669,11 @@ class Worker:
             )
         except Exception as failure:  # noqa: BLE001 - settle this explicit preparation
             resources = None
-            error = "Native separator package/device preparation failed; inspect worker diagnostics, cached package availability and offline policy."
+            error = (
+                "Native separator preparation needs more free disk space on the selected worker; free storage and retry."
+                if isinstance(failure, DemucsStorageError)
+                else "Native separator package/device preparation failed; inspect worker diagnostics, cached package availability and offline policy."
+            )
             logger.opt(exception=failure).warning(
                 "native separation preparation failed"
             )

@@ -2227,7 +2227,12 @@ physical pools. It does not reuse generic already-reserved memory inputs or
 borrow another GPU's capacity. Explicit backend overrides cannot silently fall
 back to another lane. Preparation failures return an actionable `503`; invalid
 explicit native lanes return `400`. Other engines and worker health remain
-available. Preparation does not itself load the model or establish qualification;
+available. Insufficient disk reserve returns **503** with `error.message`
+identifying insufficient space on the selected worker and asking the operator
+to free storage and retry. No instance is created or unverified engine advertised
+as ready; the worker and its other engines stay running. Private exception paths
+and command details are kept in worker logs rather than the public error.
+Preparation does not itself load the model or establish qualification;
 installed acceptance and distribution remain separate from this source integration.
 
 The model's `/v1/models` `music` object identifies its family, lyric rule,

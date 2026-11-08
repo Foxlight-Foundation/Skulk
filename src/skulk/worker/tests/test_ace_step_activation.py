@@ -283,6 +283,41 @@ async def test_failed_preparation_preserves_worker_and_other_engines(
         await worker._demucs_preparation.close()
 
 
+async def test_storage_refusal_explains_remedy_and_same_owner_can_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed: fixtures.NativeInstall,
+) -> None:
+    """Real cache reserve failure remains isolated and a fresh request can recover."""
+    worker, output, observations = fixture(tmp_path, monkeypatch, installed)
+    installed.free_bytes = 0
+    try:
+        await worker._prepare_ace_step_engine(request(worker, installed))
+        failed = await output.receive()
+        assert isinstance(failed, AceStepPreparationCompleted) and not failed.success
+        assert failed.resources is None and failed.error is not None
+        assert (
+            "free disk space" in failed.error
+            and "free storage and retry" in failed.error
+        )
+        assert str(tmp_path) not in failed.error
+        withdrawn = (await observations.receive()).info
+        assert isinstance(withdrawn, NodeResources)
+        assert withdrawn.engine_builds == {"audio_cpp-cpu": "existing-music-build"}
+        assert not withdrawn.native_music_probes and installed.installs == 0
+
+        installed.free_bytes = 100 * 1024**3
+        await worker._prepare_ace_step_engine(request(worker, installed))
+        recovered = await output.receive()
+        assert isinstance(recovered, AceStepPreparationCompleted) and recovered.success
+        assert recovered.resources is not None and recovered.error is None
+        assert (await observations.receive()).info == recovered.resources
+        assert installed.installs == installed.probes == 1
+    finally:
+        await worker._ace_step_preparation.close()
+        await worker._demucs_preparation.close()
+
+
 def runner_fixture(
     root: Path,
     monkeypatch: pytest.MonkeyPatch,
