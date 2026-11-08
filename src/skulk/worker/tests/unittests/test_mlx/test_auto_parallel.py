@@ -24,7 +24,7 @@ from skulk.worker.engines.mlx.auto_parallel import (
 )
 from skulk.worker.tests.unittests.test_mlx.conftest import MockLayer
 
-PipelineResult = tuple[int, bool, mx.array | str]
+type PipelineResult = tuple[int, bool, mx.array | str]
 
 
 class _FakeCacheEntry:
@@ -45,7 +45,12 @@ def run_pipeline_device(
     hostfile_path: str,
     result_queue: Queue[PipelineResult],
 ) -> None:
-    """Run the real two-rank wrapper and report its actual result or failure."""
+    """Run one real ring rank and report its computed array or exception.
+
+    ``rank`` and the host file select the two-process ring. Results travel to
+    the parent's bounded wait through ``result_queue``; model execution remains
+    in the child process.
+    """
     import os
 
     os.environ["MLX_HOSTFILE"] = hostfile_path
@@ -117,7 +122,6 @@ def test_missing_attribute_raises() -> None:
 
 
 def test_composed_call_works() -> None:
-    """Wait for actual child results through cold starts and always reap workers."""
     ctx = mp.get_context("spawn")
 
     world_size = 2
@@ -131,71 +135,67 @@ def test_composed_call_works() -> None:
 
     result_queue: Queue[PipelineResult] = ctx.Queue()
     processes: list[BaseProcess] = []
-    deadline = time.monotonic() + 90
+    # Spawn imports the inference modules and their strict schemas before it
+    # can join the ring. Short joins plus Queue.empty() raced that startup and
+    # removed the host file while valid ranks were still importing.
+    deadline = time.monotonic() + 60
     try:
         for rank in range(world_size):
-            p = ctx.Process(
+            process = ctx.Process(
                 target=run_pipeline_device,
                 args=(rank, world_size, hostfile_path, result_queue),
             )
-            p.start()
-            processes.append(p)
+            process.start()
+            processes.append(process)
 
         results: dict[int, mx.array] = {}
         errors: dict[int, str] = {}
-        # Queue.empty() is not a completion barrier. Collect while the children
-        # run: cold imports may exceed ten seconds, and joining writers before
-        # draining their queue can prevent their feeder threads from exiting.
-        while len(results) + len(errors) < world_size:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
+        for _ in range(world_size):
             try:
-                rank, success, value = result_queue.get(timeout=min(0.5, remaining))
+                rank, success, value = result_queue.get(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
             except Empty:
-                if not any(process.is_alive() for process in processes):
-                    break
-                continue
+                pytest.fail(
+                    f"Timed out collecting {world_size} MLX rank results; "
+                    f"received={sorted(results)}, errors={errors}, "
+                    f"exitcodes={[process.exitcode for process in processes]}"
+                )
             if success:
                 assert isinstance(value, mx.array)
                 results[rank] = value
             else:
-                assert isinstance(value, str)
-                errors[rank] = value
-
-        assert len(results) == world_size, (
-            f"Expected {world_size} results, got {len(results)}. Errors: {errors}. "
-            f"Exit codes: {[process.exitcode for process in processes]}"
-        )
+                errors[rank] = str(value)
 
         for process in processes:
             process.join(timeout=max(0.0, deadline - time.monotonic()))
-            assert not process.is_alive(), (
-                "Pipeline worker did not drain after its result"
-            )
-
+            assert process.exitcode == 0
+        assert len(results) == world_size, (
+            f"Expected {world_size} results, got {len(results)}. Errors: {errors}"
+        )
         for rank in range(world_size):
             assert rank in results, (
                 f"Device {rank} failed: {errors.get(rank, 'unknown')}"
             )
-            result_array = results[rank]
-            # Both devices see the final result (4.0) after all_gather
-            assert (result_array == 4.0).all(), (
-                f"Device {rank}: expected 4.0, got {result_array}"
+            # Both devices see the final result (4.0) after all_gather.
+            assert (results[rank] == 4.0).all(), (
+                f"Device {rank}: expected 4.0, got {results[rank]}"
             )
     finally:
-        try:
-            for process in processes:
-                if process.is_alive():
-                    process.terminate()
-                    process.join(timeout=1)
-                if process.is_alive():
-                    process.kill()
+        # A failed integration assertion must not leave ranks or their ring
+        # sockets alive, nor remove rendezvous data before the ranks stop.
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
                 process.join(timeout=5)
-        finally:
-            result_queue.close()
-            result_queue.join_thread()
-            os.unlink(hostfile_path)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+            assert not process.is_alive()
+            process.close()
+        result_queue.close()
+        result_queue.join_thread()
+        os.unlink(hostfile_path)
 
 
 def test_patch_pipeline_model_patches_nested_language_model(

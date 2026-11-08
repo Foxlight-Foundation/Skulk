@@ -1,4 +1,5 @@
 import type { SkulkTranslate } from '../i18n/tolgee';
+import type { ChatContinuation } from '../store/chatContinuation';
 
 /** Persisted sentinel used until the first user message can name the thread. */
 export const DEFAULT_CONVERSATION_NAME = 'New conversation';
@@ -67,6 +68,8 @@ export interface ChatMessage {
   timestamp: number;
   attachments?: MessageAttachment[];
   thinkingContent?: string;
+  /** Exact public assistant/tool turns for explicit continuation, separate from display text. */
+  continuationMessages?: Array<Record<string, unknown>>;
   generatedImages?: string[];
   ttftMs?: number;
   tps?: number;
@@ -88,6 +91,8 @@ export interface Conversation {
   messages: ChatMessage[];
   summary?: string;
   originNodeId?: string;
+  /** Public client scope/receipts only; the signing key stays in IndexedDB. */
+  continuation?: ChatContinuation;
 }
 
 /** Model metadata needed by the chat UI. */

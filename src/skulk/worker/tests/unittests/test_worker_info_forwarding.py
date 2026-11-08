@@ -553,13 +553,8 @@ async def test_invalid_speech_media_emits_terminal_task_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_forward_info_gates_connectivity_on_confirmed_echo() -> None:
-    # Connectivity readings ride the ordered event log; forwarding an unchanged
-    # one every poll filled the master's replay tail and stormed the AMD nodes on
-    # join (the 5-node gossip storm). The worker must skip a reading only when
-    # the master has CONFIRMED (echoed back indexed) that exact payload; an
-    # unconfirmed reading keeps re-sending each poll, because the delivery retry
-    # is bounded and a change dropped during a masterless window would otherwise
-    # be lost forever (the node's topology would stay invisible until restart).
+    # Reliable outbox retention owns retries. Repeated identical polls must
+    # coalesce even while their original event has not been confirmed.
     indexed_event_sender, indexed_event_receiver = channel[IndexedEvent]()
     event_sender, event_receiver = channel[Event]()
     command_sender, _ = channel[ForwarderCommand]()
@@ -592,8 +587,8 @@ async def test_forward_info_gates_connectivity_on_confirmed_echo() -> None:
     await info_sender.send(net("10.0.0.1"))  # STILL unconfirmed -> re-emit
     info_sender.close()
     await worker._forward_info(info_receiver)  # pyright: ignore[reportPrivateUsage]
-    assert len(collected_net_events()) == 2, (
-        "an unconfirmed reading must re-send every poll until echoed"
+    assert len(collected_net_events()) == 1, (
+        "one reliable pending reading must not multiply on each poll"
     )
 
     # Master echoes the reading back as an indexed event -> confirmed.
@@ -609,9 +604,7 @@ async def test_forward_info_gates_connectivity_on_confirmed_echo() -> None:
     info_sender2.close()
     await worker._forward_info(info_receiver2)  # pyright: ignore[reportPrivateUsage]
     phase2 = collected_net_events()
-    assert len(phase2) == 2, (
-        "a confirmed unchanged reading skips; an unconfirmed change re-sends"
-    )
+    assert len(phase2) == 1, "only one pending event is needed for the changed reading"
     assert all(
         isinstance(e.info, NodeNetworkInterfaces)
         and e.info.ifaces[0].ip_address == "10.0.0.2"
@@ -649,9 +642,7 @@ async def test_snapshot_hydration_invalidates_connectivity_confirmation() -> Non
         await indexed_event_sender.send(
             IndexedEvent(
                 idx=0,
-                event=StateSnapshotHydrated(
-                    state=State(last_event_applied_idx=0)
-                ),
+                event=StateSnapshotHydrated(state=State(last_event_applied_idx=0)),
             )
         )
         with anyio.fail_after(2):
@@ -716,6 +707,57 @@ async def test_self_timeout_invalidates_connectivity_confirmation() -> None:
         task_group.cancel_scope.cancel()
 
     indexed_event_sender.close()
+    event_sender.close()
+    command_sender.close()
+    download_sender.close()
+
+
+@pytest.mark.parametrize(
+    ("membership_event", "expected_republication"),
+    [
+        (StateSnapshotHydrated(state=State(last_event_applied_idx=0)), 1),
+        (NodeTimedOut(node_id=NodeId("node-a")), 1),
+        (NodeTimedOut(node_id=NodeId("other-node")), 0),
+    ],
+)
+async def test_membership_context_invalidates_pending_connectivity(
+    membership_event: Event, expected_republication: int
+) -> None:
+    """Pending coalescing must never suppress re-enrollment after membership loss."""
+    indexed_sender, indexed_receiver = channel[IndexedEvent]()
+    event_sender, event_receiver = channel[Event]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    worker = Worker(
+        node_id=NodeId("node-a"),
+        event_receiver=indexed_receiver,
+        event_sender=event_sender,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+    )
+    reading = NodeNetworkInterfaces(
+        ifaces=[NetworkInterfaceInfo(name="example0", ip_address="192.0.2.1")]
+    )
+
+    async def poll() -> None:
+        info_sender, info_receiver = channel[GatheredInfo]()
+        await info_sender.send(reading)
+        await info_sender.send(reading)
+        info_sender.close()
+        await worker._forward_info(info_receiver)  # pyright: ignore[reportPrivateUsage]
+
+    await poll()
+    assert len(event_receiver.collect()) == 1
+    async with anyio.create_task_group() as group:
+        group.start_soon(worker._event_applier)  # pyright: ignore[reportPrivateUsage]
+        await indexed_sender.send(IndexedEvent(idx=0, event=membership_event))
+        with anyio.fail_after(2):
+            while worker.state.last_event_applied_idx != 0:
+                await anyio.sleep(0)
+        await poll()
+        assert len(event_receiver.collect()) == expected_republication
+        group.cancel_scope.cancel()
+    indexed_sender.close()
     event_sender.close()
     command_sender.close()
     download_sender.close()

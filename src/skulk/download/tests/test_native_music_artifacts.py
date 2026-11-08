@@ -218,6 +218,11 @@ async def test_native_download_failure_keeps_coordinator_available(
         else:
             assert ("file is absent" if failure_kind == "missing_primary" else "size mismatch") in failed.error_message
         assert not (tmp_path / native.model_id.normalize()).exists()
+        # Failure publication precedes the retry owner's locked final cleanup.
+        # Observe that drain before asserting its ownership has been released.
+        with anyio.fail_after(5):
+            while coordinator.active_downloads:
+                await anyio.sleep(0)
         assert not coordinator.active_downloads
         await commands.send(ForwarderDownloadCommand(
             origin=SystemId("native-test"),

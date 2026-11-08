@@ -1,14 +1,14 @@
 import time
 from collections import OrderedDict, deque
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import count
 from math import inf
 from os import PathLike
 from pathlib import Path
-from typing import cast
+from typing import cast, final
 
 from anyio import (
     BrokenResourceError,
@@ -20,6 +20,7 @@ from anyio import (
     move_on_after,
     sleep_forever,
 )
+from anyio.lowlevel import checkpoint
 from filelock import FileLock
 from loguru import logger
 from pydantic import ValidationError
@@ -45,6 +46,8 @@ from skulk.shared.types.diagnostics import (
     DataPlaneEgressDiagnostics,
     TelemetryPlaneDiagnostics,
 )
+from skulk.shared.types.events import LocalForwarderEvent
+from skulk.shared.types.state_sync import LocalEventReceipt
 from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.pydantic_ext import CamelCaseModel
@@ -65,6 +68,8 @@ from .topics import (
     CONNECTION_MESSAGES,
     DATA,
     ELECTION_MESSAGES,
+    LOCAL_EVENT_RECEIPTS,
+    LOCAL_EVENTS,
     OUTPUT_MEDIA,
     PROVIDER_DATA,
     REALTIME_AUDIO,
@@ -139,6 +144,9 @@ _AUTHORITY_OUTBOUND_BUFFER = 128
 # Telemetry holds at most one serialized packet beyond the in-flight publish.
 # Newer values remain in the keyed admission map and replace stale values there.
 _TELEMETRY_OUTBOUND_BUFFER = 1
+# The reliable local-event outbox owns retention. Serialized retry copies must
+# not accumulate in the ordinary unbounded egress path during a stalled publish.
+_LOCAL_EVENTS_OUTBOUND_BUFFER = 1
 _TELEMETRY_ADMISSION_CAPACITY = 256
 
 
@@ -203,6 +211,131 @@ class TelemetrySender:
         self._closed = True
 
 
+@final
+@dataclass(eq=False)
+class _LocalControlSender[T: CamelCaseModel](Sender[T]):
+    """Keep self-master admission independent of an obsolete peer publication."""
+
+    publish_local: Callable[[T], Awaitable[bool]] = field(kw_only=True)
+
+    @classmethod
+    def adopt_control(
+        cls, stream: Sender[T], publisher: Callable[[T], Awaitable[bool]]
+    ) -> "_LocalControlSender[T]":
+        """Take stream ownership with its independently routed local publisher."""
+        adopted = cls(_state=stream._state, publish_local=publisher)
+        stream.close()
+        return adopted
+
+    async def send(self, item: T) -> None:
+        """Deliver self-master control directly, otherwise use bounded admission."""
+        if self._closed:
+            raise ClosedResourceError
+        if not self._state.open_receive_channels:
+            raise BrokenResourceError
+        if not await self.publish_local(item):
+            await super().send(item)
+
+    def clone(self) -> "_LocalControlSender[T]":
+        """Clone the stream while preserving its local admission policy."""
+        if self._closed:
+            raise ClosedResourceError
+        return _LocalControlSender(_state=self._state, publish_local=self.publish_local)
+
+
+_LOCAL_RECEIPT_ADMISSION_CAPACITY = 256
+_MAX_LOCAL_RECEIPT_WIRE_BYTES = 4096
+
+
+@final
+@dataclass(eq=False)
+class _CoalescingReceiptSender[T: CamelCaseModel](Sender[tuple[str | None, T]]):
+    """Retain bounded receipt progress without blocking shared reception."""
+
+    @classmethod
+    def adopt_receipts(
+        cls, stream: Sender[tuple[str | None, T]]
+    ) -> "_CoalescingReceiptSender[T]":
+        """Take ownership of a bounded receipt subscription's send endpoint."""
+        adopted = cls(_state=stream._state)
+        stream.close()
+        return adopted
+
+    def send_nowait(self, item: tuple[str | None, T]) -> None:
+        """Coalesce lineage progress or evict its oldest retry when capacity is full.
+
+        Args:
+            item: Authenticated transport origin and validated receipt payload.
+
+        Returns:
+            None. Oversized metadata is dropped; ordinary idempotent retry repairs
+            eviction. Each subscription retains at most 256 frames of 4 KiB.
+        """
+        if self._closed:
+            raise ClosedResourceError
+        if not self._state.open_receive_channels:
+            raise BrokenResourceError
+        origin, receipt = item
+        if not isinstance(receipt, LocalEventReceipt):
+            raise TypeError("Receipt admission requires LocalEventReceipt")
+        size = len(receipt.model_dump_json().encode("utf-8")) + len(
+            (origin or "").encode("utf-8")
+        )
+        if size > _MAX_LOCAL_RECEIPT_WIRE_BYTES:
+            return
+        key = (
+            origin,
+            receipt.kind,
+            receipt.requester,
+            receipt.source,
+            receipt.session_id,
+        )
+        for index, (previous_origin, previous) in enumerate(self._state.buffer):
+            if isinstance(previous, LocalEventReceipt) and key == (
+                previous_origin,
+                previous.kind,
+                previous.requester,
+                previous.source,
+                previous.session_id,
+            ):
+                if receipt.kind == "response":
+                    # Arrival order is not progress order. Retain both maxima
+                    # exactly as the consumer would after receiving both, or a
+                    # stale response can erase the last missing replay target.
+                    receipt = receipt.model_copy(
+                        update={
+                            "through_idx": max(previous.through_idx, receipt.through_idx),
+                            "next_global_idx": max(
+                                previous.next_global_idx, receipt.next_global_idx
+                            ),
+                        }
+                    )
+                    if (
+                        len(receipt.model_dump_json().encode("utf-8"))
+                        + len((origin or "").encode("utf-8"))
+                        > _MAX_LOCAL_RECEIPT_WIRE_BYTES
+                    ):
+                        # Even coalescing malformed oversized counters must
+                        # preserve the same fixed per-frame admission bound.
+                        return
+                    item = (origin, receipt)
+                self._state.buffer[index] = item
+                return
+        try:
+            super().send_nowait(item)
+        except WouldBlock:
+            # This queue is disposable retry metadata, not ordered decisions.
+            # A full consumer must never block unrelated network reception.
+            self._state.buffer.popleft()
+            super().send_nowait(item)
+
+    def clone(self) -> "_CoalescingReceiptSender[T]":
+        """Clone ownership while preserving bounded coalescing admission."""
+        if self._closed:
+            raise ClosedResourceError
+        return _CoalescingReceiptSender(_state=self._state)
+
+
 # A significant current limitation of the TopicRouter is that it is not capable
 # of preventing feedback, as it does not ask for a system id so cannot tell
 # which message is coming/going to which system.
@@ -234,9 +367,32 @@ class TopicRouter[T: CamelCaseModel]:
         self._data_plane_egress_observer = data_plane_egress_observer
 
     async def run(self):
+        """Forward admitted topic messages to local consumers and transport egress.
+
+        Preserves same-node short circuits and each topic delivery policy. Returns
+        on producer closure, releasing its receive endpoint; cancellation and
+        publication failures propagate to the owning router.
+        """
         logger.debug(f"Topic Router {self.topic} ready to send")
         with self.receiver as items:
             async for item in items:
+                if (
+                    self.topic.topic == LOCAL_EVENTS.topic
+                    and isinstance(item, LocalForwarderEvent)
+                    and str(item.session.master_node_id) == self.local_routing_key
+                ):
+                    # Only the master consumes local control events. A local
+                    # master's own decisions must not wait for peer egress.
+                    await self.publish(item, origin=None)
+                    continue
+                if (
+                    self.topic.topic == LOCAL_EVENT_RECEIPTS.topic
+                    and isinstance(item, LocalEventReceipt)
+                    and str(item.requester) == self.local_routing_key
+                    and str(item.session_id.master_node_id) == self.local_routing_key
+                ):
+                    await self.publish(item, origin=None)
+                    continue
                 if (
                     self.topic.routing_key is not None
                     and self.topic.publish_policy is PublishPolicy.Always
@@ -298,10 +454,22 @@ class TopicRouter[T: CamelCaseModel]:
         origin_to_clear: set[Sender[tuple[str | None, T]]] = set()
         for sender in copy(self.origin_senders):
             try:
-                await sender.send((origin, item))
+                if self.topic.topic == LOCAL_EVENT_RECEIPTS.topic:
+                    # Receipt consumers may be stalled on remote reply egress.
+                    # Their bounded coalescing admission cannot hold this loop.
+                    try:
+                        sender.send_nowait((origin, item))
+                    except WouldBlock:
+                        continue
+                else:
+                    await sender.send((origin, item))
             except (ClosedResourceError, BrokenResourceError):
                 origin_to_clear.add(sender)
         self.origin_senders -= origin_to_clear
+        if self.topic.topic == LOCAL_EVENT_RECEIPTS.topic:
+            # Nonblocking offers still yield under a sustained probe stream;
+            # admission must not trade memory pressure for event-loop starvation.
+            await checkpoint()
 
     async def publish_bytes(self, data: bytes, origin: str | None):
         # Wire-format payloads are deserialized strictly (extra="forbid"). During
@@ -332,6 +500,13 @@ class TopicRouter[T: CamelCaseModel]:
         await self._send_out(item)
 
     def new_sender(self) -> Sender[T]:
+        """Create admission with a direct self-master path for local control."""
+        if self.topic.topic in (LOCAL_EVENTS.topic, LOCAL_EVENT_RECEIPTS.topic):
+            # The serial topic loop may still be blocked publishing a frame
+            # from before promotion. Self-master admission cannot wait for it.
+            return _LocalControlSender[T].adopt_control(
+                self._sender.clone(), self._publish_self_control,
+            )
         return self._sender.clone()
 
     def new_receiver(
@@ -352,6 +527,21 @@ class TopicRouter[T: CamelCaseModel]:
         if accept is not None:
             self.receiver_predicates[send] = accept
         return receive
+
+    async def _publish_self_control(self, item: T) -> bool:
+        local = (
+            isinstance(item, LocalForwarderEvent)
+            and self.topic.topic == LOCAL_EVENTS.topic
+            and str(item.session.master_node_id) == self.local_routing_key
+        ) or (
+            isinstance(item, LocalEventReceipt)
+            and self.topic.topic == LOCAL_EVENT_RECEIPTS.topic
+            and str(item.requester) == self.local_routing_key
+            and str(item.session_id.master_node_id) == self.local_routing_key
+        )
+        if local:
+            await self.publish(item, origin=None)
+        return local
 
     def _routes_to_local_node(self, item: T) -> bool:
         if self.local_routing_key is None or self.topic.routing_key is None:
@@ -620,6 +810,11 @@ class Router:
         )
         self._telemetry_out_send = telemetry_send
         self._telemetry_out_recv = telemetry_recv
+        local_events_send, local_events_recv = channel[OutboundPacket](
+            _LOCAL_EVENTS_OUTBOUND_BUFFER
+        )
+        self._local_events_out_send = local_events_send
+        self._local_events_out_recv = local_events_recv
         self._telemetry_plane_observer = TelemetryPlaneObserver(
             admission_capacity=_TELEMETRY_ADMISSION_CAPACITY,
             network_queue_capacity=_TELEMETRY_OUTBOUND_BUFFER,
@@ -717,6 +912,15 @@ class Router:
         return self._zenoh.scouting_address()
 
     async def register_topic[T: CamelCaseModel](self, topic: TypedTopic[T]):
+        """Register a typed topic with its designated transport and admission bounds.
+
+        Args:
+            topic: Topic contract selecting payload validation and delivery policy.
+
+        Returns:
+            None. Stores the topic router and subscribes immediately when running;
+            otherwise subscription is deferred to router startup.
+        """
         if topic.topic == VISION_MEDIA.topic:
             send = self._zenoh_vision_out_send.clone()
         elif topic.topic == OUTPUT_MEDIA.topic:
@@ -732,13 +936,20 @@ class Router:
             send = self._authority_out_send.clone()
         elif topic.topic == TELEMETRY.topic:
             send = self._telemetry_out_send.clone()
+        elif topic.topic in (LOCAL_EVENTS.topic, LOCAL_EVENT_RECEIPTS.topic):
+            send = self._local_events_out_send.clone()
         else:
             send = self._tmp_networking_sender
             if send:
                 self._tmp_networking_sender = None
             else:
                 send = self.networking_receiver.clone_sender()
-        local_routing_key = self._node_id if topic.routing_key is not None else None
+        local_routing_key = (
+            self._node_id
+            if topic.routing_key is not None
+            or topic.topic in (LOCAL_EVENTS.topic, LOCAL_EVENT_RECEIPTS.topic)
+            else None
+        )
         if topic.topic == TELEMETRY.topic:
             router = cast(
                 TopicRouter[T],
@@ -749,9 +960,14 @@ class Router:
                 ),
             )
         else:
-            if topic.topic in (VISION_MEDIA.topic, OUTPUT_MEDIA.topic):
-                # Bulk media admission is a rendezvous: retention lives only
-                # in the bounded, observable egress and stream queues.
+            if topic.topic in (
+                VISION_MEDIA.topic,
+                OUTPUT_MEDIA.topic,
+                LOCAL_EVENTS.topic,
+                LOCAL_EVENT_RECEIPTS.topic,
+            ):
+                # Local control and bulk media use rendezvous admission;
+                # retention belongs to their bounded downstream queues.
                 producer_buffer_size = 0
             elif topic.topic == AUTHORITY_MESSAGES.topic:
                 # Authority admission must be bounded before serialization as
@@ -824,16 +1040,35 @@ class Router:
     def receiver_with_origin[T: CamelCaseModel](
         self, topic: TypedTopic[T]
     ) -> Receiver[tuple[str | None, T]]:
+        """Subscribe with transport origin and the topic's ingress policy.
+
+        Receipt subscriptions coalesce disposable retries in at most 256 frames
+        of 4 KiB each. Their publication never blocks shared network reception;
+        ordinary origin-aware topics keep their existing delivery semantics.
+        """
         router = self.topic_routers.get(topic.topic, None)
         assert router is not None
         assert router.topic == topic
         assert router.topic.model_type == topic.model_type
 
-        send, recv = channel[tuple[str | None, T]]()
+        capacity = (
+            _LOCAL_RECEIPT_ADMISSION_CAPACITY
+            if topic.topic == LOCAL_EVENT_RECEIPTS.topic
+            else inf
+        )
+        send, recv = channel[tuple[str | None, T]](capacity)
+        if topic.topic == LOCAL_EVENT_RECEIPTS.topic:
+            send = _CoalescingReceiptSender[T].adopt_receipts(send)
         router.origin_senders.add(cast(Sender[tuple[str | None, CamelCaseModel]], send))
         return recv
 
     async def run(self):
+        """Run topic routers and independent transport loops until cancellation.
+
+        Subscribes registered topics before waiting for shutdown. On exit, attempts
+        bounded unsubscription and closes networking and owned transport resources.
+        Returns after cancellation drains the task group; transport failures propagate.
+        """
         logger.debug("Starting Router")
         try:
             async with self._tg as tg:
@@ -844,6 +1079,7 @@ class Router:
                 tg.start_soon(self._networking_publish)
                 tg.start_soon(self._election_networking_publish)
                 tg.start_soon(self._authority_networking_publish)
+                tg.start_soon(self._local_events_networking_publish)
                 tg.start_soon(self._telemetry_networking_publish)
                 tg.start_soon(self._vision_networking_publish)
                 tg.start_soon(self._output_networking_publish)
@@ -1072,6 +1308,12 @@ class Router:
 
         with self._authority_out_recv as authority_items:
             async for packet in authority_items:
+                await self._publish_gossipsub_packet(packet)
+
+    async def _local_events_networking_publish(self) -> None:
+        """Backpressure local control egress without blocking other topic lanes."""
+        with self._local_events_out_recv as local_events:
+            async for packet in local_events:
                 await self._publish_gossipsub_packet(packet)
 
     async def _telemetry_networking_publish(self) -> None:

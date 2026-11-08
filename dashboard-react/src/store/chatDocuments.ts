@@ -1,31 +1,14 @@
 import type { ChatMessage, ChatUploadedFile, Conversation } from '../types/chat';
 import { randomHex32 } from '../utils/randomIds';
+import { CHAT_DOCUMENT_STORE, chatStorageDocumentIds, openChatDatabase } from './chatDatabase';
 
 /** Transport limits shared by the versioned document chat contract. */
 export const MAX_CHAT_DOCUMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_CHAT_DOCUMENTS = 8;
 export const MAX_CHAT_REQUEST_BYTES = 16 * 1024 * 1024;
-const DATABASE = 'skulk-chat-documents-v1';
-const DOCUMENTS = 'documents';
-let database: Promise<IDBDatabase> | undefined;
-
-function openDocuments(): Promise<IDBDatabase> {
-  if (!database) {
-    database = new Promise<IDBDatabase>((resolve, reject) => {
-      let failed = false;
-      const request = indexedDB.open(DATABASE, 1);
-      request.onupgradeneeded = () => { request.result.createObjectStore(DOCUMENTS); };
-      request.onerror = () => { failed = true; reject(new Error('Document storage is unavailable in this browser.')); };
-      request.onblocked = () => { failed = true; reject(new Error('Document storage is blocked by another browser tab.')); };
-      request.onsuccess = () => {
-        if (failed) { request.result.close(); return; }
-        request.result.onversionchange = () => { request.result.close(); database = undefined; };
-        resolve(request.result);
-      };
-    }).catch((error: unknown) => { database = undefined; throw error; });
-  }
-  return database;
-}
+const DOCUMENTS = CHAT_DOCUMENT_STORE;
+const stagingOwner = randomHex32();
+const stagingLifetime = 86400000;
 
 /** Identify the supported document extension without treating MIME alone as proof. */
 export function chatDocumentKind(name: string): 'text' | 'pdf' | null {
@@ -68,18 +51,18 @@ export async function storeChatDocuments(files: ChatUploadedFile[]): Promise<Cha
     const blob = new Blob([bytes], { type: kind === 'text' ? 'text/plain' : 'application/pdf' });
     return { file, id: randomHex32(), blob };
   }));
-  const db = await openDocuments();
-  await new Promise<void>((resolve, reject) => {
+  const db = await openChatDatabase();
+  try { await new Promise<void>((resolve, reject) => {
     const transaction = db.transaction(DOCUMENTS, 'readwrite');
     transaction.oncomplete = () => resolve();
     transaction.onabort = transaction.onerror = () => reject(new Error('Could not save documents in this browser. Free browser storage and try again.'));
     try {
-      for (const { id, blob } of prepared) transaction.objectStore(DOCUMENTS).put({ blob, createdAt: Date.now() }, id);
+      for (const { id, blob } of prepared) transaction.objectStore(DOCUMENTS).add({ blob, createdAt: Date.now(), staged: { owner: stagingOwner, expiresAt: Date.now() + stagingLifetime } }, id);
     } catch {
       transaction.abort();
       reject(new Error('Could not save documents in this browser. Free browser storage and try again.'));
     }
-  });
+  }); } finally { db.close(); }
   return files.map(file => {
     const document = prepared.find(item => item.file === file);
     return document ? { ...file, documentId: document.id, type: document.blob.type } : file;
@@ -87,8 +70,9 @@ export async function storeChatDocuments(files: ChatUploadedFile[]): Promise<Cha
 }
 
 async function documentData(id: string): Promise<string> {
-  const db = await openDocuments();
-  const blob = await new Promise<Blob>((resolve, reject) => {
+  const db = await openChatDatabase();
+  let blob: Blob;
+  try { blob = await new Promise<Blob>((resolve, reject) => {
     const transaction = db.transaction(DOCUMENTS, 'readonly');
     const request = transaction.objectStore(DOCUMENTS).get(id);
     request.onerror = transaction.onabort = () => reject(new Error('Could not read a conversation document.'));
@@ -100,7 +84,7 @@ async function documentData(id: string): Promise<string> {
         reject(new Error('A stored document exceeds the supported format or size.'));
       } else resolve(value.blob);
     };
-  });
+  }); } finally { db.close(); }
   return await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = reader.onabort = () => reject(new Error('Could not encode a conversation document.'));
@@ -133,30 +117,50 @@ export function chatDocumentIds(conversations: Record<string, Conversation>): Se
 export async function removeChatDocuments(ids: Iterable<string>): Promise<void> {
   const keys = [...ids];
   if (!keys.length) return;
-  const db = await openDocuments();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(DOCUMENTS, 'readwrite');
-    keys.forEach(id => transaction.objectStore(DOCUMENTS).delete(id));
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = transaction.onabort = () => reject(new Error('Could not remove local conversation documents.'));
-  });
+  await collectDocuments(new Set(keys));
 }
 
-/** Expire crash-abandoned documents after a day, preserving all live references. */
-export async function pruneChatDocuments(referenced: Set<string>): Promise<void> {
-  const db = await openDocuments();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(DOCUMENTS, 'readwrite');
-    const cursor = transaction.objectStore(DOCUMENTS).openCursor();
-    cursor.onsuccess = () => {
-      const row = cursor.result;
-      if (!row) return;
-      const value: unknown = row.value;
-      if (!referenced.has(String(row.key)) && value && typeof value === 'object' && 'createdAt' in value
-        && typeof value.createdAt === 'number' && value.createdAt < Date.now() - 86400000) row.delete();
-      row.continue();
+/** Expire abandoned staging leases while atomically preserving canonical references. */
+export async function pruneChatDocuments(): Promise<void> {
+  await collectDocuments();
+}
+
+async function collectDocuments(explicit?: Set<string>): Promise<void> {
+  const db = await openChatDatabase();
+  try { await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(['snapshot', DOCUMENTS, 'recoveries'], 'readwrite', { durability: 'strict' });
+    const current = transaction.objectStore('snapshot').get('current');
+    current.onsuccess = () => {
+      const saved: unknown = current.result;
+      if (!saved || typeof saved !== 'object' || !('state' in saved) || !saved.state || typeof saved.state !== 'object') { transaction.abort(); return; }
+      let referenced: Set<string>;
+      try { referenced = chatStorageDocumentIds(saved.state, true); }
+      catch { transaction.abort(); return; }
+      const recoveries = transaction.objectStore('recoveries').getAll(undefined, 65);
+      recoveries.onsuccess = () => {
+        const retained = recoveries.result as unknown[];
+        if (retained.length > 64) { transaction.abort(); return; }
+        for (const value of retained) {
+          if (!value || typeof value !== 'object' || !('conversation' in value)) { transaction.abort(); return; }
+          try {
+            if (value.conversation !== null) for (const id of chatStorageDocumentIds({ conversations: { retained: value.conversation } }, true)) referenced.add(id);
+          } catch { transaction.abort(); return; }
+        }
+      const cursor = transaction.objectStore(DOCUMENTS).openCursor();
+      cursor.onsuccess = () => {
+        const row = cursor.result;
+        if (!row) return;
+        const value: unknown = row.value;
+        const staged = value && typeof value === 'object' && 'staged' in value ? value.staged : undefined;
+        const expired = staged && typeof staged === 'object' && 'expiresAt' in staged && typeof staged.expiresAt === 'number' && Number.isFinite(staged.expiresAt) && staged.expiresAt <= Date.now();
+        const removable = expired || (staged && typeof staged === 'object'
+          && (('owner' in staged && (staged.owner === stagingOwner || staged.owner === 'legacy')) || ('claimed' in staged && staged.claimed === true)));
+        if (!referenced.has(String(row.key)) && (explicit ? explicit.has(String(row.key)) && removable : expired)) row.delete();
+        row.continue();
+      };
+      };
     };
     transaction.oncomplete = () => resolve();
-    transaction.onerror = transaction.onabort = () => reject(new Error('Could not clean abandoned conversation documents.'));
-  });
+    transaction.onerror = transaction.onabort = () => reject(new Error('Could not clean local conversation documents. Existing references were preserved.'));
+  }); } finally { db.close(); }
 }

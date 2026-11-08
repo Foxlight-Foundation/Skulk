@@ -183,7 +183,10 @@ describe('ChatView multimodal requests', () => {
 });
 
 describe('native vision input bounds', () => {
-  it('preserves native image requests beyond the capability media limit', async () => {
+  it.each([false, true])('preserves native image requests beyond the capability media limit; no Web Locks = %s', async noLocks => {
+    const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    if (noLocks) Object.defineProperty(navigator, 'locks', { configurable: true, value: undefined });
+    try {
     let encodedBytes = 0;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input) === '/models') return new Response(JSON.stringify({ data: [{
@@ -205,6 +208,11 @@ describe('native vision input bounds', () => {
     await act(async () => { await userEvent.fill(container!.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]')!, 'Compare both images.'); });
     await act(async () => { await userEvent.click(container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!); });
     await waitFor(() => encodedBytes > 16 * 1024 * 1024, 'native image request was capped by the capability contract');
+    await waitForReact(() => !!container?.querySelector('[aria-label="Send message"]'), 'native response did not complete');
+    } finally {
+      if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks);
+      else Reflect.deleteProperty(navigator, 'locks');
+    }
   }, 15000);
 });
 
