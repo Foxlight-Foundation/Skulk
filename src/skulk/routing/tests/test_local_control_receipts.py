@@ -12,7 +12,7 @@ from skulk.shared.types.commands import (
     ForwarderDownloadCommand,
     RequestEventLog,
 )
-from skulk.shared.types.common import NodeId, SessionId
+from skulk.shared.types.common import NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
     Event,
     LocalForwarderEvent,
@@ -152,6 +152,11 @@ async def test_master_consumption_receipt_waits_for_persistence(
     router, outbound, inbound = _components()
     requests, request_receiver = channel[tuple[str | None, LocalEventReceipt]]()
     responses, response_receiver = channel[LocalEventReceipt]()
+    local_consumption: list[tuple[SystemId, int, int]] = []
+
+    async def consumed(source: SystemId, through_idx: int, next_global_idx: int) -> None:
+        local_consumption.append((source, through_idx, next_global_idx))
+
     master = Master(
         router.session_id.master_node_id,
         router.session_id,
@@ -162,6 +167,7 @@ async def test_master_consumption_receipt_waits_for_persistence(
         state_sync_receiver=channel[StateSyncMessage]()[1],
         state_sync_sender=channel[StateSyncMessage]()[0],
         download_command_sender=channel[ForwarderDownloadCommand]()[0],
+        local_event_consumed=consumed,
     )
     entered, release = anyio.Event(), anyio.Event()
 
@@ -183,6 +189,7 @@ async def test_master_consumption_receipt_waits_for_persistence(
                 await producer.send(TracingStateChanged(enabled=True))
                 await entered.wait()
                 assert not master._consumed_local_indices  # pyright: ignore[reportPrivateUsage]
+                assert local_consumption == []
                 source = next(iter(master._multi_buffer.stores))  # pyright: ignore[reportPrivateUsage]
                 request = LocalEventReceipt(
                     kind="request",
@@ -199,6 +206,7 @@ async def test_master_consumption_receipt_waits_for_persistence(
                 await requests.send((str(router.node_id), request))
                 receipt = await response_receiver.receive()
                 assert receipt.through_idx == 0 and receipt.next_global_idx == 1
+                assert local_consumption == [(source, 0, 1)]
                 group.cancel_scope.cancel()
     finally:
         master._event_log.close()  # pyright: ignore[reportPrivateUsage]

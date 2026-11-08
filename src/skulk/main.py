@@ -1179,6 +1179,7 @@ class Node:
         master = Master(
             node_id,
             session_id,
+            local_event_consumed=event_router.acknowledge_master_consumption,
             event_sender=event_router.sender(),
             global_event_sender=router.sender(topics.GLOBAL_EVENTS),
             local_event_receiver=router.receiver(topics.LOCAL_EVENTS),
@@ -1874,7 +1875,9 @@ class Node:
                         external_inbound=self.router.receiver(topics.GLOBAL_EVENTS),
                         external_outbound=self.router.sender(topics.LOCAL_EVENTS),
                         receipt_sender=self.router.sender(topics.LOCAL_EVENT_RECEIPTS),
-                        receipt_receiver=self.router.receiver_with_origin(topics.LOCAL_EVENT_RECEIPTS),
+                        receipt_receiver=self.router.receiver_with_origin(
+                            topics.LOCAL_EVENT_RECEIPTS
+                        ),
                     )
                     self.artifact_inventory_event_receiver = (
                         self.event_router.receiver()
@@ -1915,6 +1918,7 @@ class Node:
                     self.master = Master(
                         self.node_id,
                         result.session_id,
+                        local_event_consumed=self.event_router.acknowledge_master_consumption,
                         # A view that never applied an event is a cold start
                         # (a rebooted node winning before it hydrated): with
                         # restart recovery on, it restores from its record
@@ -1935,7 +1939,9 @@ class Node:
                         global_event_sender=self.router.sender(topics.GLOBAL_EVENTS),
                         local_event_receiver=self.router.receiver(topics.LOCAL_EVENTS),
                         receipt_sender=self.router.sender(topics.LOCAL_EVENT_RECEIPTS),
-                        receipt_receiver=self.router.receiver_with_origin(topics.LOCAL_EVENT_RECEIPTS),
+                        receipt_receiver=self.router.receiver_with_origin(
+                            topics.LOCAL_EVENT_RECEIPTS
+                        ),
                         command_receiver=self.router.receiver(topics.COMMANDS),
                         state_sync_receiver=self.router.receiver(
                             topics.STATE_SYNC_MESSAGES

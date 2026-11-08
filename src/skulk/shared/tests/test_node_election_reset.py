@@ -16,7 +16,7 @@ from skulk.main import Node
 from skulk.routing.event_router import EventRouter
 from skulk.routing.router import Router
 from skulk.shared.election import Election, ElectionResult
-from skulk.shared.types.common import NodeId, SessionId
+from skulk.shared.types.common import NodeId, SessionId, SystemId
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
@@ -53,6 +53,16 @@ class _FakeRouter:
 
     def current_session_connections(self) -> dict[str, tuple[str, int, int]]:
         return {}
+
+
+class _ConsumptionAwareEventRouter:
+    """Expose the production callback seam without running fake actors."""
+
+    async def acknowledge_master_consumption(
+        self, _source: SystemId, _through_idx: int, _next_global_idx: int
+    ) -> None:
+        """Fail if a wiring-only election test unexpectedly indexes events."""
+        raise AssertionError("Election setup must only wire the consumption effect")
 
 
 class _OldEventRouter:
@@ -132,7 +142,7 @@ async def test_election_restarts_event_router_after_receivers_are_rewired(
 ) -> None:
     order_events: list[str] = []
 
-    class NewEventRouter:
+    class NewEventRouter(_ConsumptionAwareEventRouter):
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             order_events.append("new_event_router.created")
 
@@ -220,7 +230,7 @@ async def test_election_attaches_capacity_guard_before_coordinator_start(
     """Wire staging admission before the replacement coordinator can receive."""
     order_events: list[str] = []
 
-    class NewEventRouter:
+    class NewEventRouter(_ConsumptionAwareEventRouter):
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             pass
 
@@ -346,7 +356,7 @@ async def test_new_master_does_not_wait_on_unavailable_state_sync_config(
 ) -> None:
     order_events: list[str] = []
 
-    class NewEventRouter:
+    class NewEventRouter(_ConsumptionAwareEventRouter):
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             order_events.append("new_event_router.created")
 
@@ -362,6 +372,9 @@ async def test_new_master_does_not_wait_on_unavailable_state_sync_config(
     class NewMaster:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             order_events.append("new_master.created")
+            assert _kwargs["local_event_consumed"] == (
+                node.event_router.acknowledge_master_consumption
+            )
 
         async def run(self) -> None:
             return
@@ -440,7 +453,7 @@ async def test_api_only_promotion_seeds_master_from_replicated_trust_state(
     replicated_identity = "card_" + ("b" * 52)
     captured_initial_states: list[State | None] = []
 
-    class NewEventRouter:
+    class NewEventRouter(_ConsumptionAwareEventRouter):
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             pass
 
@@ -456,6 +469,9 @@ async def test_api_only_promotion_seeds_master_from_replicated_trust_state(
     class NewMaster:
         def __init__(self, *_args: Any, **kwargs: Any) -> None:
             captured_initial_states.append(kwargs.get("initial_state"))
+            assert kwargs["local_event_consumed"] == (
+                node.event_router.acknowledge_master_consumption
+            )
 
         async def run(self) -> None:
             return
@@ -530,7 +546,7 @@ async def test_never_synced_promotion_is_a_cold_start_with_recovery(
     order_events: list[str] = []
     captured: list[dict[str, Any]] = []
 
-    class NewEventRouter:
+    class NewEventRouter(_ConsumptionAwareEventRouter):
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             pass
 
@@ -546,6 +562,9 @@ async def test_never_synced_promotion_is_a_cold_start_with_recovery(
     class NewMaster:
         def __init__(self, *_args: Any, **kwargs: Any) -> None:
             captured.append(kwargs)
+            assert kwargs["local_event_consumed"] == (
+                node.event_router.acknowledge_master_consumption
+            )
 
         async def run(self) -> None:
             return

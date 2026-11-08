@@ -2,7 +2,7 @@ import copy
 import os
 import time
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -1026,6 +1026,7 @@ class Master:
         download_command_sender: Sender[ForwarderDownloadCommand],
         receipt_sender: Sender[LocalEventReceipt] | None = None,
         receipt_receiver: Receiver[tuple[str | None, LocalEventReceipt]] | None = None,
+        local_event_consumed: Callable[[SystemId, int, int], Awaitable[None]] | None = None,
         snapshot_event_cadence: int = SNAPSHOT_EVENT_CADENCE,
         initial_state: State | None = None,
         telemetry_view: TelemetryView | None = None,
@@ -1036,6 +1037,35 @@ class Master:
         restart_recovery_fetcher: RestartRecordFetcher = fetch_peer_record,
         restart_recovery_restores_placements: bool = True,
     ):
+        """Configure authoritative indexing and placement for one session.
+
+        Args:
+            node_id: Identity of the node hosting this master.
+            session_id: Election epoch whose commands and events are accepted.
+            command_receiver: Authoritative command input.
+            event_sender: Producer for the master's own ordered control events.
+            local_event_receiver: Per-source ordered events from all nodes.
+            global_event_sender: Indexed event broadcast output.
+            state_sync_receiver: Snapshot request input.
+            state_sync_sender: Snapshot response output.
+            download_command_sender: Targeted download/preparation output.
+            receipt_sender: Optional remote consumption-response output.
+            receipt_receiver: Optional authenticated consumption-probe input.
+            local_event_consumed: Optional owned post-persistence prefix effect;
+                production wiring retires local retention without a peer send.
+            snapshot_event_cadence: Event interval for periodic snapshots.
+            initial_state: Optional replicated state carried through failover.
+            telemetry_view: Node-owned live resources and liveness observations.
+            state_sync_store_http_host: Optional store host included in snapshots.
+            initial_model_trust_identities: Initially approved remote-code identities.
+            restart_recovery_record: Optional durable local restart record.
+            restart_recovery_enabled: Whether cold-start recovery is enabled.
+            restart_recovery_fetcher: Effect used to retrieve peer restart records.
+            restart_recovery_restores_placements: Whether recovery restores models.
+
+        Creates session state and opens the event log. Component loops start in
+        ``run``; construction performs no inference or placement dispatch.
+        """
         self.node_id = node_id
         self.session_id = session_id
         # Live node telemetry off the event log (#279). Node-owned so it
@@ -1215,6 +1245,7 @@ class Master:
         self._system_id = SystemId()
         self._multi_buffer = MultiSourceBuffer[SystemId, Event]()
         self._consumed_local_indices: dict[SystemId, int] = {}
+        self._local_event_consumed = local_event_consumed
         self._local_receipt_sender = receipt_sender
         self._local_receipt_receiver = receipt_receiver
         self._event_log = DiskEventLog(SKULK_EVENT_LOG_DIR / "master")
@@ -5074,10 +5105,20 @@ class Master:
                 # drain() advances ordering before its events have been applied.
                 # Publish consumption only after the entire batch has completed,
                 # including persistence and intentionally skipped no-op updates.
+                previous_consumed = self._consumed_local_indices
                 self._consumed_local_indices = {
                     source: buffer.next_idx_to_release - 1
                     for source, buffer in self._multi_buffer.stores.items()
                 }
+                if self._local_event_consumed is not None:
+                    for source, through_idx in self._consumed_local_indices.items():
+                        if through_idx > previous_consumed.get(source, -1):
+                            # Self-master no-ops must retire even while the
+                            # remote receipt actor/topic is blocked in egress.
+                            # This in-process effect performs no network send.
+                            await self._local_event_consumed(
+                                source, through_idx, len(self._event_log)
+                            )
 
     async def _local_receipt_processor(
         self, sender: Sender[LocalEventReceipt],

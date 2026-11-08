@@ -308,6 +308,19 @@ Snapshot replacement and self-timeout invalidate queued, pending and confirmed
 control readings. Normal input closure drains offered values; worker shutdown
 cancels its blocked publisher.
 
+
+Self-master control admission bypasses the serialized topic loop before queueing,
+including after promotion while an earlier follower publication is blocked. The
+master also reports newly consumed prefixes directly to its local EventRouter
+after the whole ordered batch has applied/persisted. That in-process retirement
+performs no peer send, so blocked remote receipt replies cannot strand local
+skipped events. Remote receipts retain their authenticated retry path.
+Local producers reject encoded frames above the conservative 8-MiB transport
+budget (4 KiB reserved for framing and envelope growth) before enqueueing or
+allocating a source sequence. The producer receives an explicit size error;
+cloned handles retain the guard. Retention never waits for an untransmittable
+frame to obtain an acknowledgement.
+
 `LOCAL_EVENT_RECEIPTS` is an ephemeral control topic for retry-time cumulative
 consumption probes. Only authenticated session-master responses can release the
 requesting node's retained source prefix. The master advances that prefix after

@@ -1,14 +1,14 @@
 import time
 from collections import OrderedDict, deque
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import count
 from math import inf
 from os import PathLike
 from pathlib import Path
-from typing import cast
+from typing import cast, final
 
 from anyio import (
     BrokenResourceError,
@@ -210,6 +210,38 @@ class TelemetrySender:
         self._closed = True
 
 
+@final
+@dataclass(eq=False)
+class _LocalControlSender[T: CamelCaseModel](Sender[T]):
+    """Keep self-master admission independent of an obsolete peer publication."""
+
+    publish_local: Callable[[T], Awaitable[bool]] = field(kw_only=True)
+
+    @classmethod
+    def adopt_control(
+        cls, stream: Sender[T], publisher: Callable[[T], Awaitable[bool]]
+    ) -> "_LocalControlSender[T]":
+        """Take stream ownership with its independently routed local publisher."""
+        adopted = cls(_state=stream._state, publish_local=publisher)
+        stream.close()
+        return adopted
+
+    async def send(self, item: T) -> None:
+        """Deliver self-master control directly, otherwise use bounded admission."""
+        if self._closed:
+            raise ClosedResourceError
+        if not self._state.open_receive_channels:
+            raise BrokenResourceError
+        if not await self.publish_local(item):
+            await super().send(item)
+
+    def clone(self) -> "_LocalControlSender[T]":
+        """Clone the stream while preserving its local admission policy."""
+        if self._closed:
+            raise ClosedResourceError
+        return _LocalControlSender(_state=self._state, publish_local=self.publish_local)
+
+
 # A significant current limitation of the TopicRouter is that it is not capable
 # of preventing feedback, as it does not ask for a system id so cannot tell
 # which message is coming/going to which system.
@@ -356,7 +388,29 @@ class TopicRouter[T: CamelCaseModel]:
         await self._send_out(item)
 
     def new_sender(self) -> Sender[T]:
+        """Create admission with a direct self-master path for local control."""
+        if self.topic.topic in (LOCAL_EVENTS.topic, LOCAL_EVENT_RECEIPTS.topic):
+            # The serial topic loop may still be blocked publishing a frame
+            # from before promotion. Self-master admission cannot wait for it.
+            return _LocalControlSender[T].adopt_control(
+                self._sender.clone(), self._publish_self_control,
+            )
         return self._sender.clone()
+
+    async def _publish_self_control(self, item: T) -> bool:
+        local = (
+            isinstance(item, LocalForwarderEvent)
+            and self.topic.topic == LOCAL_EVENTS.topic
+            and str(item.session.master_node_id) == self.local_routing_key
+        ) or (
+            isinstance(item, LocalEventReceipt)
+            and self.topic.topic == LOCAL_EVENT_RECEIPTS.topic
+            and str(item.requester) == self.local_routing_key
+            and str(item.session_id.master_node_id) == self.local_routing_key
+        )
+        if local:
+            await self.publish(item, origin=None)
+        return local
 
     def _routes_to_local_node(self, item: T) -> bool:
         if self.local_routing_key is None or self.topic.routing_key is None:
@@ -761,7 +815,8 @@ class Router:
                 send = self.networking_receiver.clone_sender()
         local_routing_key = (
             self._node_id
-            if topic.routing_key is not None or topic.topic in (LOCAL_EVENTS.topic, LOCAL_EVENT_RECEIPTS.topic)
+            if topic.routing_key is not None
+            or topic.topic in (LOCAL_EVENTS.topic, LOCAL_EVENT_RECEIPTS.topic)
             else None
         )
         if topic.topic == TELEMETRY.topic:

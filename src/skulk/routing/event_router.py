@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from math import isfinite
 from random import random
+from typing import final
 
 import anyio
 from anyio import BrokenResourceError, ClosedResourceError
@@ -27,6 +28,56 @@ from skulk.shared.types.state_sync import (
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.event_buffer import ConflictingDuplicateIndexError, OrderedBuffer
 from skulk.utils.task_group import TaskGroup
+
+_MAX_LOCAL_CONTROL_FRAME_BYTES = 8 * 1024 * 1024 - 4096
+"""Leave framing/global-envelope headroom below Rust's 8-MiB gossipsub limit."""
+
+
+@final
+@dataclass(eq=False)
+class _LocalEventSender(Sender[Event]):
+    """Reject unsendable control before queue admission or sequence allocation."""
+
+    source: SystemId = field(kw_only=True)
+    session: SessionId = field(kw_only=True)
+
+    @classmethod
+    def adopt_control(
+        cls, stream: Sender[Event], source: SystemId, session: SessionId
+    ) -> "_LocalEventSender":
+        """Take ownership with the producer identity used for wire validation."""
+        adopted = cls(_state=stream._state, source=source, session=session)
+        stream.close()
+        return adopted
+
+    def send_nowait(self, item: Event) -> None:
+        """Validate the wire budget and report oversize to the actual producer."""
+        if self._closed:
+            raise ClosedResourceError
+        frame = LocalForwarderEvent(
+            # Account for a full-width long-lived producer counter up front;
+            # actual admission must not reject a near-limit event just because
+            # its real index gained a digit after validation.
+            origin_idx=2**64 - 1,
+            origin=self.source,
+            session=self.session,
+            event=item,
+        )
+        size = len(frame.model_dump_json().encode("utf-8"))
+        if size > _MAX_LOCAL_CONTROL_FRAME_BYTES:
+            raise ValueError(
+                f"Local control event is too large for transport: {size} bytes; "
+                f"maximum {_MAX_LOCAL_CONTROL_FRAME_BYTES} bytes"
+            )
+        super().send_nowait(item)
+
+    def clone(self) -> "_LocalEventSender":
+        """Clone admission without losing the wire-size validation policy."""
+        if self._closed:
+            raise ClosedResourceError
+        return _LocalEventSender(
+            _state=self._state, source=self.source, session=self.session
+        )
 
 
 @dataclass
@@ -120,11 +171,11 @@ class EventRouter:
                 tg.start_soon(self._bootstrap)
                 tg.start_soon(self._run_ext_in)
                 tg.start_soon(self._simple_retry)
+                tg.start_soon(self._retry_receipt_replay)
                 if self.receipt_receiver is not None:
                     tg.start_soon(
                         self._receive_delivery_receipts, self.receipt_receiver
                     )
-                    tg.start_soon(self._retry_receipt_replay)
         finally:
             self.external_outbound.close()
             self.state_sync_receiver.close()
@@ -247,18 +298,48 @@ class EventRouter:
             )
         )
 
+    async def acknowledge_master_consumption(
+        self, source: SystemId, through_idx: int, next_global_idx: int
+    ) -> None:
+        """Retire this local master's consumed source prefix without peer egress.
+
+        Args:
+            source: Producer whose ordered batch finished applying/persisting.
+            through_idx: Last consumed source sequence, including skipped events.
+            next_global_idx: Authoritative master's next global log index.
+
+        Returns:
+            None. Releases matching local retention and records replay work.
+            The independent replay task owns any potentially blocked command send.
+        """
+        if self.node_id != self.session_id.master_node_id:
+            raise ValueError("Only the local session master can report consumption")
+        matched = [
+            identifier
+            for identifier, (_, _, frame) in self.out_for_delivery.items()
+            if frame.origin == source and frame.origin_idx <= through_idx
+        ]
+        for identifier in matched:
+            await self._acknowledge_local_event(identifier)
+        self._receipt_replay_target = max(self._receipt_replay_target, next_global_idx)
+
     def sender(self) -> Sender[Event]:
         """Create a backpressured control producer with one queued event.
 
         The small queue permits initialization before ``run`` starts while
         keeping an admitted-outbox wait from moving unbounded storage upstream.
+        An unsendable encoded frame raises ``ValueError`` to the producer before
+        queueing, retaining payloads or consuming a sequence number. Clones keep
+        that validation policy.
         """
         send, recv = channel[Event](1)
+        source = SystemId()
+        validated = _LocalEventSender.adopt_control(send, source, self.session_id)
         if self._tg.is_running():
-            self._tg.start_soon(self._ingest, SystemId(), recv)
+            self._tg.start_soon(self._ingest, source, recv)
         else:
-            self._tg.queue(self._ingest, SystemId(), recv)
-        return send
+            self._tg.queue(self._ingest, source, recv)
+        return validated
 
     def receiver(self) -> Receiver[IndexedEvent]:
         send, recv = channel[IndexedEvent]()
@@ -301,6 +382,12 @@ class EventRouter:
                     event=event,
                 )
                 event_bytes = len(f_ev.model_dump_json().encode("utf-8"))
+                if event_bytes > _MAX_LOCAL_CONTROL_FRAME_BYTES:
+                    # Normal producers fail before enqueueing. Defend against
+                    # mutation after handoff without poisoning this source or
+                    # tearing down unrelated EventRouter producers.
+                    logger.error("Rejected oversized local control after handoff")
+                    continue
                 async with self._delivery_capacity:
                     duplicate = False
                     while True:
