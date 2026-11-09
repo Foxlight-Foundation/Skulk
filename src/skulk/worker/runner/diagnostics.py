@@ -26,6 +26,7 @@ from skulk.shared.types.diagnostics import (
     RunnerPhaseName,
 )
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.native_music import NativeMusicMemoryObservation
 from skulk.shared.types.tasks import TaskId
 from skulk.utils.channels import MpSender
 
@@ -139,6 +140,25 @@ def normalize_attrs(attrs: dict[str, object] | None) -> dict[str, RunnerDiagnost
 
 def _task_id_string(task_id: TaskId | str | None) -> str | None:
     return None if task_id is None else str(task_id)
+
+
+def record_native_music_memory(observation: NativeMusicMemoryObservation) -> None:
+    """Forward a current native observation over non-blocking local diagnostic IPC.
+
+    The resident reader has verified actual child, payload, device and sequence.
+    This separate observation is consumed before phase/history processing by
+    its owning supervisor. A full channel drops a sample without stalling native
+    output; later samples refresh it and stale observations grant no capacity.
+    """
+    if _diagnostic_sender is None or _diagnostic_context is None:
+        return
+    update = RunnerDiagnosticUpdate(
+        at=_now_utc_iso(), phase="idle", event="native_music_memory",
+        context=_diagnostic_context.model_copy(update={"pid": os.getpid()}),
+        native_music_memory=observation,
+    )
+    with contextlib.suppress(WouldBlock, ClosedResourceError, OSError, ValueError):
+        _diagnostic_sender.send_nowait(update)
 
 
 def record_runner_phase(

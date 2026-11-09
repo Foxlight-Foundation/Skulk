@@ -499,6 +499,11 @@ def _declared_companion_files(
     no additional manifest files.
     """
     image_card = owner_card or shard.model_card
+    native_files = image_card.native_music_files_for_source(
+        str(shard.model_card.artifact_repository), shard.model_card.source_revision
+    )
+    if native_files and artifact_role in ("base", "music_component"):
+        return tuple((item.path, item.size_bytes) for item in native_files)
     if image_card.image is not None and artifact_role in ("base", "image_component"):
         return tuple((item.path, item.size_bytes) for item in image_card.image.files_for_source(str(shard.model_card.artifact_repository), shard.model_card.source_revision))
     if (
@@ -1913,6 +1918,33 @@ class ModelStoreDownloader(ShardDownloader):
         self._on_progress_callbacks: list[
             Callable[[ShardMetadata, RepoDownloadProgress], Awaitable[None]]
         ] = []
+
+    @property
+    def staging_enabled(self) -> bool:
+        """Return whether this downloader must stage Store bytes before loading."""
+        return self._staging_config.enabled
+
+    @property
+    def staging_cache_path(self) -> Path:
+        """Return the configured node cache root, even when staging is disabled."""
+        return Path(self._staging_config.node_cache_path).expanduser()
+
+    def is_store_owned_path(self, directory: Path) -> bool:
+        """Return whether a path belongs to this node's authoritative Store.
+
+        Args:
+            directory: Directory being classified for local cache deletion.
+
+        Returns:
+            True for the Store root or a resolved descendant, independently of
+            whether the artifact is complete. False on non-Store nodes.
+
+        This custody check does not grant artifact or loader readiness.
+        """
+        root = self._store_client.local_store_path
+        return root is not None and directory.expanduser().resolve().is_relative_to(
+            root.expanduser().resolve()
+        )
 
     def set_staging_capacity_callback(
         self,

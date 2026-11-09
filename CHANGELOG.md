@@ -7,6 +7,50 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Preservation supervision
+
+- Retain a completed mirror worker's final observation when an event-loop
+  delay overlaps the process-exit poll. Drain inherited pipe writers before
+  consuming the final record and EOF, while preserving bounded cancellation.
+
+### Native music editing
+
+- Allow slower CPU edits to remain active for the native runner's finite
+  two-hour render budget, including the configured native cooperative timeout.
+  Preserve separate placement and result-delivery
+  deadlines, terminal cleanup, cancellation and no-replay recovery.
+
+### Native engine preparation
+
+- Explain insufficient worker disk space when native music or separation engine
+  preparation fails, with a storage cleanup and retry remedy. Keep private cache
+  paths and command details out of the public response.
+
+### Native music model metadata
+
+- Read native ACE-Step base generation and editing capabilities with complete,
+  independently pinned base, text-encoder and audio-autoencoder file manifests.
+  Report intrinsic native modes and audio geometry in model metadata, while
+  rejecting incompatible existing runners. Existing music-card identities and
+  audio.cpp behavior are preserved; this reader adds no native editing endpoint.
+
+### Separation result delivery
+
+- Prevent same-node stem transfers from blocking on their own reverse
+  acknowledgments. Each role is acknowledged before the next begins; separation
+  subscriber predicates preserve zero-buffer bounds and existing video/music
+  admission.
+
+- Keep separation acknowledgements and cancellation terminals independent of
+  the media consumer across concurrent jobs, with bounded control ownership
+  and admission held until senders drain. Propagate separation control
+  admission failures so a dropped final acknowledgement cannot report a
+  completed job.
+
+- Verify replayed stem completion packets against the result manifest before
+  acknowledging them, and retry settlement when manifest recording finishes.
+  Reordered duplicate terminals cannot strand a fully delivered result.
+
 ### Chat continuity
 
 - Preserve conflicting local edits as separately reviewable versions, with explicit
@@ -25,7 +69,6 @@ This project records release notes here and mirrors public-facing notes in
   model identity stable even while empty and recheck receipt recovery against
   the history refreshed under writer ownership. Preserve live generated images
   when another tab updates metadata without changing their messages.
-
 
 ### Offline model availability
 

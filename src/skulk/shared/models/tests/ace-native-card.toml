@@ -1,0 +1,134 @@
+# Exact native model metadata fixture, not a published card or runtime claim.
+model_id = "ACE-Step/acestep-v15-base-native"
+source_repository = "ACE-Step/acestep-v15-base"
+source_revision = "e432212fec32b8965a14ffa57ae653438d6abd14"
+n_layers = 24
+hidden_size = 2048
+supports_tensor = false
+tasks = ["TextToMusic", "MusicEditing"]
+family = "acestep"
+quantization = "BF16"
+trust_remote_code = false
+
+[license]
+name = "MIT"
+spdx_id = "MIT"
+
+[storage_size]
+in_bytes = 6336571578
+
+[placement]
+compatible_backends = []
+
+[artifact_bundle]
+bundle_id = "bundle_p6epimgneqv3dlktgdov7y3vq3qsxp2rprzrjhhhakeq4stvfw6a"
+download_size = 4791668759
+
+[[artifact_bundle.files]]
+path = "config.json"
+size_bytes = 1940
+object_id = "git-sha1:ba68842e7207fe015ef7bca698e40f12dc13241d"
+
+[[artifact_bundle.files]]
+path = "model.safetensors"
+size_bytes = 4787825604
+object_id = "sha256:4177f600501a6d4bd81cadaa0abac557ffd15c54e5c8cb52053cdb24a0844d6b"
+
+[[artifact_bundle.files]]
+path = "silence_latent.pt"
+size_bytes = 3841215
+object_id = "sha256:a778e9dd942f5e8b2c09c55370782d318834432b03dabbcdf70e6ed49ad6358b"
+
+[music]
+family = "ace_step_1_5"
+lyrics = "optional"
+min_seconds = 5
+max_seconds = 120
+
+[music.native]
+variant = "base"
+sample_rate = 48000
+audio_channels = 2
+editing_modes = ["add_part", "repaint", "continue"]
+part_classes = ["woodwinds", "brass", "fx", "synth", "strings", "percussion", "keyboard", "guitar", "bass", "drums", "backing_vocals", "vocals"]
+
+[music.native.text_encoder]
+repo = "ACE-Step/Ace-Step1.5"
+revision = "19671f406d603126926c1b7e2adc169acbcade22"
+
+[music.native.text_encoder.license]
+name = "MIT"
+spdx_id = "MIT"
+
+[music.native.text_encoder.artifact_bundle]
+bundle_id = "bundle_lcmn65mbvlmwriyoozhke7i2jwzw5ti2w3mvq33tjyaiekc575aq"
+download_size = 1207471006
+root = "Qwen3-Embedding-0.6B"
+
+[[music.native.text_encoder.artifact_bundle.files]]
+path = "Qwen3-Embedding-0.6B/added_tokens.json"
+size_bytes = 707
+object_id = "git-sha1:b54f9135e44c1e81047e8d05cb027af8bc039eed"
+
+[[music.native.text_encoder.artifact_bundle.files]]
+path = "Qwen3-Embedding-0.6B/chat_template.jinja"
+size_bytes = 4116
+object_id = "git-sha1:699ff8df401fe4788525e9c1f9b86a99eadd6230"
+
+[[music.native.text_encoder.artifact_bundle.files]]
+path = "Qwen3-Embedding-0.6B/config.json"
+size_bytes = 1359
+object_id = "git-sha1:21bd712c76114dc22587c6eeb84ab64186c9d245"
+
+[[music.native.text_encoder.artifact_bundle.files]]
+path = "Qwen3-Embedding-0.6B/merges.txt"
+size_bytes = 1671853
+object_id = "git-sha1:31349551d90c7606f325fe0f11bbb8bd5fa0d7c7"
+
+[[music.native.text_encoder.artifact_bundle.files]]
+path = "Qwen3-Embedding-0.6B/model.safetensors"
+size_bytes = 1191586416
+object_id = "sha256:0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd"
+
+[[music.native.text_encoder.artifact_bundle.files]]
+path = "Qwen3-Embedding-0.6B/special_tokens_map.json"
+size_bytes = 613
+object_id = "git-sha1:ac23c0aaa2434523c494330aeb79c58395378103"
+
+[[music.native.text_encoder.artifact_bundle.files]]
+path = "Qwen3-Embedding-0.6B/tokenizer.json"
+size_bytes = 11423705
+object_id = "sha256:def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a"
+
+[[music.native.text_encoder.artifact_bundle.files]]
+path = "Qwen3-Embedding-0.6B/tokenizer_config.json"
+size_bytes = 5404
+object_id = "git-sha1:ddaf69808214a44fdd26d3785b66c1367c78277a"
+
+[[music.native.text_encoder.artifact_bundle.files]]
+path = "Qwen3-Embedding-0.6B/vocab.json"
+size_bytes = 2776833
+object_id = "git-sha1:4783fe10ac3adce15ac8f358ef5462739852c569"
+
+[music.native.autoencoder]
+repo = "ACE-Step/Ace-Step1.5"
+revision = "19671f406d603126926c1b7e2adc169acbcade22"
+
+[music.native.autoencoder.license]
+name = "MIT"
+spdx_id = "MIT"
+
+[music.native.autoencoder.artifact_bundle]
+bundle_id = "bundle_v56e4lt3h7bhxtvc4zom7mj6fd2vfctaqy7cjoh5pthbf6zyx3ka"
+download_size = 337431813
+root = "vae"
+
+[[music.native.autoencoder.artifact_bundle.files]]
+path = "vae/config.json"
+size_bytes = 425
+object_id = "git-sha1:f49eb7b261dde15ed29c0fa1e790251dcecbd280"
+
+[[music.native.autoencoder.artifact_bundle.files]]
+path = "vae/diffusion_pytorch_model.safetensors"
+size_bytes = 337431388
+object_id = "sha256:da17edb604c40deaf09e9b24974e590d1ca83a374070e5d0884cfa4bed9a99b0"

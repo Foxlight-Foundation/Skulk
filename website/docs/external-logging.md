@@ -29,6 +29,34 @@ still needs a functioning log shipper. The deployment instructions below explain
 how an administrator supplies those services; source-service environment files
 apply to that deployment method, not to every packaged-app installation.
 
+## Connected node with no telemetry subscribers
+
+A node can retain control-plane connections while its telemetry publications
+have no subscribers. Inspect `GET /v1/diagnostics/telemetry` for the cumulative
+`noPeerPublishes` count and successful-publication age.
+
+After 30 seconds of repeated no-subscriber failures with authenticated remote
+connections, the Rust publisher emits a warning containing:
+
+| Field | Observation |
+| --- | --- |
+| `connected_peers` | Distinct peers connected to the transport |
+| `telemetry_known_peers` | Peers known to the isolated telemetry behaviour; this alone does not prove a topic subscription |
+| `telemetry_protocol_peers` | Counts by the isolated behaviour's negotiated protocol label, including `Not Supported` when negotiation has established that result |
+| `topic_subscribers` | Remote peers subscribed to the telemetry topic |
+| `mesh_peers` | Peers in that topic's mesh |
+| `locally_subscribed` | Whether this process has registered its own telemetry subscription |
+
+The warning repeats at most once per minute and includes elapsed seconds and a
+consecutive failure count. A standalone node with no remote connections does not
+produce it. It contains no peer identifiers, addresses or packet bodies and uses
+the normal warning log path. Setting `RUST_LOG` does not enable these diagnostics
+through the Python bridge, and raw gossipsub behaviour dumps remain suppressed.
+
+Use the counts alongside the installed build, namespace fingerprint and
+connectivity diagnostics. A connection count is not proof of working telemetry,
+and the warning does not by itself identify a build mismatch or repair the node.
+
 ## Architecture in one picture
 
 ```

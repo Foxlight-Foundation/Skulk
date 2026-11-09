@@ -15,6 +15,7 @@ from skulk.shared.models.remote_code_approval import MODEL_TRUST_FAILURE_MARKER
 from skulk.shared.types.chunks import InputImageChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.tasks import (
+    AudioSeparation,
     AudioTranscription,
     CancelTask,
     ConnectToGroup,
@@ -24,6 +25,7 @@ from skulk.shared.types.tasks import (
     ImageGeneration,
     InstallEngine,
     LoadModel,
+    MusicEditing,
     MusicGeneration,
     RealtimeAudioTranscription,
     Shutdown,
@@ -87,6 +89,9 @@ def plan(
     on_demand_backends: Set[str] = frozenset(),
     engine_install_requested: Set[InstanceId] = frozenset(),
     engine_install_ready: Set[InstanceId] = frozenset(),
+    runner_creation_pending: Set[InstanceId] = frozenset(),
+    separation_media_ready: Set[CommandId] = frozenset(),
+    native_music_media_ready: Set[CommandId] = frozenset(),
 ) -> Task | None:
     """Select the next local lifecycle task from current runners and cluster state.
 
@@ -103,11 +108,17 @@ def plan(
         # handshakes; shutting them down is the safest recovery path.
         _kill_runner(runners, all_runners, instances)
         or _cancel_tasks(runners, tasks)
-        or _create_runner(node_id, runners, instances)
+        or _create_runner(node_id, runners, instances, runner_creation_pending)
         or _model_needs_download(node_id, runners, global_download_status)
         or _engine_needs_install(runners, on_demand_backends, engine_install_requested)
         or _init_distributed_backend(runners, all_runners)
-        or _load_model(runners, all_runners, global_download_status, on_demand_backends, engine_install_ready)
+        or _load_model(
+            runners,
+            all_runners,
+            global_download_status,
+            on_demand_backends,
+            engine_install_ready,
+        )
         or _ready_to_warmup(runners, all_runners)
         or _pending_tasks(
             runners,
@@ -116,6 +127,8 @@ def plan(
             input_chunk_buffer or {},
             speech_media_ready or set(),
             reference_media_ready or set(),
+            separation_media_ready,
+            native_music_media_ready,
         )
     )
 
@@ -178,8 +191,11 @@ def _create_runner(
     node_id: NodeId,
     runners: Mapping[RunnerId, RunnerSupervisor],
     instances: Mapping[InstanceId, Instance],
+    pending: Set[InstanceId] = frozenset(),
 ) -> CreateRunner | None:
     for instance in instances.values():
+        if instance.instance_id in pending:
+            continue
         runner_id = instance.shard_assignments.node_to_runner.get(node_id, None)
         if runner_id is None:
             continue
@@ -515,6 +531,8 @@ def _pending_tasks(
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None,
     speech_media_ready: Set[CommandId],
     reference_media_ready: Set[CommandId],
+    separation_media_ready: Set[CommandId] = frozenset(),
+    native_music_media_ready: Set[CommandId] = frozenset(),
 ) -> Task | None:
     for task in tasks.values():
         # Forward inference tasks to runners
@@ -526,6 +544,8 @@ def _pending_tasks(
                 ImageEdits,
                 VideoGeneration,
                 MusicGeneration,
+                MusicEditing,
+                AudioSeparation,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,
@@ -569,9 +589,23 @@ def _pending_tasks(
         ) and task.command_id not in speech_media_ready:
             continue
 
+        if (
+            isinstance(task, AudioSeparation)
+            and task.command_id not in separation_media_ready
+        ):
+            continue
+
+        if isinstance(task, MusicEditing) and task.command_id not in native_music_media_ready:
+            continue
+
         for runner in runners.values():
             if task.instance_id != runner.bound_instance.instance.instance_id:
                 continue
+
+            if isinstance(task, MusicGeneration):
+                profile = runner.bound_instance.bound_shard.model_card.music
+                if profile is not None and profile.native is not None and task.command_id not in native_music_media_ready:
+                    continue
 
             # Inference traffic never reaches an RPC donor (#328): the driver
             # is the only rank that serves requests; the donor's process is a

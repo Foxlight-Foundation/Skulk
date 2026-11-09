@@ -24,8 +24,32 @@ from skulk.utils.pydantic_ext import CamelCaseModel
 _HEADER_LENGTH_BYTES = 4
 _MAX_HEADER_BYTES = 16_384
 
-OutputMediaPurpose = Literal["video", "thumbnail", "music"]
+OutputMediaPurpose = Literal[
+    "video",
+    "thumbnail",
+    "music",
+    "music_edit",
+    "separation_drums",
+    "separation_bass",
+    "separation_other",
+    "separation_vocals",
+]
 """Which artifact of a command an output stream carries."""
+
+
+def output_media_for_api(packet: OutputMediaPacket) -> bool:
+    """Filter native audio ACK echoes while preserving legacy media subscriptions.
+
+    The API sends reverse terminals while consuming a result. Delivering those
+    terminals back into its rendezvous receiver would wait for that same
+    consumer and deadlock a same-node transfer.
+    """
+    return not (packet.purpose.startswith("separation_") or packet.purpose == "music_edit") or packet.kind not in ("accepted", "cancelled")
+
+
+def output_media_for_worker(packet: OutputMediaPacket) -> bool:
+    """Filter unused native audio frames while preserving legacy media subscriptions."""
+    return not (packet.purpose.startswith("separation_") or packet.purpose == "music_edit") or packet.kind in ("accepted", "cancelled", "transport_failed")
 
 
 class OutputMediaPacket(CamelCaseModel):
@@ -35,7 +59,9 @@ class OutputMediaPacket(CamelCaseModel):
 
     source_node: NodeId = Field(description="Node originating this directed frame.")
     target_node: NodeId = Field(description="Node that must consume this frame.")
-    command_id: CommandId = Field(description="Generation command the media belongs to.")
+    command_id: CommandId = Field(
+        description="Generation command the media belongs to."
+    )
     model: ModelId = Field(description="Model that produced the media.")
     purpose: OutputMediaPurpose = Field(description="Artifact carried by this stream.")
     sequence: int = Field(
@@ -100,13 +126,19 @@ class OutputMediaPacket(CamelCaseModel):
             raise ValueError("output media terminal must not carry bytes")
 
         if self.kind == "completed":
-            if self.total_chunks is None or self.total_bytes is None or self.sha256 is None:
+            if (
+                self.total_chunks is None
+                or self.total_bytes is None
+                or self.sha256 is None
+            ):
                 raise ValueError(
                     "output media completion requires total_chunks, total_bytes, "
                     "and sha256"
                 )
             if self.sequence != self.total_chunks + 1:
-                raise ValueError("output media completion sequence must follow all chunks")
+                raise ValueError(
+                    "output media completion sequence must follow all chunks"
+                )
         elif self.kind not in ("opened", "chunk") and any(
             value is not None
             for value in (self.total_chunks, self.total_bytes, self.sha256)

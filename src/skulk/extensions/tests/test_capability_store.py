@@ -1056,9 +1056,12 @@ async def test_store_upgrade_does_not_reset_after_switching_to_a_private_catalog
         CAPABILITY_STORE_CATALOG_URL + CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT
     )
 
+    # A signed revision must retain identical bytes across repeated downloads.
+    raw = _extended_catalog(store.publisher)
+
     def respond(request: httpx.Request) -> httpx.Response:
         if str(request.url) == extended_url:
-            return httpx.Response(200, content=_extended_catalog(store.publisher))
+            return httpx.Response(200, content=raw)
         return httpx.Response(404)
 
     catalog = HostCatalog(

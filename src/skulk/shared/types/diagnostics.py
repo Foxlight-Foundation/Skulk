@@ -6,6 +6,7 @@ from pydantic import ConfigDict, Field
 
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.native_music import NativeMusicMemoryObservation
 from skulk.shared.types.profiling import (
     DiskUsage,
     MemoryUsage,
@@ -100,6 +101,10 @@ class RunnerDiagnosticContext(CamelCaseModel):
     n_layers: int = Field(description="Total model layers.")
 
 
+def _native_music_memory_absent(value: object) -> bool:
+    return value is None
+
+
 class RunnerDiagnosticUpdate(CamelCaseModel):
     """One non-blocking runner-to-supervisor diagnostic update."""
 
@@ -128,6 +133,11 @@ class RunnerDiagnosticUpdate(CamelCaseModel):
     mlx_memory: MlxMemorySnapshot | None = Field(
         default=None,
         description="MLX memory snapshot captured with this update, when requested.",
+    )
+    native_music_memory: NativeMusicMemoryObservation | None = Field(
+        default=None,
+        exclude_if=_native_music_memory_absent,
+        description="Bounded live native observation for supervisor-owned ephemeral resource refresh; never retained as a flight-recorder entry or replicated event.",
     )
 
 
