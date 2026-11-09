@@ -4218,8 +4218,9 @@ Native ROCm requests synchronize the selected device and release unused Torch
 allocator cache before beginning the next admitted request. Live model tensors
 and the fixed memory ceilings remain in force. A native process failure is
 drained before its bounded, escaped stderr tail is attached to the private runner
-exception; public job failures keep their fixed path-free message. Device-ceiling
-diagnostics include the observed allocation and the admitted byte ceiling.
+exception's traceback notes; shared startup failures and public job failures stay
+path-free. Device-ceiling diagnostics include the observed allocation and the
+admitted byte ceiling.
 
 Native ACE base cards preserve `TextToMusic` and `MusicEditing` as intrinsic
 tasks. Their `[music.native]` profile binds the primary safetensors/config/latent

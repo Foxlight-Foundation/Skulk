@@ -2872,9 +2872,10 @@ reader, then publish expanded releases.
 - ROCm request admission returns the previous request's unused Torch allocator
   blocks after device synchronization; live weights and fixed memory limits are
   preserved. Native readiness/inference failures drain custody, then retain up
-  to 4 KiB of escaped private stderr in the local runner exception. Public job
-  errors remain path-free. Device-allocation refusals include measured/allowed
-  byte counts; they never credit allocations back into free capacity.
+  to 4 KiB of escaped private stderr in local exception traceback notes. Shared
+  startup state and public job errors remain path-free. Device-allocation refusals
+  include measured/allowed byte counts; they never credit allocations back into
+  free capacity.
 - `ModelTask.MusicEditing` accompanies `TextToMusic` only on native ACE base cards.
 - `MusicCardConfig.native`: variant `base`, 48 kHz stereo, closed unique editing
   modes/part classes, pinned text-encoder/tokenizer and autoencoder bundles.

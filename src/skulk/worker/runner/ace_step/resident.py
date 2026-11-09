@@ -536,13 +536,14 @@ class ResidentMusic:
         self._stop()
         # The stderr reader must finish before its final resource-guard message
         # is retained. Repr keeps native control characters out of log framing;
-        # the API still returns its fixed, path-free public failure message.
+        # bootstrap publishes str(error) as shared startup state, so private
+        # context belongs only in traceback notes, never in the public message.
         tail = self.diagnostic_tail
         if isinstance(error, NativeMusicProcessError) and tail:
-            raise NativeMusicProcessError(
-                f"{error}; native_exit_before_cleanup={observed_exit}; "
+            error.add_note(
+                f"native_exit_before_cleanup={observed_exit}; "
                 f"native_stderr_tail={tail!r}"
-            ) from error
+            )
 
     def _stop(self) -> None:
         self._stop_requested.set()
