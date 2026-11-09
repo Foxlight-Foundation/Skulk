@@ -3131,10 +3131,13 @@ the original indexed owner, including companions reached through a cached base.
   tail or 128-latent/245,760-sample minimum. Record `padding_frames_removed`,
   preserve the requested frame count, reject all other mismatches.
 - Source encoding: after initialization and before readiness, a typed
-  per-handler `tiled_encode` binding caps windows at 720,000 samples / 15s with
+  per-handler `tiled_encode` binding caps windows at 720,000 samples / 15s
+  (480,000 samples / 10s for explicit ROCm policy) with
   the pinned 96,000-sample / 2s overlap-discard default. Preserve shorter
   explicit chunks, codec computation and full context clock. Do not select
-  workspace from total device capacity or patch a global upstream class.
+  workspace from total device capacity or patch a global upstream class. The
+  smaller ROCm window preserves margin for repeated maximum-duration edits
+  without relaxing the admitted device ceiling.
   The same handler's typed `tiled_decode` binding caps windows at 256 latent
   frames / 10.24s. Re-evaluate native automatic sizing per decode, preserving
   low-memory/failed-query 128-frame choices and shorter explicit windows, native overlap/discard,
@@ -3142,11 +3145,23 @@ the original indexed owner, including companions reached through a cached base.
   memory cannot enlarge this instance's workspace. The complete output clock
   and live guard stay unchanged; exact-payload memory/fidelity qualification
   remains required.
+- ROCm encoding cache: before readiness, register a public `forward_pre_hook`
+  on the one loaded VAE encoder. Before each original window, synchronize
+  device zero and release only unused Torch allocations. Keep request-entry
+  reclamation as well: it cannot release blocks produced later in the request.
+  Preserve input tensors, parameters, codec math, windows, overlap and fixed
+  allocation ceilings. Failure propagates to normal resident retirement.
+  CPU/CUDA/Metal handlers do not install this per-instance hook. Exact sealed
+  package repetition and maximum-duration acceptance remain separate gates.
 - Package revisions: the published native ACE inventory pins build3. The
-  candidate producer uses build tag `4` and matching `Build: 4` WHEEL metadata
-  for request-boundary ROCm cache release. The reader accepts only the original
-  untagged and build1 through build4 forms; fixed inventory hashes select bytes
+  candidate producer uses build tag `5` and matching `Build: 5` WHEEL metadata
+  for per-window ROCm cache release. The reader accepts only the original
+  untagged and build1 through build5 forms; fixed inventory hashes select bytes
   independently. A producer revision does not publish or qualify a package.
+  `ace_step_package_revision` resolves provenance only for an exact fixed package
+  record; ROCm can advance while the five CPU/Metal/CUDA objects and their
+  producer revision stay intact. Inventory CI selects each profile's producer
+  separately and verifies its descriptor against that same record.
   Workflow consumes descriptor filenames and runs on inventory updates.
   Existing objects must never be overwritten.
 - Native failure: permanent model retirement, bounded terminal frame, dedicated

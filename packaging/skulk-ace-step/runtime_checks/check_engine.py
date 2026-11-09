@@ -104,6 +104,9 @@ class NativeEngineTests(unittest.TestCase):
             request.output_directory_identity,
         )
 
+    @unittest.skipUnless(
+        torch.version.hip is not None, "ROCm-specific installed adapter policy"
+    )
     def test_rocm_repeated_requests_release_idle_cache_before_generation(self) -> None:
         """Two controlled requests preserve weights/output and order idle reclamation."""
         values = self.configuration.model_dump(mode="json")
@@ -128,10 +131,12 @@ class NativeEngineTests(unittest.TestCase):
             ),
         ):
             first = self.engine.run(
-                check_support.request(self.engine.configuration, "first"), lambda _: None
+                check_support.request(self.engine.configuration, "first"),
+                lambda _: None,
             )
             second = self.engine.run(
-                check_support.request(self.engine.configuration, "second"), lambda _: None
+                check_support.request(self.engine.configuration, "second"),
+                lambda _: None,
             )
         self.assertEqual(
             events,
@@ -142,6 +147,9 @@ class NativeEngineTests(unittest.TestCase):
         self.assertIs(self.handler.model, model_before)
         self.assertEqual(first.output.sha256, second.output.sha256)
 
+    @unittest.skipUnless(
+        torch.version.hip is not None, "ROCm-specific installed adapter policy"
+    )
     def test_failed_rocm_cache_release_retires_before_any_generation(self) -> None:
         """A failed reclamation never continues with an unknown native memory state."""
         values = self.configuration.model_dump(mode="json")
@@ -151,7 +159,10 @@ class NativeEngineTests(unittest.TestCase):
         )
         with (
             patch("torch.cuda.synchronize"),
-            patch("torch.cuda.empty_cache", side_effect=RuntimeError("cache release failed")),
+            patch(
+                "torch.cuda.empty_cache",
+                side_effect=RuntimeError("cache release failed"),
+            ),
             self.assertRaisesRegex(RuntimeError, "cache release failed"),
         ):
             self.engine.run(

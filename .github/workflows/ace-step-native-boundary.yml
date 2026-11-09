@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      adapter_revision: ${{ steps.select.outputs.adapter_revision }}
+      adapter_revisions: ${{ steps.select.outputs.adapter_revisions }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,11 +66,13 @@ jobs:
           "$RUNNER_TEMP/inventory-tools/bin/python" -B - <<'PY'
           import json, os
           from pathlib import Path
-          from skulk.provisioning.ace_step_inventory import ACE_STEP_ADAPTER_REVISION, ACE_STEP_PACKAGES
-          plan = {"adapter_revision": ACE_STEP_ADAPTER_REVISION, "packages": [p.model_dump(mode="json") for p in ACE_STEP_PACKAGES]}
+          from skulk.provisioning.ace_step_inventory import ACE_STEP_PACKAGES, ace_step_package_revision
+          plan = {"packages": [p.model_dump(mode="json") | {"adapter_revision": ace_step_package_revision(p)} for p in ACE_STEP_PACKAGES]}
+          revisions = {p.platform_tag + "/" + p.variant: ace_step_package_revision(p) for p in ACE_STEP_PACKAGES}
+          assert len(revisions) == len(ACE_STEP_PACKAGES) == 6
           (Path(os.environ["RUNNER_TEMP"]) / "native-inventory/inventory.json").write_text(json.dumps(plan, sort_keys=True) + "\n")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write("adapter_revision=" + ACE_STEP_ADAPTER_REVISION + "\n")
+              output.write("adapter_revisions=" + json.dumps(revisions, sort_keys=True) + "\n")
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -121,8 +123,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # Producer provenance includes its Git revision. Explicit release
-          # candidates reproduce the inventory's adapter, never the newer reader.
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'build-inventory' && needs.inventory.outputs.adapter_revision || github.event.pull_request.head.sha || github.sha }}
+          # candidates reproduce this profile's adapter, never the newer reader.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'build-inventory' && fromJSON(needs.inventory.outputs.adapter_revisions)[format('{0}/{1}', matrix.target, matrix.variant)] || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
       - name: Select an output workspace outside the clean source checkout
@@ -205,7 +207,7 @@ jobs:
           selected = [p for p in plan["packages"] if p["platform_tag"] == os.environ["EXPECTED_PLATFORM"] and p["variant"] == os.environ["EXPECTED_VARIANT"]]
           assert len(selected) == 1, "the fixed inventory must contain exactly this profile"
           descriptor = json.loads(next((root / "first").glob("*.json")).read_text())
-          assert descriptor["adapter_revision"] == plan["adapter_revision"], "wrong producer revision"
+          assert descriptor["adapter_revision"] == selected[0]["adapter_revision"], "wrong profile producer revision"
           assert all(descriptor[key] == value for key, value in selected[0].items()), "candidate bytes differ from the fixed Core inventory"
           PY
       - name: Install fresh offline using Core's actual process supervisor

@@ -4216,7 +4216,19 @@ reader, then publish expanded releases.
 
 Native ROCm requests synchronize the selected device and release unused Torch
 allocator cache before beginning the next admitted request. Live model tensors
-and the fixed memory ceilings remain in force. A native process failure is
+and the fixed memory ceilings remain in force. Request-entry reclamation cannot
+release cache accumulated later in a long edit. Before readiness, the candidate
+ROCm adapter therefore installs a public forward pre-hook on that resident's
+VAE encoder, synchronizing and returning unused blocks before each original
+encoding window. Inputs, parameters, codec math, window size and overlap remain
+unchanged; CPU, CUDA and Metal handlers do not install this hook. Candidate
+package availability remains separate from exact-payload hardware acceptance.
+Each exact inventory package resolves its own pinned producer revision. An AMD
+repair can therefore advance the ROCm object while retaining the five already
+qualified CPU/Metal/CUDA objects and their original source provenance. Inventory
+CI reproduces each profile from its own source and matches the full descriptor
+before publication.
+A native process failure is
 drained before its bounded, escaped stderr tail is attached to the private runner
 exception's traceback notes; shared startup failures and public job failures stay
 path-free. Device-ceiling diagnostics include the observed allocation and the
@@ -4536,7 +4548,8 @@ the tail from that exact aligned extent or the decoder's 128-latent minimum
 the removed frames; other length mismatches fail.
 
 Before readiness, the native adapter binds only that resident handler's source
-encoder to at most 15-second windows (720,000 samples), retaining the pinned
+encoder to at most 15-second windows (720,000 samples), or 10-second windows
+(480,000 samples) for explicit ROCm policy, retaining the pinned
 2-second overlap-discard algorithm and any shorter explicit window. This avoids
 upstream's 30-second choice based on total GPU capacity rather than the admitted
 instance workspace. Codec computation and the full source clock stay upstream;

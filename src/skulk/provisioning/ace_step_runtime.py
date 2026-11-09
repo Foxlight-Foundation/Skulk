@@ -98,7 +98,7 @@ class AceStepWheel(FrozenModel):
             self.filename
             not in {
                 f"skulk_ace_step_{self.variant}-0.1.0{build}-cp312-cp312-{self.platform_tag}.whl"
-                for build in ("", "-1", "-2", "-3", "-4")
+                for build in ("", "-1", "-2", "-3", "-4", "-5")
             }
             or self.size_bytes > native_package_limits(self.variant).package_bytes
             or self.variant == "cpu"

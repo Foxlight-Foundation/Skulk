@@ -17,6 +17,8 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from .contracts import NativeMusicDevice
+
 
 class NativeHandler(Protocol):
     """The instruction formatter used by the closed Skulk operation adapter."""
@@ -125,6 +127,7 @@ class HandlerFactory(Protocol):
 
 _MODEL_ACQUISITION_HOOK: Final = "_ensure_models_present"
 _MAXIMUM_ENCODING_FRAMES: Final = 15 * 48000
+_MAXIMUM_ROCM_ENCODING_FRAMES: Final = 10 * 48000
 _ENCODING_OVERLAP_FRAMES: Final = 2 * 48000
 _MAXIMUM_DECODING_LATENT_FRAMES: Final = 256
 _AUTOMATIC_DECODING_POLICY: Final = "_get_auto_decode_chunk_size"
@@ -134,6 +137,7 @@ _AUTOMATIC_DECODING_POLICY: Final = "_get_auto_decode_chunk_size"
 @dataclass(frozen=True)
 class _BoundedSourceEncoder:
     original: SourceEncoder
+    maximum_frames: int
 
     def __call__(
         self,
@@ -142,13 +146,12 @@ class _BoundedSourceEncoder:
         overlap: int | None = None,
         offload_latent_to_cpu: bool = True,
     ) -> torch.Tensor:
-        # Upstream selects 30s from total GPU capacity, independently of this
-        # instance's admitted workspace. Its existing 15s overlap-discard path
-        # bounds each encode without replacing codec math or dropping context.
+        # Total GPU capacity cannot select this instance's admitted workspace.
+        # Bound the original overlap-discard codec without dropping context.
         bounded_chunk = (
-            _MAXIMUM_ENCODING_FRAMES
+            self.maximum_frames
             if chunk_size is None
-            else min(chunk_size, _MAXIMUM_ENCODING_FRAMES)
+            else min(chunk_size, self.maximum_frames)
         )
         return self.original(
             audio,
@@ -158,8 +161,10 @@ class _BoundedSourceEncoder:
         )
 
 
-def install_bounded_source_encoding(handler: LoadedHandler) -> None:
-    """Bound this loaded handler's encoding to 15s with native 2s overlap.
+def install_bounded_source_encoding(
+    handler: LoadedHandler, device: NativeMusicDevice = "cpu"
+) -> None:
+    """Bound source windows to 15s, or 10s on ROCm, with native 2s overlap.
 
     Shorter explicit chunks and explicit overlap/offload arguments survive.
     The original pinned callable still owns codec execution and geometry. This
@@ -168,7 +173,41 @@ def install_bounded_source_encoding(handler: LoadedHandler) -> None:
     """
     if handler.sample_rate != 48000:
         raise ValueError("native music encoding requires the pinned 48kHz clock")
-    handler.tiled_encode = _BoundedSourceEncoder(handler.tiled_encode)
+    # Repeated maximum-duration ROCm edits leave insufficient device margin
+    # with 15s windows even after cache reclamation. A smaller native window
+    # reduces workspace while retaining complete overlap-discard assembly.
+    maximum_frames = (
+        _MAXIMUM_ROCM_ENCODING_FRAMES if device == "rocm" else _MAXIMUM_ENCODING_FRAMES
+    )
+    handler.tiled_encode = _BoundedSourceEncoder(handler.tiled_encode, maximum_frames)
+
+
+def install_rocm_encoding_cache_release(
+    handler: LoadedHandler, device: NativeMusicDevice
+) -> None:
+    """Release unused ROCm allocations before each original encoder window.
+
+    Register a public forward pre-hook on this loaded VAE's encoder only.
+    Synchronization and cache-release failures propagate to normal resident
+    retirement. Inputs, live parameters, codec math and window policy survive
+    unchanged. CPU, CUDA and Metal handlers are not inspected or modified.
+    """
+    if device != "rocm":
+        return
+    if handler.vae is None:
+        raise ValueError("native ROCm encoding requires the initialized autoencoder")
+    encoder = handler.vae.get_submodule("encoder")
+
+    def release_unused_cache(
+        _module: torch.nn.Module, _arguments: tuple[object, ...]
+    ) -> None:
+        # A request can encode many windows after diffusion or prior encoding.
+        # Request-entry reclamation cannot release these later idle blocks;
+        # the kernel guard counts them against the same fixed device ceiling.
+        torch.cuda.synchronize(0)
+        torch.cuda.empty_cache()
+
+    encoder.register_forward_pre_hook(release_unused_cache, prepend=True)
 
 
 @final

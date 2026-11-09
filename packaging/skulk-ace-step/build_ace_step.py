@@ -34,9 +34,9 @@ from wheel_inputs import clean_revision, validate_dependency_closure
 from wheel_inputs import dependency_matches as _cpu_dependency_matches
 
 VERSION = "0.1.0"
-# Existing objects are immutable. ROCm request-boundary cache reclamation needs
-# build4 names while retaining the same distribution and control protocol.
-BUILD_TAG = "4"
+# Existing objects are immutable. Per-window ROCm cache reclamation needs
+# build5 names while retaining the same distribution and control protocol.
+BUILD_TAG = "5"
 MAX_OBJECT_BYTES = 768 * 1024**2
 ADAPTER_MODULES = frozenset(
     {

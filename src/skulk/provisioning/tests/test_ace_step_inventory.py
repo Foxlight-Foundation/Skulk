@@ -4,15 +4,68 @@ import pytest
 from pydantic import ValidationError
 
 from skulk.provisioning.ace_step_inventory import (
+    ACE_STEP_ADAPTER_REVISION,
     ACE_STEP_PACKAGES,
+    ace_step_package_revision,
     select_ace_step_package,
 )
 from skulk.provisioning.ace_step_runtime import AceStepWheel
 from skulk.shared.types.native_music import NativeMusicDevice
 
 
+def test_exact_package_provenance_can_advance_only_the_rocm_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An AMD repair preserves all five established CPU/Metal/CUDA sources."""
+    candidate_revision = "f" * 40
+    original_packages = tuple(
+        package.model_dump_json() for package in ACE_STEP_PACKAGES
+    )
+    monkeypatch.setattr(
+        "skulk.provisioning.ace_step_inventory.ACE_STEP_ROCM_ADAPTER_REVISION",
+        candidate_revision,
+    )
+    selected = {
+        package.filename: ace_step_package_revision(package)
+        for package in ACE_STEP_PACKAGES
+    }
+    assert sum(revision == candidate_revision for revision in selected.values()) == 1
+    assert all(
+        selected[package.filename]
+        == (
+            candidate_revision
+            if package.variant == "rocm"
+            else ACE_STEP_ADAPTER_REVISION
+        )
+        for package in ACE_STEP_PACKAGES
+    )
+    assert (
+        tuple(package.model_dump_json() for package in ACE_STEP_PACKAGES)
+        == original_packages
+    )
+
+
+@pytest.mark.parametrize(
+    "field", ["filename", "size_bytes", "sha256", "payload_sha256"]
+)
+def test_producer_provenance_refuses_a_modified_package_record(field: str) -> None:
+    """Known profile names alone cannot authenticate substituted package bytes."""
+    package = ACE_STEP_PACKAGES[0]
+    changes: dict[str, str | int] = {
+        "filename": package.filename.replace("-3-", "-5-"),
+        "size_bytes": package.size_bytes + 1,
+        "sha256": "f" * 64,
+        "payload_sha256": "e" * 64,
+    }
+    altered = AceStepWheel.model_validate(
+        package.model_dump() | {field: changes[field]}
+    )
+    with pytest.raises(ValueError, match="exact fixed inventory"):
+        ace_step_package_revision(altered)
+
+
 @pytest.mark.parametrize("package", ACE_STEP_PACKAGES)
-@pytest.mark.parametrize("build", ("", "-1", "-2", "-3", "-4"))
+@pytest.mark.parametrize("build", ("", "-1", "-2", "-3", "-4", "-5"))
 def test_reader_accepts_distinct_current_and_rollback_names(
     package: AceStepWheel, build: str
 ) -> None:
@@ -27,7 +80,7 @@ def test_reader_accepts_distinct_current_and_rollback_names(
     assert selected.url == "https://wheels.foxlight.ai/wheels/" + filename
 
 
-@pytest.mark.parametrize("build", ("-0", "-5", "-1foreign", "-../1"))
+@pytest.mark.parametrize("build", ("-0", "-6", "-1foreign", "-../1"))
 def test_reader_rejects_unimplemented_build_identities(build: str) -> None:
     """Accepting the next fixed build does not open arbitrary archive names."""
     package = ACE_STEP_PACKAGES[0]

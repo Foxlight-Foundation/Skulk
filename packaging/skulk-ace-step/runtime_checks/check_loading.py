@@ -134,6 +134,62 @@ class NativeLoadingTests(unittest.TestCase):
         self.assertEqual(resident.ready.execution.device, "cpu")
         self.assertNotEqual(handler.tiled_encode, original)
 
+    @unittest.skipUnless(
+        torch.version.hip is not None, "ROCm-specific installed adapter policy"
+    )
+    def test_loaded_rocm_handler_reclaims_each_window_after_readiness(self) -> None:
+        """The real load path installs a persistent hook before returning a handle.
+
+        Tiny CPU modules and controlled device observations exercise integration;
+        no accelerator allocation or model inference is claimed by this test.
+        """
+        api = native_api()
+        handler = api.handler()
+        handler.model = torch.nn.Linear(1, 1)
+        handler.text_encoder = torch.nn.Linear(1, 1)
+        handler.vae = torch.nn.Module()
+        encoder = torch.nn.Linear(1, 1)
+        handler.vae.add_module("encoder", encoder)
+        configuration = self.config.model_copy(update={"device": "rocm"})
+        execution = check_support.execution().model_copy(
+            update={
+                "device": "rocm",
+                "text_encoder_device": "rocm",
+                "autoencoder_device": "rocm",
+            }
+        )
+        with (
+            patch.dict(os.environ),
+            patch.object(
+                handler, "initialize_service", return_value=("fixture loaded", True)
+            ),
+            patch("skulk_ace_step.engine.probe_device", return_value="cuda"),
+            patch("skulk_ace_step.engine.observe_execution", return_value=execution),
+        ):
+            resident = load_music(
+                configuration,
+                "b" * 64,
+                self.progress.append,
+                runtime_root=self.fixture.runtime,
+                code=self.fixture.code,
+                api_loader=lambda: NativeAPI(
+                    handler=lambda: handler,
+                    constructors=api.constructors,
+                    generate=api.generate,
+                ),
+            )
+        self.assertEqual(resident.ready.execution.device, "rocm")
+        with (
+            patch("torch.cuda.synchronize") as synchronize,
+            patch("torch.cuda.empty_cache") as release,
+        ):
+            encoder(torch.ones((1, 1)))
+            encoder(torch.zeros((1, 1)))
+        self.assertEqual(
+            [call.args for call in synchronize.call_args_list], [(0,), (0,)]
+        )
+        self.assertEqual(release.call_count, 2)
+
     def test_real_initializer_admits_verified_view_through_a_parent_path_alias(
         self,
     ) -> None:
