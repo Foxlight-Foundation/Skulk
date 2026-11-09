@@ -205,9 +205,9 @@ def request(
     )
 
 
-def wait_file(path: Path) -> None:
-    """Bound synthetic-child observation without changing any production deadline."""
-    deadline = time.monotonic() + 5
+def wait_file(path: Path, *, timeout_seconds: float = 5.0) -> None:
+    """Observe a fixture checkpoint within a finite setup or active-phase budget."""
+    deadline = time.monotonic() + timeout_seconds
     while not path.exists():
         if time.monotonic() >= deadline:
             raise AssertionError(
@@ -248,7 +248,9 @@ owner.run(request(owner),progress=lambda _:None,is_cancelled=lambda:False)
     leader: psutil.Process | None = None
     descendant: psutil.Process | None = None
     try:
-        wait_file(tmp_path / "child.pid")
+        # This parent must import Core and start the native fixture before the
+        # fence-loss scenario begins. Keep the drain assertions below unchanged.
+        wait_file(tmp_path / "child.pid", timeout_seconds=120.0)
         leader = psutil.Process(int((tmp_path / "native.pid").read_text()))
         descendant = psutil.Process(int((tmp_path / "child.pid").read_text()))
         detached = [
@@ -722,15 +724,28 @@ def test_live_memory_refusal_cannot_advertise_a_native_model(
 
 
 def test_live_memory_flood_keeps_one_latest_sample_and_normal_terminals(
-    tmp_path: Path, interpreter: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    interpreter: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real stdout-to-diagnostic IPC drops pressure without filling generation terminals."""
     sender, receiver = mp_channel[RunnerDiagnosticUpdate](max_buffer_size=1)
     monkeypatch.setattr(diagnostic_module, "_diagnostic_sender", sender)
-    monkeypatch.setattr(diagnostic_module, "_diagnostic_context", RunnerDiagnosticContext(
-        node_id="node", runner_id="runner", instance_id="instance", model_id="controlled-native",
-        rank=0, world_size=1, start_layer=0, end_layer=1, n_layers=1,
-    ))
+    monkeypatch.setattr(
+        diagnostic_module,
+        "_diagnostic_context",
+        RunnerDiagnosticContext(
+            node_id="node",
+            runner_id="runner",
+            instance_id="instance",
+            model_id="controlled-native",
+            rank=0,
+            world_size=1,
+            start_layer=0,
+            end_layer=1,
+            n_layers=1,
+        ),
+    )
     owner = resident(
         tmp_path,
         interpreter,
@@ -742,11 +757,15 @@ def test_live_memory_flood_keeps_one_latest_sample_and_normal_terminals(
     try:
         owner.start(is_cancelled=lambda: False, timeout_seconds=5)
         assert owner.is_ready()
-        result = owner.run(request(owner), progress=lambda _progress: None, is_cancelled=lambda: False)
+        result = owner.run(
+            request(owner), progress=lambda _progress: None, is_cancelled=lambda: False
+        )
         assert result is not None and result.request_id == "take"
         update = receiver.receive()
         assert update.native_music_memory is not None
-        assert update.native_music_memory.process_id == int((owner.workspace.root / "native.pid").read_text())
+        assert update.native_music_memory.process_id == int(
+            (owner.workspace.root / "native.pid").read_text()
+        )
         assert update.native_music_memory.payload_sha256 == "c" * 64
         assert update.context.pid == os.getpid()
         assert update.event == "native_music_memory" and not update.attrs

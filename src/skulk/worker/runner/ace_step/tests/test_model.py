@@ -353,6 +353,7 @@ def test_load_verifies_actual_data_and_binds_complete_policy_before_readiness(
         assert ready.execution == model.policy.execution
         assert factory.resident is not None
         assert len(factory.resident.configuration.weights.text_encoder.files) == 9
+        assert factory.resident.configuration.generation_timeout_seconds == 7200
         model.start(is_cancelled=lambda: False)
         assert factory.calls == 1
         factory.resident.live = False

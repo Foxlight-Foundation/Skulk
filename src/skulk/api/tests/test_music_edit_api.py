@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import anyio
@@ -17,6 +18,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+import skulk.api.music_edit_api as music_edit_api
 from skulk.api.music_edit_api import MusicEditAPI
 from skulk.api.music_edit_media import MusicEditMediaStore
 from skulk.api.operator_gateway import OperatorGatewayAuthorization, _required_scopes
@@ -345,6 +347,79 @@ async def terminal(client: httpx.AsyncClient, identifier: str) -> MusicEditResou
             if actual.status in {"completed", "failed", "cancelled"}:
                 return actual
             await anyio.sleep(0.01)
+
+
+@pytest.mark.parametrize("elapsed_seconds", [3600, 7201])
+async def test_render_budget_allows_slow_cpu_edits_but_expires_without_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, elapsed_seconds: int
+) -> None:
+    """Keep a placed edit past forty minutes, or cancel and drain at two hours."""
+    now = 100.0
+    real_time = music_edit_api.time.time
+    # Replace only this API's clock; AnyIO and source/media deadlines must keep
+    # their real clocks while actual HTTP, custody and cleanup effects run.
+    monkeypatch.setattr(
+        music_edit_api,
+        "time",
+        SimpleNamespace(monotonic=lambda: now, time=real_time),
+    )
+    async with fixture(tmp_path) as (harness, client):
+        accepted = await create(client)
+        identifier = CommandId(accepted.id)
+        await harness.task(identifier)
+        swept = anyio.Event()
+        expire_content = harness.api.expire_content
+
+        async def observe_sweep(timestamp: int) -> None:
+            await expire_content(timestamp)
+            swept.set()
+
+        monkeypatch.setattr(harness.api, "expire_content", observe_sweep)
+        now += elapsed_seconds
+        harness.api.tasks.start_soon(harness.api.sweep)
+        with anyio.fail_after(5):
+            await swept.wait()
+
+        if elapsed_seconds < 7200:
+            current = await client.get(f"/v1/music/edits/{accepted.id}")
+            assert MusicEditResource.model_validate_json(current.content).status == (
+                "in_progress"
+            )
+            assert not any(
+                isinstance(command, TaskCancelled) for command in harness.commands
+            )
+            data = await harness.render(identifier, media_first=True)
+            completed = await terminal(client, accepted.id)
+            assert completed.status == "completed" and completed.seed == 0
+            assert completed.output is not None
+            content = await client.get(f"/v1/music/edits/{accepted.id}/content")
+            assert content.status_code == 200 and content.content == data
+        else:
+            ended = await terminal(client, accepted.id)
+            assert ended.status == "failed" and ended.output is None
+            assert ended.error == (
+                "Music edit placement, render or media deadline expired."
+            )
+            assert (
+                sum(isinstance(command, TaskCancelled) for command in harness.commands)
+                == 1
+            )
+            assert identifier not in harness.api.active
+            assert harness.api.sources.ready_path(identifier) is None
+            assert not (harness.api.media.root / "wav" / accepted.id).exists()
+            assert harness.api.media.reserved_bytes() == 0
+            # Repeated cancellation is idempotent, and the timed-out job never
+            # creates another command or resumes a partial result.
+            response = await client.post(f"/v1/music/edits/{accepted.id}/cancel")
+            assert response.status_code == 200
+            assert (
+                sum(isinstance(command, TaskCancelled) for command in harness.commands)
+                == 1
+            )
+        assert (
+            sum(isinstance(command, MusicEditCommand) for command in harness.commands)
+            == 1
+        )
 
 
 @pytest.mark.parametrize("media_first", [False, True])

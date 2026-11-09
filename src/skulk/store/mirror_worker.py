@@ -10,12 +10,20 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Literal, final
 
-from foxlight_model_preservation.mirror import model_action, run_mirror
+from foxlight_model_preservation.mirror import (
+    configure_intake,
+    model_action,
+    run_mirror,
+    withhold,
+)
+from foxlight_model_preservation.mirror_announce import remove_peers
 from foxlight_model_preservation.mirror_intake import retain_local
 from foxlight_model_preservation.mirror_models import (
+    AnnouncePolicy,
     MirrorObservation,
     SourceGrant,
     Terms,
+    at_least,
 )
 from foxlight_model_preservation.mirror_native import configure
 from foxlight_model_preservation.mirror_prune import prune
@@ -199,11 +207,27 @@ def _configure(request: MirrorWorkerRequest, ledger: MirrorLedger) -> None:
         raise ValueError("configuration required")
     if configuration.ipfs and request.runtime is None:
         raise ValueError("qualified peer runtime required")
+    # The ledger announces only a configuration whose disclosure was recorded
+    # with it. Without one the address is saved in Core's configuration but no
+    # card, DHT announcement or relay publication happens.
+    announce = (
+        AnnouncePolicy(
+            public_url=configuration.public_url,
+            dht=configuration.announce_dht,
+            nostr=configuration.publish_nostr,
+        )
+        if configuration.public_url is not None and configuration.announces()
+        else None
+    )
     with ledger.service_lock():
         ledger.update(
             lambda state: state.model_copy(
                 update={
-                    "schema_version": "foxlight.mirror-state.v4",
+                    # Never lower a newer profile (v5 sources, v6 no-cap or
+                    # intake); the ledger raises itself to v6 when needed.
+                    "schema_version": at_least(
+                        state.schema_version, "foxlight.mirror-state.v4"
+                    ),
                     "name": configuration.name,
                     "disk_bytes": configuration.disk_bytes,
                     "ingress_daily": configuration.ingress_daily,
@@ -214,11 +238,16 @@ def _configure(request: MirrorWorkerRequest, ledger: MirrorLedger) -> None:
                     else "127.0.0.1",  # noqa: S104
                     "port": configuration.port,
                     "http_enabled": configuration.http,
+                    "announce": announce,
+                    "follow_withdrawals": configuration.follow_withdrawals,
                     "paused": True,
                     "restart": None,
                 }
             )
         )
+    if announce is None:
+        # Withdraw any earlier signed card; it lapses rather than lingering.
+        remove_peers(MirrorLedger(request.mirror_path))
     # Native configuration retains its independently enrolled caches. Use the
     # normal ledger after our intentional policy change; any partial failure
     # leaves the role paused with no standing grant, never serving old choices.
@@ -355,10 +384,26 @@ def run_mirror_worker(request: MirrorWorkerRequest) -> int:
         elif decision.kind == "revoke_resume":
             with ledger.service_lock():
                 ledger.update(lambda state: state.model_copy(update={"restart": None}))
+        elif decision.kind == "intake":
+            # The core refuses beside a running controller (service lock) and
+            # clears the restart grant on any effective change; a change only
+            # to the withheld list keeps it and blocks/unblocks those copies.
+            configure_intake(
+                ledger, decision.intake.core() if decision.intake else None
+            )
         elif decision.kind == "model":
             if decision.manifest_id is None or decision.action is None:
                 raise ValueError("model action required")
-            model_action(ledger, decision.manifest_id, decision.action)
+            if decision.action in {"withhold", "release"}:
+                # Narrowing only: never changes what the grant covers, and keeps
+                # standing intake from re-admitting the copy while withheld.
+                withhold(
+                    ledger,
+                    decision.manifest_id,
+                    withheld=decision.action == "withhold",
+                )
+            else:
+                model_action(ledger, decision.manifest_id, decision.action)
         else:
             if decision.manifest_id is None or decision.confirm_delete_manifest is None:
                 raise ValueError("exact deletion identity required")

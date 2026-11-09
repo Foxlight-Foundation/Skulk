@@ -55,7 +55,9 @@ os._exit(0)
             stage,
         ],
         check=True,
-        timeout=15,
+        # Cold imports of the strict task/source schemas are fixture setup;
+        # the native reader's five-second reclaim bound below stays separate.
+        timeout=120,
     )
     return int((root / "reader.pid").read_text()) if reader else None
 
@@ -110,9 +112,9 @@ def test_replacement_worker_waits_for_actual_native_reader_before_reclaiming(
     native = crashed_owner(tmp_path, reader=True)
     assert native is not None
     owner = store(tmp_path)
-    original = tmp_path / "inputs/prior/original.wav"
-    before = original.read_bytes()
     try:
+        original = tmp_path / "inputs/prior/original.wav"
+        before = original.read_bytes()
         assert owner.unresolved_source_count() == 1 and owner.recover_stale() == 0
         assert original.read_bytes() == before
         for index in range(3):

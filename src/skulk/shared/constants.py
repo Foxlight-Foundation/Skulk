@@ -1,8 +1,12 @@
 import os
 import sys
 from pathlib import Path
+from typing import Final
 
 from skulk.utils.dashboard_path import find_dashboard_optional, find_resources
+
+NATIVE_MUSIC_RENDER_SECONDS: Final = 2 * 60 * 60
+"""Finite shared API, native cooperative and runner hard render ceiling."""
 
 
 def _env(key: str, default: str | None = None) -> str | None:

@@ -71,46 +71,58 @@ async def available_selection(
 
 
 async def retained(tmp_path: Path) -> tuple[PreservationHost, str, TrustProfile, bytes]:
-    """Retain a genuine signed closure, then destroy input and original copy records."""
+    """Prepare a real signed closure and transfer its owner only after success.
+
+    Cold worker imports and verified archive work use a separate finite fixture
+    allowance. Failed setup drains its real owner before propagating the error.
+    """
     owner = empty_host(tmp_path)
-    configured = await owner.mirrors.start(
-        MirrorRequest(
-            owner_id="library",
-            operation_id="configure",
-            kind="configure",
-            configuration=configuration(),
+    try:
+        configured = await owner.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="configure",
+                kind="configure",
+                configuration=configuration(),
+            )
         )
-    )
-    assert (await settled(owner, configured.job_id)).state == "succeeded"
-    source, identity, trust = archive(tmp_path)
-    wrapper = (source / manifest_path(identity)).read_bytes()
-    kit = tmp_path / "input.foxkit"
-    export_kit(source, identity, trust, kit)
-    copy = await import_copy(owner, kit.read_bytes())
-    selected = await available_page(owner)
-    job = await owner.mirrors.start(
-        MirrorRequest(
-            owner_id="library",
-            operation_id="retain",
-            kind="retain",
-            policy_id=selected.policy_id,
-            copy_id=copy.copy_id,
-            manifest_id=identity,
-            confirm_redistribution=True,
+        assert (
+            await settled(owner, configured.job_id, timeout_seconds=120)
+        ).state == "succeeded"
+        source, identity, trust = archive(tmp_path)
+        wrapper = (source / manifest_path(identity)).read_bytes()
+        kit = tmp_path / "input.foxkit"
+        export_kit(source, identity, trust, kit)
+        copy = await import_copy(owner, kit.read_bytes(), timeout_seconds=120)
+        selected = await available_page(owner)
+        job = await owner.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="retain",
+                kind="retain",
+                policy_id=selected.policy_id,
+                copy_id=copy.copy_id,
+                manifest_id=identity,
+                confirm_redistribution=True,
+            )
         )
-    )
-    assert (await settled(owner, job.job_id)).state == "succeeded"
-    location = owner.journal.setting("location:" + copy.location_id)
-    assert isinstance(location, dict) and isinstance(location["path"], str)
-    shutil.rmtree(Path(location["path"]))
-    with closing(
-        sqlite3.connect(owner.root / "journal.sqlite3", isolation_level=None)
-    ) as connection:
-        _ = connection.execute("DELETE FROM copies WHERE id=?", (copy.copy_id,))
-    for path in (source, tmp_path / "model", tmp_path / "tokenizer"):
-        shutil.rmtree(path)
-    kit.unlink()
-    return owner, identity, trust, wrapper
+        assert (
+            await settled(owner, job.job_id, timeout_seconds=120)
+        ).state == "succeeded"
+        location = owner.journal.setting("location:" + copy.location_id)
+        assert isinstance(location, dict) and isinstance(location["path"], str)
+        shutil.rmtree(Path(location["path"]))
+        with closing(
+            sqlite3.connect(owner.root / "journal.sqlite3", isolation_level=None)
+        ) as connection:
+            _ = connection.execute("DELETE FROM copies WHERE id=?", (copy.copy_id,))
+        for path in (source, tmp_path / "model", tmp_path / "tokenizer"):
+            shutil.rmtree(path)
+        kit.unlink()
+        return owner, identity, trust, wrapper
+    except BaseException:
+        await owner.close()
+        raise
 
 
 def app(owner: PreservationHost) -> FastAPI:

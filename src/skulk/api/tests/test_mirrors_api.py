@@ -27,9 +27,15 @@ from skulk.store.tests.test_mirror_worker import archive, configuration
 from skulk.store.tests.test_preservation_sharing import empty_host, import_copy
 
 
-async def settled(host: PreservationHost, identity: str) -> MirrorJob:
-    """Wait for the owned real child, without simulating a worker receipt."""
-    async with asyncio.timeout(30):
+async def settled(
+    host: PreservationHost, identity: str, *, timeout_seconds: float = 30
+) -> MirrorJob:
+    """Return real terminal state within the caller's fixture allowance.
+
+    Cold archive fixtures may explicitly allow longer interpreter startup;
+    existing active-operation callers retain their thirty-second default.
+    """
+    async with asyncio.timeout(timeout_seconds):
         while True:
             job = host.mirrors.job(identity)
             if job.state not in {"queued", "running", "cancelling"}:
@@ -37,9 +43,15 @@ async def settled(host: PreservationHost, identity: str) -> MirrorJob:
             await asyncio.sleep(0.025)
 
 
-async def ready(host: PreservationHost, identity: str) -> MirrorJob:
-    """Wait for actual controller ownership/listening, not historical metadata."""
-    async with asyncio.timeout(30):
+async def ready(
+    host: PreservationHost, identity: str, *, timeout_seconds: float = 30
+) -> MirrorJob:
+    """Return actual owned listening state within an explicit setup allowance.
+
+    The default remains thirty seconds. A cold worker fixture can choose a
+    separate startup bound without changing active service or stop limits.
+    """
+    async with asyncio.timeout(timeout_seconds):
         while True:
             job = host.mirrors.job(identity)
             assert job.state in {"queued", "running"}, job
@@ -272,3 +284,102 @@ async def test_mirror_reads_authorize_before_host_or_worker_creation(path: str) 
         base_url="http://localhost",
     ) as client:
         assert (await client.get(path)).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_sharing_decisions_and_address_check_through_the_operator_api(
+    tmp_path: Path,
+) -> None:
+    host = empty_host(tmp_path)
+
+    async def provider() -> PreservationHost:
+        return host
+
+    app = FastAPI()
+    app.include_router(
+        create_preservation_router(provider, API.require_preservation_operator)
+    )
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1000))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://localhost"
+    ) as client:
+        try:
+            refused = await client.post("/preservation/mirror/check-address")
+            assert refused.status_code == 409
+            assert refused.json()["detail"] == "mirror_address_required"
+            settings = configuration().model_dump(mode="json") | {
+                "egress_daily": None,
+                "egress_monthly": None,
+                "public_url": "http://127.0.0.1:9",
+            }
+            response = await client.post(
+                "/preservation/mirror/jobs",
+                json={
+                    "owner_id": "library",
+                    "operation_id": "configure",
+                    "kind": "configure",
+                    "configuration": settings,
+                },
+            )
+            assert response.status_code == 202, response.text
+            job = MirrorJob.model_validate_json(response.text)
+            assert (await settled(host, job.job_id)).state == "succeeded"
+            page = MirrorPage.model_validate_json(
+                (await client.get("/preservation/mirror")).text
+            )
+            assert page.configuration is not None
+            assert page.configuration.egress_daily is None
+            assert page.announce_reasons == ("announce_disclosure_required",)
+            assert page.intake is None
+            assert page.usage is not None and page.usage.uploaded_today_bytes == 0
+            checked = await client.post("/preservation/mirror/check-address")
+            assert checked.status_code == 200, checked.text
+            assert checked.json() == {
+                "address": "http://127.0.0.1:9",
+                "outcome": "private_address",
+                "http_status": None,
+                "best_effort": True,
+            }
+            # JSON lists reach the strict policy contract as the Library sends them.
+            policy = {
+                "share": "eligible",
+                "licenses": ["apache-2.0", "mit"],
+                "definition": 1,
+                "withheld": [],
+            }
+            response = await client.post(
+                "/preservation/mirror/jobs",
+                json={
+                    "owner_id": "library",
+                    "operation_id": "intake",
+                    "kind": "intake",
+                    "policy_id": page.policy_id,
+                    "intake": policy,
+                },
+            )
+            assert response.status_code == 202, response.text
+            job = await settled(
+                host, MirrorJob.model_validate_json(response.text).job_id
+            )
+            assert job.state == "succeeded" and job.kind == "intake", job
+            raw = (await client.get("/preservation/mirror")).text
+            assert json.loads(raw)["intake"] == policy
+            page = MirrorPage.model_validate_json(raw)
+            invalid = await client.post(
+                "/preservation/mirror/jobs",
+                json={
+                    "owner_id": "library",
+                    "operation_id": "unknown-licence",
+                    "kind": "intake",
+                    "policy_id": page.policy_id,
+                    "intake": policy | {"licenses": ["unknown"]},
+                },
+            )
+            assert invalid.status_code == 422
+            # The Library negotiates "Standing intake" and "Uncapped uploads"
+            # from these generated schema facts.
+            schema = (await client.get("/openapi.json")).text
+            assert '"intake"' in schema and '"follow_withdrawals"' in schema
+            assert '"egress_daily":{"anyOf"' in schema.replace(" ", "")
+        finally:
+            await host.close()

@@ -2770,6 +2770,17 @@ not enter signed portable evidence or renew the explicit Resume grant.
   clears before work, while block/pin/accounting and recipient/registry trust
   stay separate. Lost clients observe the original durable job; restart never
   retries a recovery or deletes partial data.
+  Sovereign sharing decisions: `intake` (core `IntakePolicy`, fenced, refused
+  beside a controller), `follow_withdrawals` (operator-only configuration, off by default) and model
+  `acknowledge`/`withhold`/`release`. Nullable upload caps; announcements map to
+  core `AnnouncePolicy` only with a recorded disclosure. `offer_public_copy`
+  (called when a publish/receive/import completes) runs stop, covered retain
+  (`admitted_by: intake`) and resume under the unchanged grant, abortable by an
+  operator Stop and never replayed after restart. `check_address` is a bounded
+  best-effort fetch of the owner's own address.
+- `store/preservation_terms.py`: receive-plan `member_terms` and the pinned
+  core's `terms_review`; exact `accepted_terms` are checked and a core
+  `TermsAcceptance` is recorded in the reservation transaction before download.
 - `store/mirror_kits.py`: enrolled private preparation directories, durable
   intent/seal/removal receipts and fixed-name artifacts. Completed digest and
   descriptor fingerprint gate download; unexpected entries or changed identities
@@ -2951,7 +2962,11 @@ the original indexed owner, including companions reached through a cached base.
 - `api/music_edit_api.py`: six `/v1/music/edits` routes before dynamic music IDs,
   existing authentication plus operator inference scope, 256 KiB closed JSON
   multipart metadata/64 MiB source/180-second upload bounds, persisted seed,
-  placement/render/return deadlines, session interruption without replay.
+  45-second placement/two-hour placed-job/five-minute post-render return
+  deadlines, session interruption without replay. Expiry cancels the accepted
+  task and drains partial copies without resubmission.
+  `NATIVE_MUSIC_RENDER_SECONDS` keeps the API, configured native cooperative
+  timeout and runner hard render deadline at the same finite two-hour ceiling.
 - `audio_uploads.py` / `audio_source_delivery.py`: shared native audio multipart
   closure and joined bounded addressed original delivery. `AudioInputReceiver`
   shares the handshake with separate concrete task selectors and payload roles.

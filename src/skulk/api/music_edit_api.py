@@ -38,7 +38,7 @@ from skulk.api.types.music_edits import (
 )
 from skulk.routing.output_media import OutputMediaPacket
 from skulk.routing.vision_media import VisionMediaPacket
-from skulk.shared.constants import SKULK_MAX_CHUNK_SIZE
+from skulk.shared.constants import NATIVE_MUSIC_RENDER_SECONDS, SKULK_MAX_CHUNK_SIZE
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.types.audio_separation import source_from_wav
 from skulk.shared.types.chunks import ErrorChunk, MusicEditingChunk
@@ -600,7 +600,9 @@ class MusicEditAPI:
                 await self._fence_storage_locked()
                 return
             entry.task, entry.producer = task, producer
-            entry.deadline = time.monotonic() + 40 * 60
+            # CPU edits can outlast forty minutes; retain their owner through
+            # the same finite render budget used by the native runner.
+            entry.deadline = time.monotonic() + NATIVE_MUSIC_RENDER_SECONDS
 
     async def receive_source(self, packet: VisionMediaPacket) -> None:
         """Answer a placed worker's request; packets never manufacture task authority."""

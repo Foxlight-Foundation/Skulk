@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Protocol, final
 
 from skulk.provisioning.ace_step_runtime import PreparedAceStepRuntime
+from skulk.shared.constants import NATIVE_MUSIC_RENDER_SECONDS
 from skulk.shared.models.model_cards import MusicLyricRequirement
 from skulk.shared.models.native_music_memory import estimate_native_music_peak
 from skulk.shared.models.native_music_runtime import resolve_native_music_policy
@@ -277,6 +278,7 @@ class NativeMusicModel:
                     precision=self.policy.execution.precision,
                     memory_budget=self.memory_estimate.process_budget(),
                     threads=self.policy.threads,
+                    generation_timeout_seconds=NATIVE_MUSIC_RENDER_SECONDS,
                 )
                 try:
                     self._resident = self._create_resident(

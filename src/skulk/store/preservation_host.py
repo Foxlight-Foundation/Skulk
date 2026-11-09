@@ -70,6 +70,7 @@ from skulk.store.preservation_contracts import (
     InvitationPreview,
     InvitationRequest,
     KitUploadStatus,
+    PlanMemberTerms,
     PreservationCopy,
     PreservationJob,
     PreservationLocation,
@@ -116,6 +117,7 @@ from skulk.store.preservation_references import (
 )
 from skulk.store.preservation_references import read_model_reference as read_invitation
 from skulk.store.preservation_sharing import check_peer_space, require_public_bundle
+from skulk.store.preservation_terms import TermsRefusedError, plan_member_terms
 from skulk.store.preservation_uploads import KitUploads
 from skulk.store.preservation_work import (
     WORK_KINDS,
@@ -1275,10 +1277,20 @@ class PreservationHost:
             if request.kind == "receive"
             else None,
             resume_job_id=request.resume_job_id,
+            member_terms=self._member_terms(manifest)
+            if request.kind == "receive"
+            else (),
         )
         self._bounded_view(plan)
         self.journal.add_plan(plan, payload)
         return plan
+
+    @staticmethod
+    def _member_terms(manifest: Manifest) -> tuple[PlanMemberTerms, ...]:
+        try:
+            return plan_member_terms(manifest.members)
+        except TermsRefusedError as refused:
+            raise PreservationHostError(refused.code) from None
 
     @staticmethod
     def _destination_token(manifest_id: str, trust: TrustProfile) -> str:
@@ -1432,8 +1444,11 @@ class PreservationHost:
                     and getattr(request, field) != expected
                 ):
                     raise PreservationHostError("receive_resume_inputs_fixed")
+            original_manifest = invitation.manifest
+            if not isinstance(original_manifest, Manifest):
+                raise PreservationHostError("public_pmf_transport_unavailable")
             return self._delivery_review(
-                request, payload, invitation.manifest, location.trust, original.model_id
+                request, payload, original_manifest, location.trust, original.model_id
             )
         if request.upload_id is None:
             raise PreservationHostError("complete_invitation_required")
@@ -1442,6 +1457,11 @@ class PreservationHost:
         )
         trust = accept_invitation_keys(invitation, request.accepted_key_ids)
         manifest = invitation.manifest
+        if not isinstance(manifest, Manifest):
+            # The pinned core can now carry PMF archives over the network;
+            # Core's receive worker still keeps preservation-v1 public copies
+            # only, so a PMF invitation refuses before any review is bound.
+            raise PreservationHostError("public_pmf_transport_unavailable")
         peer_setup: str | None = None
         peer_private = False
         if request.allow_i2p:
@@ -2353,6 +2373,14 @@ class PreservationHost:
                                 }
                             )
                         )
+                        if (
+                            plan.kind in {"mirror_import", "publish", "receive"}
+                            and copy_id is not None
+                        ):
+                            # A newly kept public copy may join the persistent
+                            # mirror under its standing intake policy. This is
+                            # independent of the finished job and never fails it.
+                            self.mirrors.offer_public_copy(copy_id, result.manifest_id)
                         return
                     if plan.kind in {"kit_export", "recover"}:
                         if current.state == "cancelling" and plan.kind == "recover":

@@ -3988,6 +3988,17 @@ same pinned archive descriptor through actual child drain. Opaque/future card
 properties and full original evidence/companion closure stay on the standalone
 verification path, with no runtime card parsing or new registry authority.
 
+The mirror also holds the owner's Sovereign sharing choices. Upload caps are
+optional. A standing intake policy (share mode, licences, withheld copies) is
+part of what the restart grant covers, so when a publish, receive or import
+completes with a public copy the policy covers, Core itself stops the running
+resume controller, retains the copy and resumes it under the same grant; an
+operator Stop during those steps ends the admission and nothing replays after
+restart. An announced public address waits for a recorded disclosure. Catalog
+withdrawals are advisory unless the operator chooses to follow them. Receive
+plans carry each member's licence so restricted terms are accepted, and
+recorded, before any download.
+
 Exact retained-selection lookup and complete authenticated member review do not
 depend on Library import records or list pagination. Metadata reads never scan
 weight bytes. An explicit `prepare_kit` job can run beside the serving controller
@@ -4283,6 +4294,13 @@ without replay. `api/music_edit_media.py` uses the existing WAV assembler in a
 separate private root, checks PCM24/stereo/48 kHz geometry, size, digest and peak,
 and rechecks completed content on adoption. Results retain the 64 MiB/24-hour
 bounds; failed deletion retains its capacity charge.
+
+The edit API bounds placement to 45 seconds, the placed job to two hours to
+accommodate CPU execution under the native runner's hard deadline, and
+post-render delivery to five minutes. Expiry cancels the same accepted task,
+drains partial media and retains failed metadata without replay.
+`NATIVE_MUSIC_RENDER_SECONDS` also supplies the native process's existing typed
+cooperative timeout, avoiding a lower inner cutoff without changing its package.
 
 Both edit and separation metadata consumers retain the native task until the
 verified output acknowledgement drains (all four acknowledgements for stems).

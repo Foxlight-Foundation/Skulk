@@ -432,6 +432,11 @@ def receive_copy(
                     operation_id="receive",
                 )
         control.checkpoint()
+        if not isinstance(manifest, Manifest):
+            # Review refuses PMF invitations first; never publish one as v1.
+            raise PreservationError(
+                "public PMF transport is unavailable in Core receive"
+            )
         # The accounting receipt survives outside the immutable public copy until
         # the host records completion. A crash/retry restores it before any fetch.
         _move_accounting(work, staged, restore=False)

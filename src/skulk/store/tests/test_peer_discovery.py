@@ -493,6 +493,7 @@ async def test_cold_peer_source_to_complete_core_restore(
                         plan_id=plan.plan_id,
                         operation_id="cancel-before-receive",
                         accept_owner_capture=True,
+                        accepted_terms=("test-only",),
                     )
                 )
                 await receiver.cancel(cancelled.job_id)
@@ -558,6 +559,7 @@ async def test_cold_peer_source_to_complete_core_restore(
                             plan_id=plan.plan_id,
                             operation_id="receive",
                             accept_owner_capture=True,
+                            accepted_terms=("test-only",),
                         )
                     ).job_id,
                 )
@@ -827,6 +829,7 @@ async def test_active_receive_cancel_then_resume_with_replacement_contacts(
                         plan_id=plan.plan_id,
                         operation_id="original",
                         accept_owner_capture=True,
+                        accepted_terms=("test-only",),
                     )
                 )
                 work = receiver.root / "work" / job.job_id
@@ -1132,6 +1135,7 @@ async def test_one_file_core_sharing_to_cold_receive_and_complete_restore(
                         plan_id=receiving.plan_id,
                         operation_id="receive-file",
                         accept_owner_capture=True,
+                        accepted_terms=("test-only",),
                     )
                 ).job_id,
             )

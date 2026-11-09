@@ -7,6 +7,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Preservation supervision
+
+- Retain a completed mirror worker's final observation when an event-loop
+  delay overlaps the process-exit poll. Drain inherited pipe writers before
+  consuming the final record and EOF, while preserving bounded cancellation.
+
+### Native music editing
+
+- Allow slower CPU edits to remain active for the native runner's finite
+  two-hour render budget, including the configured native cooperative timeout.
+  Preserve separate placement and result-delivery
+  deadlines, terminal cleanup, cancellation and no-replay recovery.
+
 ### Native engine preparation
 
 - Explain insufficient worker disk space when native music or separation engine
@@ -67,6 +80,23 @@ This project records release notes here and mirrors public-facing notes in
   pinned object as unavailable instead of failing the download status processor.
 
 ### Model preservation
+
+- Bring Sovereign sharing to Core's persistent mirror. Upload caps are optional
+  (`null` is no cap; uploads are still counted and shown). A standing intake
+  policy keeps the owner's share mode and licence list on Core, and a newly kept
+  public copy it covers joins a running mirror under the existing grant with no
+  new consent; nothing joins while stopped, and private, withheld or uncovered
+  copies are left alone. Copies can be withheld and released without clearing
+  the grant. An announced public address waits for a recorded disclosure, the
+  page reports what is announced and why not, and a best-effort Check address
+  reads the owner's own address from this host only. Catalog withdrawals are
+  advisory by default; following them is an operator-only policy choice, and
+  blocking stays the operator's takedown. Receive plans list each member's
+  licence, and restricted or unidentified terms need explicit acceptance, which
+  Core records before any download. Not legal advice; a public mirror is not
+  anonymous. The standalone dependency moves to a core with licence families,
+  opt-in upload caps, standing intake and advisory withdrawal; Core still keeps
+  preservation-v1 public copies and refuses PMF invitations on receive.
 
 - Describe installed model inputs, outputs and reasoning from attributed registry
   claims in Library, using the installed file list for companion warnings. Exact

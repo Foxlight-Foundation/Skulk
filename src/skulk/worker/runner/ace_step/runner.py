@@ -14,6 +14,7 @@ from typing import Protocol, final
 
 from loguru import logger
 
+from skulk.shared.constants import NATIVE_MUSIC_RENDER_SECONDS
 from skulk.shared.types.chunks import ErrorChunk, MusicChunk, MusicEditingChunk
 from skulk.shared.types.events import (
     ChunkGenerated,
@@ -93,7 +94,7 @@ class BoundNativeMusicModel(Protocol):
         *,
         progress: Callable[[NativeMusicProgress], None],
         is_cancelled: Callable[[], bool],
-        timeout_seconds: float = 7200.0,
+        timeout_seconds: float = NATIVE_MUSIC_RENDER_SECONDS,
     ) -> MusicResult | None:
         """Return verified complete facts, or drain cancelled/failed native work."""
         ...
@@ -310,7 +311,7 @@ class Runner(ServedConcurrentDispatch):
                 task,
                 progress=progress,
                 is_cancelled=lambda: self._is_cancelled(task.task_id),
-                timeout_seconds=7200,
+                timeout_seconds=NATIVE_MUSIC_RENDER_SECONDS,
             )
             if generated is None:
                 retire = True

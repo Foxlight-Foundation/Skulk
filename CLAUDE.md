@@ -2758,6 +2758,16 @@ and never fetches, re-admits removed data or deletes partial files. Accepted job
 survive client loss; Core restart records interruption without replay. Clients
 negotiate this action independently through the request/job kind enum.
 
+Sovereign sharing on the persistent mirror: nullable upload caps; `intake`
+decisions keep the core `IntakePolicy` under the grant; `offer_public_copy`
+admits a covered new public copy with stop, retain (`admitted_by: intake`),
+resume and no new grant, never while paused/left or for private copies, and an
+operator Stop on any step aborts it. Announcements need a recorded disclosure.
+Withdrawals are advisory unless the operator-only `follow_withdrawals`
+configuration turns following on. Receive plans carry `member_terms`; `preservation_terms.py`
+checks exact `accepted_terms` and records the core `TermsAcceptance` before
+download.
+
 The existing stock-Kubo CI conformance step also exercises `test_mirror_native.py`
 with synthetic complete recovery, native-only startup and precise descendant
 checks after abrupt worker loss. No physical fleet or public privacy qualification
@@ -3001,6 +3011,9 @@ returns 503 without forgetting metadata, and unresolved orphan purge blocks edit
 storage readiness. `MusicEditAPI` registers six
 `/v1/music/edits` routes before legacy dynamic music IDs, under existing auth
 and operator inference scope. Multipart OpenAPI embeds the closed task schemas.
+`NATIVE_MUSIC_RENDER_SECONDS` shares a finite two-hour ceiling between the placed
+edit API owner, native cooperative configuration and runner hard deadline. The
+separate 45-second placement and five-minute post-render return limits remain.
 Shared upload/source-sender helpers and `AudioInputReceiver` keep original
 verification and cancellation joined. `MusicEditingChunk` carries path-free DATA
 provenance; `music_edit_source` and `music_edit` are addressed input/output media

@@ -358,6 +358,7 @@ async def test_real_i2p_core_source_receive_restart_and_offline_recovery(
                             operation_id="receive",
                             owner_id="library",
                             accept_owner_capture=True,
+                            accepted_terms=("test-only",),
                         )
                     ).job_id,
                 )
@@ -504,9 +505,16 @@ async def test_i2p_receive_stop_restart_and_exact_policy_resume(tmp_path: Path) 
                     operation_id="receive-i2p",
                     owner_id="library",
                     accept_owner_capture=True,
+                    accepted_terms=("test-only",),
                 )
             )
-            assert await asyncio.to_thread(blocked.wait, 10)
+            # Cold child startup is separate from active partial-data and
+            # cancellation deadlines; a terminal worker must still fail early.
+            async with asyncio.timeout(120):
+                while not blocked.is_set():
+                    current = host.journal.job(job.job_id)
+                    assert current.finished_at is None, current
+                    await asyncio.sleep(0.025)
             partials = host_root / "work" / job.job_id / "public-copy/.partial"
             async with asyncio.timeout(5):
                 while not any(p.stat().st_size > 0 for p in partials.glob("*")):
