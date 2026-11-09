@@ -33,6 +33,7 @@ from skulk.store.mirror_contracts import (
     MirrorConfiguration,
     MirrorIntake,
     MirrorJob,
+    MirrorPage,
     MirrorRequest,
     MirrorUsage,
 )
@@ -441,6 +442,18 @@ async def test_standing_intake_leaves_uncovered_withheld_and_stopped_copies_alon
         await host.close()
 
 
+async def available_mirror_page(host: PreservationHost) -> MirrorPage:
+    """Await a readable observation while retaining the production probe bound."""
+    async with asyncio.timeout(30):
+        while True:
+            page = await host.mirrors.page()
+            if page.available:
+                return page
+            # A bounded unavailable observation says nothing about ledger contents.
+            # Never wait for a particular model: available-but-empty must still fail.
+            await asyncio.sleep(0.025)
+
+
 @pytest.mark.asyncio
 async def test_withhold_release_and_withdrawal_advisories_never_take_down_alone(
     tmp_path: Path,
@@ -449,7 +462,7 @@ async def test_withhold_release_and_withdrawal_advisories_never_take_down_alone(
     try:
         policy = await configured(host)
         assert (await intake(host, policy)).state == "succeeded"
-        policy = (await host.mirrors.page()).policy_id
+        policy = (await available_mirror_page(host)).policy_id
         assert policy is not None
         copy, identity = await public_copy(host, tmp_path, "kept")
         retained = await decide(
@@ -465,7 +478,7 @@ async def test_withhold_release_and_withdrawal_advisories_never_take_down_alone(
             ),
         )
         assert retained.state == "succeeded", retained
-        page = await host.mirrors.page()
+        page = await available_mirror_page(host)
         assert page.policy_id == policy  # A covered copy keeps the policy.
         expires = await grant(host, policy)
 
@@ -486,7 +499,7 @@ async def test_withhold_release_and_withdrawal_advisories_never_take_down_alone(
                 ),
             )
             assert job.state == "succeeded", job
-            page = await host.mirrors.page()
+            page = await available_mirror_page(host)
             assert page.models[0].blocked is blocked
             assert page.models[0].withheld is blocked
             # The exact lookup projects the same withheld state as the page.
@@ -525,7 +538,7 @@ async def test_withhold_release_and_withdrawal_advisories_never_take_down_alone(
                 }
             )
         )
-        page = await host.mirrors.page()
+        page = await available_mirror_page(host)
         assert page.withdrawal_advisory_count == 1 and not page.follow_withdrawals
         (shown,) = page.withdrawal_advisories
         # Advisory by default: still served, not blocked, nothing taken down.
@@ -535,7 +548,7 @@ async def test_withhold_release_and_withdrawal_advisories_never_take_down_alone(
         await configured(
             host, configuration().model_copy(update={"follow_withdrawals": True})
         )
-        page = await host.mirrors.page()
+        page = await available_mirror_page(host)
         assert (
             page.follow_withdrawals and page.withdrawal_advisories[0].serving_withheld
         )
@@ -558,7 +571,7 @@ async def test_withhold_release_and_withdrawal_advisories_never_take_down_alone(
             ),
         )
         assert acknowledged.state == "succeeded", acknowledged
-        (shown,) = (await host.mirrors.page()).withdrawal_advisories
+        (shown,) = (await available_mirror_page(host)).withdrawal_advisories
         assert shown.acknowledged and not shown.serving_withheld
     finally:
         await host.close()

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shlex
 import subprocess
 import sys
 import threading
@@ -96,7 +97,14 @@ def _run(
             binary_dir.mkdir(parents=True)
             (binary_dir / "python").symlink_to(sys.executable)
             script = binary_dir / "vllm"
-            script.write_text(f"#!{binary_dir}/python\nprint('ready')\n")
+            # uv uses this shell trampoline for long or whitespace-containing
+            # interpreter paths; a raw Python shebang would be invalid there.
+            script.write_text(
+                "#!/bin/sh\n"
+                f"'''exec' {shlex.quote(str(binary_dir / 'python'))} \"$0\" \"$@\"\n"
+                "' '''\n"
+                "print('ready')\n"
+            )
             script.chmod(0o755)
         if "install" in arguments:
             assert "--require-hashes" in arguments and "--no-deps" in arguments
@@ -299,7 +307,11 @@ def test_first_use_publishes_only_verified_runtime_then_reuses_it_offline(
     )
     root = runtime.managed_vllm_root(recipe)
     assert binary == root / "venv/bin/vllm"
-    assert binary.read_text().startswith(f"#!{root}/venv/bin/python\n")
+    assert binary.read_text().startswith("#!/bin/sh\n")
+    assert (
+        f"'''exec' {shlex.quote(str(root / 'venv/bin/python'))} \"$0\" \"$@\"\n"
+        in binary.read_text()
+    )
     assert subprocess.check_output([str(binary)], text=True).strip() == "ready"
     assert runtime.managed_vllm_build(str(binary)) == recipe.build_identity
     assert runtime.managed_vllm_variant(str(binary)) == "cuda"

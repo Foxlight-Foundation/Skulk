@@ -14,6 +14,7 @@ import pytest
 import skulk.facts
 from skulk.facts.derive import BackendDerivation
 from skulk.shared.backends import (
+    ACE_STEP_COMPUTE_BACKENDS,
     backend_hardware_present,
     describe_backend_hardware,
     engine_of,
@@ -31,6 +32,27 @@ def test_make_backend_tag_is_compound() -> None:
     assert make_backend_tag("mlx", "metal") == "mlx-metal"
     assert make_backend_tag("mlx_audio", "metal") == "mlx_audio-metal"
     assert make_backend_tag("llama_cpp", "vulkan") == "llama_cpp-vulkan"
+    assert make_backend_tag("ace_step", "rocm") == "ace_step-rocm"
+
+
+def test_native_ace_vocabulary_does_not_invent_a_vulkan_implementation() -> None:
+    """The native package/runtime contract has exactly four explicit device lanes."""
+    assert engine_of("ace_step") == engine_of("ace_step-cuda") == "ace_step"
+    assert expand_engine_backends(frozenset({"ace_step"})) == ACE_STEP_COMPUTE_BACKENDS | {"ace_step"}
+    assert "ace_step-vulkan" not in ACE_STEP_COMPUTE_BACKENDS
+    assert not engine_supports_multi_node("ace_step")
+    assert platform_compatible_backends(
+        frozenset({"ace_step", "audio_cpp", "mlx", "ace_step-vulkan"}),
+        card_serves_vision=False, card_serves_music=True, card_has_native_music_profile=True,
+    ) == ACE_STEP_COMPUTE_BACKENDS
+
+
+@pytest.mark.parametrize("music", [False, True])
+def test_native_ace_cannot_load_a_non_native_card(music: bool) -> None:
+    """Broad engine declarations cannot send GGUF music or text to native ACE."""
+    assert not platform_compatible_backends(
+        expand_engine_backends(frozenset({"ace_step"})), card_serves_vision=False, card_serves_music=music,
+    )
 
 
 @pytest.mark.parametrize(

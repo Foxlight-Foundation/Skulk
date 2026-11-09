@@ -29,7 +29,12 @@ from skulk.store.tests.test_preservation_export import make_preservation_install
 
 
 async def wait_job(host: PreservationHost, job_id: str) -> None:
-    async with asyncio.timeout(20):
+    """Await a real fixture job's terminal journal state within two minutes.
+
+    Cold worker imports and durable archive I/O are part of fixture completion;
+    production cancellation and withdrawal deadlines are asserted separately.
+    """
+    async with asyncio.timeout(120):
         while host.journal.job(job_id).state in {"queued", "running", "cancelling"}:
             await asyncio.sleep(0.02)
 

@@ -77,6 +77,12 @@ change the separate telemetry, election or authority lanes.
 
 - **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `LOCAL_EVENT_RECEIPTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `AUTHORITY_MESSAGES`, `CONNECTION_MESSAGES`, `TELEMETRY`, `DATA`, `PROVIDER_DATA`, `REALTIME_AUDIO`, `SPEECH_MEDIA`, `TRACE_DATA`, `VISION_MEDIA`, and `OUTPUT_MEDIA`. Components subscribe by topic; every topic has a machine-checked control, authority, telemetry, or data plane assignment and payloads are validated Pydantic types.
 - **Telemetry plane** (`TELEMETRY` topic) carries last-write-wins readings that are *not* decisions: each node's `participation` role and `backends`, memory and system profile, observational identity/disk/rdma-ctl status, heartbeat, non-terminal model-download progress, and compact node-local artifact availability. A node-owned inventory service runs independently of the HTTP API (including under `--no-api`), publishes at startup and after storage/runtime transitions, and repairs every 60 seconds; a fixed entry ceiling and truncation flag keep it bounded. Detached records for read-only model roots receive one full hash verification per stable file-stat fingerprint, so periodic repair scans reuse process-local trust while any path, device, inode, size, modification-time, or change-time transition forces re-verification. Canonical card bodies, manifests, and the store catalog never ride telemetry: the store host advertises only its role, and API nodes synthesize canonical `store_local` locations while projecting additional `node_cache` copies from `TelemetryView`. Local receipt time establishes freshness; readings become partial after two publication intervals and are pruned with node membership. Local producers never wait for network capacity: a fixed 256-key admission map replaces older values for the same node/reading (download progress additionally keys by model), evicts the oldest distinct key only at the bound, and drains through a one-packet network queue. Telemetry then uses a dedicated gossipsub behavior and protocol with independent per-peer handler queues: transport isolation is structural, so a saturated control or election path cannot delay telemetry and telemetry fan-out cannot consume control or election capacity. Aggregate pressure is available at `GET /v1/diagnostics/telemetry`. Readings land in an in-memory `TelemetryView`, not event-sourced `State`; only download completion and failure remain durable. Attempt identities stop delayed progress on the independent protocol from overriding terminal/reset decisions, while `GET /state` overlays the live view to preserve the dashboard's wire shape. `GET /store/registry` exposes inventory coverage as `syncing`, `current`, `degraded`, or `unavailable`; this is operator/read truth only. Store reconciliation continues to query each node's `/store/storage` directly and verify identities and manifests before transferring bytes. The system profile includes a collector-agnostic accelerator block (GPU utilization, VRAM used and total, power, temperature, clock) normalized at each platform collector. Because the context-admission ceiling must be identical across ranks but telemetry is unordered, the master computes it once at placement time and stamps it onto the instance (`context_token_limit`). **Connectivity readings stay on the control plane**: `node_network`, the thunderbolt maps, and derived `thunderbolt_bridge_cycles` define the topology graph and therefore require ordered event-sourced state.
+  When telemetry repeatedly has no remote subscribers despite authenticated
+  connections for 30 seconds, the Rust transport also emits a counts-only warning
+  at most once per minute: connected peers, known telemetry peers, negotiated
+  protocol counts, topic subscribers, mesh peers and the local subscription flag.
+  This uses the normal warning log path without raw packet dumps; standalone
+  nodes with no remote connections stay quiet.
   Canonical locality does not depend on card resolution:
   `cache_inventory.store_nodes` identifies the live store hosts even when a
   legacy entry has not yet established exact installed-generation provenance.
@@ -225,6 +231,13 @@ phantom entries that the membership timeout, which only tracks nodes it
 has heard from, could never reap.
 
 ## Lifecycle of a request
+
+Worker replacement during an election joins the retiring worker's entire run,
+including startup before its task group exists. A pending retirement prevents a
+queued worker from starting; an in-flight startup read drains before cancellation
+finishes. Native owners and child tasks are cleaned up before the replacement
+can take over, so a fast cached startup cannot crash the node by cancelling an
+unstarted task group.
 
 This is the path a chat completion takes from HTTP through to SSE response:
 
@@ -1189,7 +1202,7 @@ support, so controllers must check live node support before and after submission
 
 ## Music engine admission
 
-Text-to-music cards use `TextToMusic` as their sole task and a typed `[music]`
+GGUF text-to-music cards use `TextToMusic` as their sole task and a typed `[music]`
 section, separate from speech's `[audio]` section. The initial MiniMax Music 3 Q4 and ACE-Step
 1.5 Turbo BF16 cards pin every required artifact at an immutable upstream
 revision. They declare no legacy compatible backend: each architecture,
@@ -1321,6 +1334,352 @@ If ordered task termination arrives without a terminal `MusicChunk`, a short
 grace deadline fails the job and releases its admission slot. A session reset
 closes in-flight music streams, and a create request waiting on that session
 fails instead of dispatching a command into the replacement session.
+
+## Source-separation native boundary (initiative)
+
+The native bootstrap command runner in `provisioning/native_install_process.py`
+owns a private session for each command. Its standard-library-only guardian
+retains the session leader and optional build lock after command completion,
+until the controller drains every descendant. Parent loss kills the complete
+group. Cancellation, per-command deadlines and bounded private output are part
+of this same boundary; an installer's successful exit cannot leave a writer
+behind. A frozen Core supplies its verified standalone Python for the guardian,
+and freezer hooks retain the guardian's exact source outside PYZ; an app launcher
+is never implicitly used as Python. This helper does not register preparation,
+cache recovery or readiness.
+If descendant drain fails, the runner retains its unreaped process handle and
+refuses another command. The owner can retry `drain()`; `quiescent` becomes true
+only after complete cleanup, allowing removal of new incomplete installation
+files without racing a writer or signalling a reused PID.
+The guardian catches TERM during group shutdown, keeping its watcher and lock
+until KILL; controller loss in that interval still stops resistant descendants.
+Its caught handler resets to default when the native command executes.
+
+The provisioning package resolves its established public exports lazily. Importing
+the dependency-light integrity and installer helpers does not initialize unrelated
+resident engines or require their dependency sets. Explicit legacy exports retain
+their original backing objects and signatures. Native CI checks cold helper
+imports in its small controller environment before exercising real processes.
+
+`provisioning/demucs_runtime.py` now supplies the owned `DemucsRuntimeCache`
+controller for the CPU package on all three targets and its optional Apple MPS
+probe. It checks the host ABI and independently pinned package/payload identities
+before execution, uses global disk and exact-build file fences, and installs at
+stable UUID paths. Offline reuse and recovery of complete unpublished generations
+repeat full source/interpreter/venv/import verification and a closed FP32 device
+probe. Atomic fsynced selection records are hints, never integrity authorities.
+Prior generations survive repair. Cancellation removes newly owned incomplete
+files only after confirmed process drain; failed drains retain the exact owner
+for retry or close. Free-disk reserve, download size/hash, generation count,
+command output and preparation/probe deadlines are bounded. Cleanup retry drains its original owner before
+reacquiring the cache fence, then preserves every generation with publication
+history. A private `published/<uuid>` marker is synced before selection changes;
+it protects against deletion, never authorizes cached code. This history remains
+when selection moves or disappears. Close waits at most five seconds for another
+preparation owner, retaining cleanup for explicit retry. Raw downloads check
+cancellation/deadlines on each transport read, without a MiB buffering delay.
+The controller is not yet connected to worker preparation, placement, a published inventory or
+loaded-model readiness. CUDA/ROCm package profiles and admission remain separate
+integration gates.
+
+`provisioning/demucs_manager.py` adds the persistent worker-lifetime preparation
+owner. It accepts only its fixed package inventory and actual host platform tags,
+serializes verification within the request's whole finite budget, and withdraws
+observations during revalidation or shutdown. An exact private runtime lookup
+does not install anything. Only successful byte/device verification publishes a
+library build; an actual model still needs a separate loaded-ready receipt.
+`worker/demucs_preparation.py` supplies bounded asynchronous ownership of up to
+four explicit requests. Cancellation joins the installation thread; shutdown
+joins all work before closing its cache. Failed cleanup retains the original
+manager and fence for retry. Shared-executor waiting consumes the original
+absolute request deadline; expired queued work cannot begin native effects.
+These components register no worker event handlers
+or resource provider yet. Published runtime generations remain retained when
+selection changes, so cache repair cannot delete a mounted interpreter.
+
+`worker/runner/demucs/model.py` binds an authoritative complete rank-zero
+placement to the prepared package, exact execution policy and staged loader
+root. It starts the real `ResidentSeparator` only on explicit load and observes
+current native liveness. Before inference it independently measures the bounded
+private original again and compares every source fact with the task. Native
+results use deterministic private command directories; paths never enter State.
+`worker/separation_sources.py` owns up to four private encoded input copies over
+the existing raw media assembler, including verified waiting/running sources.
+It accepts an authoritative nonterminal task, preserves identical opens, checks
+size/hash and decoded WAV facts before acknowledgement, and refuses unknown frames.
+Failed deletion retains capacity and ownership for retry. Shutdown requires
+resident readers to drain first; interrupted copies are not restartable jobs or
+user originals. Prior or unknown root entries continue to consume slots after a
+restart, without following symlinks or deleting foreign content. An already
+overfull root refuses with a bounded scan. Startup must prove ownership and prior
+reader drain before reconciling those entries and reopening the owner.
+Receiver-level State/owner/placement correlation remains required.
+Neither module registers bootstrap dispatch, addressed transport or HTTP routes.
+
+Protected runtime file/lock helpers live in `utils/runtime_files.py`; the old
+`extensions/runtime_files.py` path reexports the same functions and class. Engine
+preparation can use them without loading the plugin subsystem. There is no new
+engine plugin ABI or activation framework.
+
+Native separator load waits for the normal download gate and resolves the exact
+card against staged data or an installed-card-matched canonical Store location.
+With staging disabled, the Store index supplies a contained path hint for the
+bundle-qualified generation; a duplicate conventional alias is unnecessary.
+An index cannot admit a deleted alias, a different installed card or a path
+outside its Store root.
+Canonical Store paths remain read-only in download discovery and completion.
+Cache deletion independently permits only the default model directory and its descendants or a
+descendant of the actual downloader's node cache, even for an older writable
+status. Local Store ownership always overrides cache classification. Shared
+Store and other external search roots remain protected on non-Store workers
+too. Canonical removal uses the indexed Store lifecycle; ordinary default and
+staged caches remain deletable.
+The Worker's Store-direct separator preflight uses the same card-aware lookup
+before dispatching LoadModel. Default/staging fallbacks repeat the expected
+signed-card check, so they cannot undo a refused search result. Staged loading
+retains its existing current-catalog metadata-adoption transaction.
+Index access is an explicit loader opt-in. Both coordinator completion probes
+and the Worker's already-installed shortcut allow it only for separators whose
+actual downloader/Worker staging policy is disabled. This retains offline
+canonical reuse for that loader while staged and other cardless consumers must
+first enter the configured staging transaction. The coordinator reads the
+downloader's staging policy directly rather than retaining a separate flag.
+An explicit startup-completion candidate must also be discoverable in the
+loader's existing layout or use that Store-direct policy; byte completeness
+alone cannot bypass staging.
+
+`shared/models/separation.py` defines immutable native separator card metadata.
+`AudioSeparation` and `[separation]` must agree, selecting one exact safetensors
+object and real transformer geometry, with speech and music sections excluded.
+The registry derives `audio.separate` explicitly and `/v1/models` projects the
+same typed information. Reader vocabulary alone does not advertise a loaded runner.
+
+The separation execution foundation adds distinct frozen `AudioSeparation`
+command/task variants and a complete-manifest `SeparationChunk`. No source or
+result WAV enters replicated State or the event log. The master admits only a
+complete single-host rank-zero native model in `RunnerReady`, with an explicit build and
+bound execution policy. Master-local reservations span consecutive commands
+until indexed task creation applies; the applied task then holds that capacity.
+One model runs one separation at a time.
+
+For native editing and separation failures, the runner supervisor retains the
+public error from its ordered local runner pipe until the final failed status.
+It forwards one existing `TaskFailed` event with the diagnostic bounded to 1,024
+characters. The owning API can therefore settle the same failure even when
+indexed control arrives before DATA; delayed DATA cannot replace that terminal
+receipt. Cancellation, timeout and diagnostic-free failures retain their existing
+terminal handling.
+
+`shared/models/separation_runtime.py` resolves the implemented exact tensor and
+constructor by artifact identity, not repository name or tested hardware. A
+mirror with identical weights is still compatible. `demucs-{cpu,metal,cuda,rocm}`
+names native engine lanes; the separate `provisioning/demucs_inventory.py`
+inventory currently pins CPU packages for all three supported OS/CPU targets,
+with explicit MPS probing available in the Mac package. CUDA and ROCm need their
+own real dependency and admission profiles before they can be prepared.
+
+An installable package is not a ready backend. Both placement entry points
+require live verified backend/build resources, reject partial shards and stamp
+`separation_policy` alongside the build. The implemented workload uses FP32,
+two threads, the trained 7.8-second window and bounded sources up to 120 seconds.
+Its shared peak estimate accounts for decoded/canonical sources, native workspace,
+four result buffers and verification, rounded with a 3 GiB conservative reference
+floor. This is an engine/workload estimate, not a card-level universal memory
+requirement or hardware qualification. Ordinary and exact placement use the
+complete estimate; the worker repeats it and refuses absent or changed policy
+before loading. An explicit CPU lane uses host RAM even beside a discrete GPU.
+Its complete native assignment bypasses proportional text-layer allocation, so
+assignment construction cannot switch that decision to unrelated exhausted VRAM.
+No native backend is advertised and no mounted runner or preparation operation
+is registered by this foundation alone.
+
+These new replicated variants require every participant in the isolated
+validation segment to be upgraded before execution is enabled. Do not send them
+to older ordered-event readers; private native protocol compatibility does not
+establish replicated command/task compatibility. Production promotion needs its
+own recorded reader transition and installed acceptance.
+
+`worker/separation_input.py` defines the isolated original-input handshake over
+`VISION_MEDIA`, with explicit `payload="separation_source"`. A new `requested`
+frame is valid only for this role. After observing the authoritative local task,
+the selected worker asks its owning API for one raw WAV. This avoids assuming
+that source bytes and indexed task creation arrive in the same cross-plane
+order. Unknown/terminal/nonlocal/partial or ambiguous task assignments cannot
+admit source storage, and packet fields cannot select a new owner/model/path.
+Opened/chunk/completed frames may reorder; acknowledgement follows independent
+full WAV verification and a fresh live-task check. Planning must use the
+receiver's acknowledged-ready observation, not file existence alone.
+
+The receiver owns at most four input copies, a 180-second transfer budget,
+two-second request retries until open and bounded transport calls. Coroutine
+cancellation joins owned file threads; a late verification cannot acknowledge a
+cancelled task or overrun the deadline. Accepted-input duplicate/cancel frames
+cannot delete bytes a resident may already be reading. Normal task cancellation
+and actual resident drain precede explicit source release. Failed deletion keeps
+the original owner for retry. Neither bytes nor paths enter State or event logs.
+On the initiative, the Worker now constructs the source owner lazily after
+an authoritative local task, routes this role to its receiver and gates ordinary
+planning on acknowledged inputs. Existing image/reference handling remains
+separate. A recovered snapshot fails unowned interrupted native jobs instead of
+silently replaying an uncertain edit. Terminal State alone cannot release a
+source: the Worker waits for actual ready/drained runner observations or the
+inherited kernel reader fence. Shutdown detaches source custody without deleting
+potentially live originals. Upgrade all participating media readers before
+isolated validation; normal installed acceptance remains a release gate.
+
+The isolated native `worker/runner/demucs/runner.py` adapter accepts one
+worker-validated resident model and uses the existing bounded dispatcher. It
+admits one active separation and four queued tasks, explicitly loads and warms
+the model before publishing Ready, and emits only complete four-stem metadata.
+Cancellation drains native work before serial reload; a failed reload or dead
+process cannot become Ready through either completion or final-waiter
+cancellation. A complete verified render remains successful if preparing the
+next lifetime fails. Shutdown also cancels an in-progress reload. This adapter
+is selected by the private prepared bootstrap context. First-mount weight
+resolution waits for LoadModel; background package/device revalidation does not
+block planning for unrelated instances.
+
+`worker/separation_output.py` owns four bounded result sets. The Worker binds
+each complete manifest to its admitted source/owner and private reader root.
+Each fixed WAV receives independent facts/digest checks before bounded binary
+frames enter OUTPUT_MEDIA; the native result record stays private. A finite
+five-minute total delivery/ACK budget and five-second sends apply. Only exact
+owner/model/role/terminal acknowledgements release a role, and deletion waits
+for every owned sender/file effect to drain.
+Each role's ACK admits the next role. Separation API subscriptions accept forward output
+and failures; Worker subscriptions accept reverse control.
+The API sends ACKs and cancellation terminals in independent bounded tasks,
+so a second command's forward frame cannot block the first command's ACK.
+Each of four admitted jobs owns at most four role ACKs and one cancellation
+drain; its admission slot remains held until those senders join. Completion
+requires every role ACK to be admitted. The production separation sender
+propagates unavailable or broken channels and caller deadlines to this owner;
+a dropped final ACK fails the job even after all four files verify. Replayed
+completion terminals share DATA-manifest verification before acknowledgement;
+recording receipts retries settlement after earlier control tasks drain. These pure predicates
+run before their zero-buffer queues, preventing an ignored same-node echo or
+the next role from blocking the receiver that is still sending its ACK.
+Legacy video and generated-music subscriber admission is unchanged.
+Failed or foreign-content cleanup
+retains admission for retry. Source slots remain held through result settlement.
+The accepting API owner described below receives these roles. Native result
+directories get private inode receipts before any inference request. After a
+crash, source recovery first acquires the inherited reader fence and reclaims
+only that exact result inode and known WAV/metadata files. Unknown content,
+changed inodes and symlinks retain the source's admission slot; an empty
+pre-receipt mkdir gap can be recovered without deleting foreign content.
+
+The isolated `api/separation_jobs.py` lifecycle component owns a private,
+exclusively locked metadata index. Four jobs may be active and 64 retained,
+within a 1 MiB serialized bound. Source and result bytes remain outside it.
+The authoritative placed worker and original identity bind a complete manifest;
+render termination and four independently verified local stems are separate
+completion conditions. Its output receipt stays absent until all conditions
+hold, and content handlers must also require completed status. Partial results
+never become an individually downloadable completed job.
+
+The dependency-free `stem_from_wav` validator shares input container validation
+and measures encoded PCM24 stereo samples, geometry and complete-file digest.
+The native process supervisor compares the measured peak as well as byte and
+timebase identity with each declared stem. Large scans must run outside the API
+event loop. A valid silent estimated stem remains valid; content verification
+does not infer musical quality or the presence of a vocal performance.
+
+Transitions become visible only after a synced atomic write. If persistence is
+uncertain, the registry refuses further reads/writes until its owner reopens it.
+Restart fails interrupted jobs without exposing partial results; complete
+receipts remain subject to independent file adoption. Failure/cancellation is
+terminal, and unexpired complete results cannot be evicted merely to admit work.
+`api/separation_media.py` supplies separate private four-role output storage over
+the existing WAV assemblers. It reserves at most four active transfers per job
+set, four active jobs and 64 retained sets, with 64 MiB per file and 256 MiB per
+set. Filesystem admission deducts outstanding unwritten promises across all four
+roles from the shared free-space safety headroom; already written bytes are not
+charged again. Reordered chunks remain promised until they are written.
+Failed first-time initialization removes only its new empty directories under
+the ownership fence; retry repeats the required ancestor syncs.
+Committed-but-incomplete sets retain their active-job slot until all roles
+commit or the set is deleted. Identical repeated opens preserve progress. A late invalid file removes
+only that job's API result copies; originals and native output remain outside
+this owner's authority. Closed files receive independent digest, PCM24 stereo
+44.1 kHz, geometry and peak checks. File bytes, job/role directories and newly
+created storage-root links are synced before internal receipts.
+Restart adopts all four exact files or exposes none. Content access additionally
+requires the durable completed job and matching unexpired complete manifest.
+Partial results stay private even if every transfer has finished. Four new
+`OUTPUT_MEDIA` purposes identify drums, bass, other and vocals; existing
+video/music handlers ignore those purposes. The initiative's `api/separation_api.py` now connects this storage to six REST
+operations under `/v1/audio/separations`: create/list/retrieve/content/cancel/delete.
+It uses the existing host authentication boundary, normal command/DATA routing,
+addressed original requests and four-role output delivery. A lazy lifetime owner
+joins disk work and source senders before releasing its fences. Uploads have
+strict multipart fields, byte and concurrency bounds, a three-minute deadline,
+and explicit spool cleanup on disconnect. Results retain the original source
+identity; only the existing strict public projector exposes complete manifests.
+Download descriptors are acquired under the API owner lock before response
+headers, so deletion cannot truncate an opened download. The accepting node
+retains 64 metadata records and up to 2 GiB of content, expires content after
+24 hours, and fails interrupted jobs on restart without replay. Complete sets
+are independently adopted or invalidated on reopen. Native/public installed
+acceptance and normal publication remain release gates.
+
+The dependency-light `provisioning/demucs_package.py` is the shared package
+contract and integrity boundary. Standalone build tools use an explicit repository
+link rather than a duplicate validator; resident Core imports no build-tool code.
+Its fresh offline bootstrap receives an injected supervised command runner. Cache
+verification checks the sealed object, extracted source, complete standalone
+Python and links, venv configuration and all installed import bytes before
+execution. A mutable completion receipt cannot authorize reuse. These helpers do
+not register production cache orchestration, host/device readiness or placement.
+
+Native bootstrap commands and resident Demucs/ACE processes pair isolated
+Python's `-B` with inherited `PYTHONDONTWRITEBYTECODE=1`. A dependency's console
+helper can start another interpreter without the parent's command-line flags;
+it must not rewrite or inject bytecode into the verified interpreter/import
+tree. Cache verification still rejects changed files and never trusts generated
+bytecode as an alternative authority.
+
+The `shared/types/audio_separation.py` contract and
+`worker/runner/demucs/process.py` supervisor define an isolated HTDemucs job
+boundary. This component is not registered in model mounting, placement or REST;
+it does not advertise ready separation capacity. Existing music and speech
+requests retain their current contracts.
+
+`worker/runner/demucs/resident.py` owns the corresponding loaded-model lifetime.
+The isolated `--serve` process verifies exact weights and places the complete
+model on its explicit FP32 device before a ready frame reports actual installed
+payload/weight identities and fixed device/thread policy. Core compares those
+facts with its admitted pins. Serial correlated requests reuse that model;
+bounded newline records and replaceable progress keep terminal delivery separate.
+Absolute deadlines include control writes and independent four-WAV verification.
+Cancellation or a protocol, model or output failure withdraws readiness and drains
+the complete native group before incomplete-job deletion or inherited-fence
+release. Earlier completed files and original audio survive. Failed drain retains
+ownership/files for close retry. Idle liveness checks withdraw a stale ready
+receipt; worker polling/publication and resource admission remain separate work.
+The three-platform candidate workflow proves actual installed model reuse,
+in-flight cancellation/reload and controller-death fencing. Its short synthetic
+signals do not establish musical usefulness or full-workload admission limits.
+
+The candidate wrapper in `packaging/skulk-demucs/` verifies one pinned local
+safetensors artifact and bounded original WAV before normalized FP32 inference.
+It returns drums, bass, other and vocals as a complete aligned PCM24 stereo set
+at 44.1 kHz, with one common clipping-protection gain. The supervisor checks all
+four file identities and geometries; cancellation, deadline and resource refusal
+drain its owned process group before partial-file removal. JSON carries metadata,
+never audio samples. The native package README documents the separate runtime
+and its current packaging/admission boundary.
+
+Candidate packages contain the exact pinned standalone Python 3.12.13 archive,
+the closed adapter/library source, licenses and a complete target-specific hash
+lock of dependency wheels. The producer requires clean source revisions and
+emits deterministic package bytes plus complete object and payload identities.
+The three-platform CI installs these candidates into a fresh private environment
+with no package indexes or development import paths, checks expanded import code
+and native libraries against the original sealed wheels, and exercises actual
+CPU model loading/resampling/export. This validation tool does not implement the
+production engine cache or advertise readiness. Accelerator and full-workload
+qualification, engine admission and signed distribution remain separate gates.
 
 ## Speech serving
 
@@ -2398,6 +2757,14 @@ journal retains operation IDs, monotonic trust and interrupted generations.
 Cancellation of a waiting interface does not abandon owned installation work;
 only the fsynced completion marker publishes a staged generation. Staging never
 switches the active owner or changes cleanup state.
+Runtime envelopes 2 and 3 are accepted. Version two retains its original signed
+wire shape. Version three signs one to eight canonical `application_roots`
+distribution names so a capability can carry its own libraries in the isolated
+wheelhouse. The generic verifier checks that every root exists and that the
+dependency graph starting from those roots and launcher-provider wheels covers
+the exact signed inventory. Missing, incompatible, external-URL, extra-dependent
+or unreachable packages are refused before installation. No plugin or SDK is
+imported to inspect the graph, and no package resolver runs on the host.
 `runtime_integrity.py` seals installed files, permissions and interpreter identity.
 Cached verification refuses a missing or changed seal before private Python can
 execute startup code; runtime commands disable bytecode writes. The interpreter
@@ -3844,6 +4211,602 @@ revision below the accepted legacy revision is refused. Restart, a failed
 retained-document write or returning from a private catalog cannot restore
 legacy fallback. Introduce both catalogs using existing releases, deploy the
 reader, then publish expanded releases.
+
+### Native ACE model contract
+
+Native ROCm requests synchronize the selected device and release unused Torch
+allocator cache before beginning the next admitted request. Live model tensors
+and the fixed memory ceilings remain in force. A native process failure is
+drained before its bounded, escaped stderr tail is attached to the private runner
+exception; public job failures keep their fixed path-free message. Device-ceiling
+diagnostics include the observed allocation and the admitted byte ceiling.
+
+Native ACE base cards preserve `TextToMusic` and `MusicEditing` as intrinsic
+tasks. Their `[music.native]` profile binds the primary safetensors/config/latent
+selection and independently pinned text encoder/tokenizer and audio autoencoder
+bundles, with complete identities, sizes and loader roots. Model-repository Python
+is excluded; the runtime owns its implementation. `/v1/models` reports intrinsic
+variant, edit modes, part classes and native audio geometry. This is distinct from
+the audio.cpp GGUF artifact contract. Placement filters these native profiles out
+of existing runners, and worker startup rejects incompatible legacy/manual
+assignments explicitly. A card reader does not establish native execution or a
+new editing API. Absent native metadata preserves existing signed music bytes.
+`ModelCard.native_music_artifact_sources()` groups the complete data closure by
+exact repository/revision. Shared encoder/VAE sources transfer once as a required
+`music_component`; primary-source roles join the base transfer without replacing
+their loader roots. A base store Download completes only after every required
+source is verified. Installed sidecars, offline cache checks and preservation
+export/recovery use the same exact selection; missing components fail the request
+without stopping the download coordinator. A fixed receiver-owned preservation
+notice may accompany these data files; arbitrary repository files remain excluded.
+Byte custody does not advertise native runner readiness or remove placement guards.
+
+Each external native source has a data-only alias hashing its repository,
+immutable revision and complete grouped bundle identity. This key is shared by
+in-flight deduplication, store/staging paths, peer admission and preservation
+mapping. Exact data-equivalent owners can reuse it without rewriting the retained
+owner's card; each primary card independently supplies trust, loader roots and
+licenses. Different selections cannot share a task or mix files in one generation.
+Native primary transaction directories also bind their complete source group.
+Verified matching files can be linked into independent generations after original
+object-pin checks; deleting one alias does not delete another's directory.
+Legacy repository aliases remain exact-data read candidates and are blocked by
+deletion tombstones. Source resolution runs outside the coordinator event loop,
+including cached completion checks. Missing required files invalidate success;
+failed/cancelled replacements leave the previous canonical generation registered.
+Native completed-cache admission verifies retained digests and original object
+pins in a worker thread under the canonical publication fence. In-progress
+requests still deduplicate by exact selection. A shared source's retained owner
+is provenance: deleting that model preserves surviving owners' source discovery
+and preservation; deleting the source alias itself blocks automatic resurrection.
+Cache verification waits for the publication fence and hashes outside the short
+download-admission lock, then rechecks the selected status before returning.
+Unrelated admission and active-transfer cancellation remain available. Cancelled
+verification drains its file thread before releasing that fence. Pinned existing
+files are checked against their original object identity during download reuse:
+online retries replace corrupt bytes; offline reuse refuses them.
+Capacity admission verifies selected immutable pins before treating a same-size
+target as complete. Zero-byte members require an existing regular file before
+hash verification; absent empty members are created by the normal downloader.
+HTTP metadata must explicitly declare a nonnegative length; zero-byte Git/SHA
+objects are valid, while missing or invalid size headers remain rejected.
+Repairs cannot credit blocks retained by other hardlinks.
+Cancelled capacity checks drain before the transfer fence is released. Verified
+shared native cache reuse restores missing adjacent installed-card records from
+the original indexed owner, including companions reached through a cached base.
+
+### Native music editing job contract
+
+`shared/types/music_edits.py` defines closed, discriminated Add a part, Repaint
+and Continue inputs. Requests describe ranges in the measured original WAV's
+sample clock. Starts floor and ends ceil onto the native 48 kHz grid using
+integer arithmetic. Continue extends beyond the complete source; in-place edits
+retain its exact duration. Model-card modes, part classes, lyrics rules and the
+120-second ceiling constrain resolution. The accepting API owner supplies and
+persists one seed before dispatch; a restart never rerandomizes accepted work.
+
+`MusicEditing` commands/tasks carry immutable source geometry and digest, model,
+caption, lyrics, seed and resolved native extent. Original/result bytes and local
+paths stay outside replicated State. Master admission shares pending reservations
+between native generation and editing until indexed events apply. It requires a
+complete single-host model, idle `RunnerReady`, and the placed backend/build in
+current node resources. An installable package cannot satisfy that gate.
+
+`api/music_edit_jobs.py` owns a bounded durable edit index. Both it and separation
+use `api/media_job_storage.py` for exclusive lifetime ownership and durable file
+replacement. Uncertain writes fence reads until reopening. Completion requires
+the correlated native manifest, render finish, independently verified and synced
+local WAV, and a drained return acknowledgement. Restart fails interrupted jobs
+without replay. `api/music_edit_media.py` uses the existing WAV assembler in a
+separate private root, checks PCM24/stereo/48 kHz geometry, size, digest and peak,
+and rechecks completed content on adoption. Results retain the 64 MiB/24-hour
+bounds; failed deletion retains its capacity charge.
+
+The edit API bounds placement to 45 seconds, the placed job to two hours to
+accommodate CPU execution under the native runner's hard deadline, and
+post-render delivery to five minutes. Expiry cancels the same accepted task,
+drains partial media and retains failed metadata without replay.
+`NATIVE_MUSIC_RENDER_SECONDS` also supplies the native process's existing typed
+cooperative timeout, avoiding a lower inner cutoff without changing its package.
+
+Both edit and separation metadata consumers retain the native task until the
+verified output acknowledgement drains (all four acknowledgements for stems).
+Render metadata closes only its receiver; it cannot emit `TaskFinished` while
+the worker still owns result delivery. Failure and cancellation submit
+`TaskCancelled` before stream finalization so task deletion cannot race the
+still-running producer.
+
+The encoded source owner and crash journal accept read-only audio-task protocols
+so actual strict music tasks reuse separation's four-source bound and reader
+fences. Native result reclamation is injected per owner; ACE must supply its own
+ownership-aware result cleanup. `AudioInputReceiver` shares the admitted-source
+handshake while concrete separation/edit receivers keep their own task selectors
+and payload roles. `api/audio_uploads.py` and `audio_source_delivery.py` share
+bounded multipart parsing, spool closure and joined, hashed original delivery.
+
+`api/music_edit_api.py` registers six `/v1/music/edits` routes before the legacy
+dynamic music-ID route. The host applies its existing authentication boundary;
+the operator gateway requires inference scope for this route family. Closed
+request schemas are embedded in multipart OpenAPI metadata. A path-free
+`MusicEditingChunk` carries native provenance on DATA; `music_edit_source` on
+VISION_MEDIA and `music_edit` on OUTPUT_MEDIA carry addressed original/result
+bytes. API queues, generic cancellation, task failure and session replacement
+all include edits. Reverse ACK/cancellation sends run outside the result actor
+lock, and source/control drains retain admission until joined. Local routing
+filters reverse ACK echoes to prevent same-node rendezvous deadlock. Native
+resident/worker activation and Studio integration remain acceptance-gated.
+Cancellation submits its bounded `TaskCancelled` attempt before stream
+finalization can publish `TaskFinished`. A durable-index uncertainty fence
+cancels accepted work from retained identities, stops that service's sweeper and
+returns actionable HTTP 503 responses; unrelated host API tasks remain running.
+A separate bounded cleanup actor retains accepted identities and admission until
+original and partial-result stores both drain. It does not read the job index,
+so filesystem retries continue after an index fence retires the job sweeper.
+Terminal metadata and repeated cancellation cannot discard that ownership or
+resubmit native cancellation. Original-only cleanup preserves completed WAVs;
+delete returns 503 and keeps metadata while physical removal remains pending.
+The media owner also retries known content orphaned by metadata eviction and
+refuses startup readiness if best-effort orphan deletion left unaccounted bytes.
+
+### Native ACE package and process boundary
+
+`packaging/skulk-ace-step/` defines a separate Python 3.12 package family; Core
+and capability applications retain their own Python environments. The sealed
+format includes exact interpreter/dependency archives, a selected pinned library
+source inventory and explicit owned source-override provenance. Three reviewed
+implementation modules belong to that runtime, not the model repository. The
+shared `provisioning/demucs_package.py` verifier/bootstrap recognizes the two
+built-in audio layouts and checks their source/namespace ownership. Demucs cache
+preparation independently refuses an ACE package even when feature names match.
+
+Native package publication reproduces the fixed inventory's adapter Git revision,
+not whichever newer Core reader is being validated. That revision is part of
+the sealed payload identity. Explicit inventory builds compare both independent
+archives with the six reviewed package pins and retain hosted provenance. A
+separate same-source publication operation requires the complete fixed set,
+original sizes/digests, successful trusted workflow and hosted attestations,
+then reuses the append-only engine index publisher without rebuilding. New
+package availability does not advertise a ready device, load a model or grant
+hardware qualification. Model artifacts remain independent downloads.
+
+Before loading a model, the native CLI's distinct `--probe` mode executes native
+library math without model configuration, paths or downloads. Its strict
+`NativeMusicLibraryProbe` receipt identifies the actual installed payload and
+executed device/precision policy. It is separate from `NativeMusicReady`, which
+additionally binds model identity and observed loaded components. CUDA policy
+uses BF16 from compute capability 8 and FP16 before it, including when Torch
+reports emulated BF16 on earlier hardware. Explicit unavailable lanes fail.
+
+Native library preparation uses `provisioning/ace_step_runtime.py` and
+`ace_step_manager.py`. They retain exact package/payload pins, verify the complete
+cached interpreter and import tree before execution, and run the same weights-free
+probe under the install guardian's existing session/fence. The resident CLI is
+not nested inside that guardian. `demucs_runtime.py::SealedRuntimeCache` and
+`native_runtime_manager.py` share publication, cancellation, retained cleanup and
+observation lifetime with Demucs, whose CPU/Metal policy stays unchanged.
+Candidate availability does not appear in `engine_builds`; only successful actual
+preparation does, and loaded-model readiness remains independent.
+
+Native ACE and separator package preparation classify their known disk-reserve
+refusals into a path-free public error asking the operator to free worker storage
+and retry. The ordered completion remains unsuccessful with no ready resources;
+unknown exception details remain in worker logs. A fresh request can retry on
+the same preparation owner after capacity recovers.
+
+Trusted storage profiles bound complete packages/installed trees to CPU 1/4 GiB,
+CUDA 4/8 GiB and ROCm 3/10 GiB. GPU dependency archive members are capped at
+768 MiB and expanded members at 1 GiB. Installed accounting includes both retained
+nested archives and expanded imports. Manifests cannot raise these Core-selected
+bounds. The ROCm raw Linux target makes no inferred complete GPU-library libc
+claim; its independently known Python 2.28 requirement is still enforced.
+The producer has separate exact CPU, Linux x86_64/ARM64 CUDA and Linux x86_64 ROCm
+inputs. The pure ROCm metapackage records original source/tool/epoch/target pins
+and is reproduced twice by `build_rocm_metapackage.py`; runtime installs only its
+sealed wheel. Its producer tool is independent of runtime dependencies.
+Only the fixed ROCm producer traverses declared dependency extras; each active
+extra must have a complete exact wheel closure. CPU/CUDA still refuse extras.
+The six native CI jobs cover three CPU targets, two Linux CUDA targets and Linux x86_64
+ROCm, with matching variant selection in the producer, stager and verifier.
+Hosted GPU-package jobs run CPU boundary checks; real accelerator probing and
+model qualification remain separate. Actual ABI/loader/device qualification remains required. These
+definitions do not yet register native worker placement or published inventory.
+
+Core observes and journals the private workspace, requests and loader inodes
+before admitting native writes. The model view is `workspace/loader`; results
+remain under `workspace/requests` with independent per-request receipts. The
+child requires the exact owned directories, an empty loader at initialization
+and an empty Core-created result inode at request admission. It never infers
+ownership from a plausible pathname or from completion after the writes.
+
+`worker/runner/ace_step/workspace.py` retains an inherited service fence across
+native execution. Only actual process-group drain or successful exclusive fence
+acquisition permits loader recovery. It validates the complete bounded view
+before deleting known partial model copies and private cache files; unexpected
+names, replaced inodes, links and incomplete removal refuse recovery. Results
+awaiting transport are neither walked nor removed by loader cleanup. Additional
+loader disk reservation accounts for all fourteen selected model files, three
+reviewed code copies capped at 2 MiB each and 256 MiB of dynamic caches; these
+disk bounds do not estimate resident or peak inference memory.
+
+The separate Core `ace_step/process.py` verifier checks private file ownership,
+bounded complete metadata, request/model/build/seed/execution lineage, actual
+PCM24 WAV digest/geometry/peak, the original WAV and aligned FLOAT conditioning.
+It does not repair or truncate files. Native attenuation is recorded provenance,
+not a property inferred from the finished waveform. These owned components
+remain distinct from complete Worker/bootstrap activation and installed acceptance.
+
+The Core resident supervisor in `ace_step/resident.py` takes the prepared workspace
+and starts one dedicated native session with inherited service/source-reader
+fences. It verifies model/payload/component readiness before exposing its ready
+receipt, admits one call at a time with contiguous sequence/correlation, and
+separates coalesced progress from bounded non-dropping terminal capacity. Its
+control writes are nonblocking and obey an absolute deadline; bounded private
+stderr is retained independently. Calls and idle supervision recheck actual
+process liveness, while an injected resource guard can retire loading/inference.
+Cancellation or failure drains the actual group and joins both pipe readers
+before removing the current partial result and temporary loader copies. Failed
+drain/deletion retains the owner for retry. Prior completed output and receipts
+survive cancellation, model close and subsequent loading; only independent
+delivery/custody owns their eventual removal. This process owner still needs the
+Worker preparation, shared peak-memory admission and Studio execution integration.
+
+`shared/models/native_music_layout.py` reads the optional all-three-role
+`music.native.tensor_layouts` contract. Counts and prefix digests describe exact
+serialized objects, not a universal memory requirement. The bounded projection
+retains scalar/empty tensors and refuses malformed shapes, duplicate keys,
+overflow, holes, overlaps and unindexed trailers. Absent metadata is omitted from
+serialization, preserving existing card identities. The data identity in
+`native_music_runtime.py` binds all three selected repositories, revisions,
+loader roots and file pins, independently of aliases, attribution corrections,
+header metadata, runtime build or tested hardware. Its execution policy binds
+the actual library probe and component dtype/device settings, two CPU threads
+and the card/global duration ceiling. Floating tensor state is projected at
+those effective precisions; unknown buffer/packed semantics stay unknown.
+Neither that projection nor the policy is a complete peak-memory estimate.
+
+The Core `ace_step/artifacts.py` observer rehashes every selected data file with
+bounded reads and cancellation checkpoints, including Git blob framing for
+metadata pins. Relative ancestors and final files are opened without symlink
+following; normal store hard links remain eligible. Header projection follows
+complete-file integrity and must agree with card/admitted facts. It neither
+imports Torch nor mutates model-store files. The native loader independently
+verifies its fresh copies before reading them.
+
+`ace_step/model.py::NativeMusicModel` binds one complete rank-zero single-host
+assignment, exact prepared runtime/build and `native_music_policy` captured on
+the shard. File/header/precision drift fails before loader creation or spawn.
+Absent optional header facts may be refined by verified observations without
+changing the admitted execution policy; declared geometry still must match.
+Loaded readiness must still match actual model/payload/component execution.
+One model actor covers inspection, result pre-write ownership and inference;
+concurrent close requests stop inspection and wait for that actor, preventing
+late spawn after shutdown. A separate short readiness handover joins an existing
+idle poll before submission; polls during inference use the last observed
+readiness instead of competing for the resident's request actor.
+Only closed `MusicGeneration`/`MusicEditing` fields
+reach the native protocol. Generation requires an already resolved seed; edits
+reverify the worker-private original and retain exact resolved native frame
+coordinates. Completed results remain in independent delivery custody; failed
+unsubmitted cleanup and native drain retain handles for retry. Failed pre-write
+preparation reclaims only its new empty directory and matching receipt.
+Failed rollback fences the
+model and retains the original parent/child identities for close retry;
+replacement directories or new content are preserved. This adapter is
+responsible for retaining that empty-result fallback until successful resident
+completion; early resident refusal cannot leave a handover gap. Close drains the
+resident before attempting fallback reclamation. This adapter is not yet
+activated by Worker placement. Native placement guards remain until
+shared peak-memory admission, resource publication and media execution are wired.
+
+The separate `ace_step/runner.py::Runner` connects a validated model binding to
+the shared runner dispatcher. Generation and editing share one active request
+and at most four admitted waiters. Load and warmup observe the actual resident;
+idle readiness is checked again after each task. Cancellation or native failure
+drains the retired binding before a factory supplies a fresh unloaded lifetime
+for the same placement. Failed replacement withdraws readiness after the task's
+terminal event, preserving completed renders already handed to output custody.
+The runner independently checks completion correlation, operation, seed and
+model/payload identity, and publishes only typed metadata. Closing a model never
+recursively removes completed result files. Worker placement does not yet supply this lifecycle adapter with its private
+prepared context. Preparation, shared peak-memory
+admission and end-to-end media execution remain required before activation.
+
+The native CLI arms a detached custody guardian before importing Torch or
+starting native threads. It retains the inherited service/source locks even if
+Core and the native leader both die; descendants need not preserve descriptors.
+An unreaped anchor in the original group prevents numeric group identity reuse.
+The guardian drains actual live members before releasing ownership. Core also
+waits for EOF on its private drain pipe before recovery; an uncertain or stalled
+drain retains files and locks for retry, including after the leader was reaped.
+
+The native CLI owns one loaded model and accepts bounded contiguous private
+requests. It verifies all three data components before importing constructors,
+probes the explicit compute lane, and observes each component's loaded device and
+precision. Canonical conditioning preserves the original WAV and records any
+headroom attenuation; the real upstream source tensor must equal the complete
+canonical samples. Generation, LEGO addition, repaint and padded-tail Continue
+use a closed adapter. PCM24 WAV/result metadata are exclusively written and
+synced before completion. Media remains in private files, never control frames.
+Conditioning adds only a zero tail to the pinned codec's 1,920-sample grid and
+records `conditioning_padding_frames`, separate from Continue's intentional
+extension. Original samples and requested edit ranges remain unchanged. Only
+the tail from that exact aligned extent or the decoder's 128-latent minimum
+(5.12 seconds) is removed after validating the whole tensor. Metadata records
+the removed frames; other length mismatches fail.
+
+Before readiness, the native adapter binds only that resident handler's source
+encoder to at most 15-second windows (720,000 samples), retaining the pinned
+2-second overlap-discard algorithm and any shorter explicit window. This avoids
+upstream's 30-second choice based on total GPU capacity rather than the admitted
+instance workspace. Codec computation and the full source clock stay upstream;
+the class and other handlers stay unchanged. The same instance's typed decoder
+binding caps each window at 256 latent frames (10.24 seconds), preserving shorter
+automatic and explicit windows, upstream overlap/discard assembly, offload selection, CPU
+fallback and the stricter MPS clamp. Native automatic sizing is re-evaluated on
+every decode, preserving its 128-frame low-memory/failed-query fallback. Global
+free GPU memory cannot authorize a
+larger window than this instance's workspace. The full output clock and live
+allocation guard remain unchanged. Long-edit memory fit and fidelity require
+execution against the exact new payload; the bounds grant no qualification.
+
+The published native ACE inventory pins build3. The candidate producer uses
+wheel build tag `4` and matching WHEEL metadata for request-boundary ROCm cache
+release. Original untagged and build1 through build3 archives keep their
+immutable identities; the reader admits only these forms and build4. Exact
+inventory hashes select bytes. A producer revision does not itself advance
+that inventory, establish hardware qualification or advertise ready model
+capacity.
+
+Any native request/protocol failure retires the model. A cooperative upstream
+timeout can leave an inference thread active, so the CLI terminates its dedicated
+process group even when the control pipe has closed. Parent loss also terminates
+that group. The supervisor must drain it before cleaning partial files. Package
+builds and library/process checks do not register a ready Core engine, remove
+native placement/startup guards, or add an HTTP editing route. Native model-byte
+custody has the separate source-group lifecycle above; engine preparation and
+runner integration remain separate boundaries from this package format.
+
+### Native music load context
+
+`ace_step/context.py::NativeMusicRunnerContext` retains the prepared package,
+private roots, inherited source-reader fence and required live resource guard
+for local spawning. Its unloaded wrapper resolves complete installed source
+groups only at `LoadModel`, after ordinary downloads, and requires the primary
+installation to match the exact card. Source resolution and native loading
+share one bounded cancellation/deadline budget.
+Worker load preflight uses that same recorded primary-source resolver off the
+event loop, accepting a verified installed generation without requiring a
+generic normalized-name alias. Missing or stale primary records refuse dispatch;
+deferred loading still resolves and verifies the entire source group.
+The native process and
+its guardian inherit the existing reader lock; closing Core's duplicate cannot
+release files while those descendants still run. Close permanently retires a
+wrapper and retains failed cleanup for retry; the runner must create a fresh
+unloaded replacement. Bootstrap accepts this private context only for native music; the supervisor
+retains its reader until process exit and routes edit completion alongside
+generation on addressed DATA and media callbacks. MusicEditing participates in
+the same acknowledgement, cancellation and terminal lifecycle as generation.
+Worker preparation does not yet supply this context or advertise native
+capacity. Existing audio.cpp execution remains separate.
+
+The built-in ACE and Demucs preparation controllers share one bounded
+asynchronous lifetime in `worker/native_runtime_preparation.py`. Queue time
+consumes the original deadline; cancellation joins the native thread, and a
+failed drain remains owned for retry. The ACE manager's `library_probes()`
+snapshot exposes current path-free device/precision receipts and withdraws
+them on failed revalidation or shutdown. The additive
+`NodeResources.native_music_probes` contract rejects a receipt that disagrees
+with its ready backend or engine payload. A library probe supplies math facts
+for later admission. Empty observations are omitted from telemetry so inactive
+native support does not introduce an unknown field to older strict readers.
+The probe is neither a loaded-model receipt nor a memory-fit decision. Worker
+publication and placement consume it through the explicit preparation and full
+phase-admission paths below.
+
+### Native music memory policy
+
+The native policy binds `memory_policy_version = 1`.
+`shared/models/native_music_memory.py` computes separate loading and forward
+reservations for host memory and one selected device. It includes all three
+component casts, temporary FP32 encoder/VAE copies, libraries, bounded original
+and result buffers, and upstream's temporary CPU VAE decode fallback. The forward
+workspace allowance is unqualified conservative policy: at least 2 GiB, scaling
+to 8 GiB at the mounted 120-second ceiling. It requires measured peak validation
+before release claims. Missing or nonfloating header facts retain explicit upper
+bounds and can be reassessed from complete verified objects without a model or
+hardware compatibility ban.
+
+Unified admission combines distinct simultaneous allocations within each phase
+and takes the larger phase. It does not add independently timed host/device
+maxima. The shared reservation helper caps observed free capacity by total
+commitments and subtracts the still-unallocated peak of every pending or loaded
+instance from the free reading. A loaded state is not an allocation receipt:
+`NativeMusicMemoryReservation` credits only verified exclusive host/device or
+unique shared physical allocations included in the exact same capacity snapshot.
+Absent or stale allocation facts reserve the full peak conservatively; a
+resident model retains its future forward workspace even while idle. CPU never borrows VRAM, and GPU
+execution must satisfy host staging/fallback capacity too. Native model load
+recomputes the projection from verified selected files and refuses a larger
+phase before opening its workspace or starting native model allocation.
+
+The package's `memory_probe` reports a timestamped
+`NativeMusicMemoryCapacity` alongside its library math receipt. CUDA/HIP query
+the native runtime's actual device zero and its driver-reported memory topology;
+another GPU's maximum or total cannot fund this model. MPS reports its own
+working-set limit and the single physical host pool. Cache preparation requires
+a sampled receipt. Shared admission requires data no more than two minutes old
+and allows at most thirty seconds of forward clock skew. Worker preparation and
+ordinary/exact placement consume this actual observation. Continuous resident
+resource publication uses the owned native process's existing memory frames.
+
+The separate `live_resource_guard` package feature binds the admitted
+`NativeMusicMemoryBudget` into the actual native process. A synchronous sample
+must pass before loading begins. The observer continues every half-second while
+loading, generating and idle, measuring the native leader's RSS, CUDA Torch
+reserved allocation, MPS driver allocation on Metal, ROCm process-owned DRM
+buffer totals, and raw physical capacity. ROCm binds its actual HIP device zero
+to kernel PCI/client identities and counts every requested memory region,
+including driver workspaces and nonresident buffers. Duplicate descriptors use
+conservative per-region maxima for one client; distinct clients remain counted.
+Incomplete or ambiguous sensing fails closed. This independent allocation
+query avoids the Torch allocator-statistics lock during decoder convolution;
+allocation ceilings and heartbeat deadlines are unchanged.
+The same portable fit policy is used by Core and the isolated process. Admission
+normalizes pressure headroom once before reservations: up to 512 MiB for host
+and shared memory and 256 MiB for the device, capped at 5% of each small pool.
+
+Once resident, the guard enforces process allocation ceilings and current
+pressure floors. It does not charge the whole future workspace against free
+memory again. RSS is not an exclusive allocation credit, nor is RSS plus GPU
+allocation a measurement of unique physical pages. Unified RSS uses the
+simultaneous physical phase ceiling; shared pressure is checked independently.
+Actual peak and sustained workload qualification still reassesses the estimate.
+
+The native process retires its private group if sensing, limits or control
+egress fail; closed diagnostics cannot prevent retirement. Core keeps only the
+latest private memory frame, validates its process, payload, device and sequence,
+requires a sample before readiness, and checks five-second freshness after
+waiting for a terminal. Startup allows thirty seconds for initial sensing.
+Native control writes are serialized and fail if the owning reader does not
+drain within two seconds. Resource frames carry no media and never enter State
+or the event log. Existing guardian custody remains until actual group drain.
+Current pre-guard candidates must be rebuilt before engine inventory activation;
+this process wiring alone does not enable Worker placement or music capacity.
+
+The Worker now connects a separate `NativeMusicMediaOwner` to task creation,
+snapshot recovery, addressed input/output and shutdown. Before native generation
+can dispatch, it reserves a durable writer intent even though there is no
+uploaded original. Edits wait for the verified `music_edit_source` handshake.
+Both use four shared source/result journal slots and captured local reader roots.
+A replacement Worker fails uncertain jobs instead of silently repeating an edit;
+old originals and results remain until their inherited reader fence drains.
+
+The native result producer verifies complete PCM24 stereo 48 kHz WAVs, then sends
+bounded `music` or `music_edit` frames. Reverse acknowledgements must match the
+owner, model, role and an emitted terminal. Even a synchronous same-node ACK
+cannot remove files before the sender returns. Failed cleanup keeps its slot.
+The API may retire execution after terminal DATA while addressed WAV delivery
+is still pending. Removing that completed task does not cancel a registered
+result's independent bounded media custody; explicit failure, cancellation and
+verified reverse control still do.
+This path preserves the existing audio.cpp, speech and separation contracts.
+
+`NativeMusicHostGuard` is the spawn-safe outer callback: immutable admitted
+ceilings and physical host identity, with fresh child/host/RSS checks on every
+bounded poll. It captures no Worker State and imports no native libraries.
+The private native observer remains responsible for actual GPU allocation and
+heartbeat observations. Both owners use Core's reclaimable file-cache Mach
+semantics on macOS, from a one-second-bounded `vm_stat` snapshot with psutil
+fallback. RSS still earns no exclusive physical allocation credit.
+
+Native library preparation uses an explicit ordered barrier. `PrepareAceStep`
+names a fixed complete-package digest and device; the master emits
+`AceStepPreparationRequested` with a thirty-minute absolute budget. The Worker
+verifies the package and actual compute lane off its event loop through its
+persistent cache/controller. Offline mode reuses verified cached bytes only.
+Completion binds the original request/package/device and carries either fresh
+verified resources or an actionable bounded failure. The master checks the
+fixed payload before making those resources available to placement.
+
+Periodic Worker advertisements use the same owner and derive builds and native
+probes from one locked observation snapshot. Merely installable CPU/Metal,
+CUDA or ROCm packages never become ready backends. Failure leaves unrelated
+engines intact, and shutdown drains both native preparation controllers.
+
+At Worker startup, one owned background task rechecks retained ACE and Demucs
+libraries so ordinary restart restoration can see freshly verified backends.
+Each engine has a 120-second total budget. Discovery reads only exact eligible
+fixed-inventory archive paths; it neither scans arbitrary installations nor
+trusts completion receipts. Full byte and actual-device verification always runs
+offline, including on online nodes. A clean base installation therefore remains
+engine-free. Missing, corrupt, incompatible or capacity-blocked caches produce
+diagnostics and remain unready; startup never downloads an engine to repair them.
+CPU is rechecked after Metal when they share one archive, so a failed Metal probe
+cannot withdraw the final CPU fallback. Resource publication follows verification;
+ordinary placement, model loading and native memory admission remain required.
+Shutdown joins cache discovery and native work before releasing their owners.
+
+Native loader recovery recognizes the pinned service's exact timing-cache file
+`.cache/acestep/progress_estimates.json`, with a 1 MiB file cap inside the existing
+256 MiB combined cache allowance. Other `.cache` contents remain unknown and
+block cleanup before deletion. Inherited reader/service locks and inode checks
+still protect live loaders; request results and their receipts remain separate.
+
+`AceStepMountPreparer` connects the public ordinary/exact mount routes to this
+ordered barrier. Genuine OS/CPU and generic device requirements choose fixed
+package candidates. Installability never counts as readiness. Four requests may
+wait per accepting API, with one absolute thirty-minute deadline across every
+candidate, send, command queue and verification. The Master refuses expired or
+unknown-profile requests and caps long direct requests without renewing an
+earlier deadline. The result must match request, API, worker, package digest and
+device, then pass the shared actual complete memory assessment. Placement gets
+these ordered resources even if a lossy older telemetry packet arrived later.
+Failures return actionable mount diagnostics and retain other worker engines.
+
+Typed native ACE profiles identify intrinsic `ace_step` compatibility without
+changing immutable card bytes or requiring empirical qualifications. Engine
+vocabulary has exactly CPU, Metal, CUDA and ROCm lanes; native Vulkan is absent.
+GGUF music stays on audio.cpp, and native ACE cannot receive unrelated cards.
+Native platform filtering admits only these explicit lanes for the exact native
+artifact contract, with current fixed payload/probe and full phase admission.
+Installed platform and music acceptance remain separate from these connections.
+
+The pure shared native assessment now combines the current pinned library's
+actual math and timestamped device-zero observations with all existing placement
+commitments. It applies physical pressure headroom once, holds an idle native
+model's complete future workspace, and charges shared GPU storage when assessing
+a CPU-only target. Other engines retain their concrete-shard footprint policy;
+unknown topology earns no host-memory saving and unknown RPC partitions cannot
+be invented. The exact unchanged Worker creation may exclude itself to avoid a
+duplicate reservation. Raw physical capacity remains separate from reserved
+capacity so the live guard does not compare a reduced ceiling to host identity.
+Automatic and exact Master placement use this assessment against raw native
+observations and all pending, Steward and indexed commitments. Generic reserved
+RAM/VRAM inputs cannot charge the native workload again. Exact callers cannot
+invent a smaller policy or split an unshardable native model. Other model
+placements reserve full native phase costs, including idle future workspace and
+discrete-GPU host staging. Missing restored policy refuses the affected pools;
+GPU coexistence is capped by the native runtime's actual device zero rather
+than another/larger GPU or an additive shared-memory carve estimate.
+
+Worker creation refreshes the exact library/math/memory observation off-loop
+before acquiring the native media reader fence. Under the staging transition
+lock it rechecks current authoritative placement, trust, runtime ownership,
+policy and complete commitments, excluding only this exact creation owner.
+The real supervisor receives an immutable live host guard and lazy native
+context, so a first mount can still download model sources through the normal
+lifecycle. Failure or cancellation before custody transfer closes the fence.
+Removal or snapshot replacement cancels its owned preparation request.
+These source connections do not establish installed music/platform acceptance.
+
+The resident reader forwards each validated memory frame through bounded,
+non-blocking local diagnostic IPC. A full channel drops a sample without
+blocking inference; later samples can refresh it. The supervisor requires its
+actual runner identity, native payload/device, fresh native and local clocks,
+and a live runner process. It retains one transient observation, with no phase
+transition, flight-recorder entry or replicated event. Periodic Worker gathering
+uses it only while the same authoritative instance and verified library remain
+owned, and only when physical host/device/shared totals and topology are
+unchanged. RSS and allocator counters never grant allocation credit. A dead,
+stale, foreign or withdrawn owner cannot republish native capacity. Cold or
+expired placement repairs require the mount preparation barrier and return
+actionable pending diagnostics instead of promoting installable packages.
+
+### Native separator fixed-inventory promotion
+
+The separation package workflow distinguishes current-source verification from
+explicit fixed-inventory reproduction and same-source promotion. Only the latter
+builds `DEMUCS_ADAPTER_REVISION`, verifies all three original CPU archive/payload
+pins and emits hosted provenance after the existing offline/cache/model/resident
+checks. Separate producer and current-controller checkouts preserve immutable
+package identity while exercising the current installation and execution seam. A separately dispatched publisher requires successful same-workflow,
+same-repository, same-source candidates from initiative-merged reviewed source.
+The shared bounded archive selector checks every fixed filename, size and digest;
+the Demucs CLI selects three profiles and the ACE CLI retains six. Hosted
+workflow/source attestations precede the serialized append-only engine index
+writer. Publication never rebuilds bytes and still requires complete public
+readback and the private ledger. Model weights stay separate, and package
+availability is not loaded readiness or empirical hardware/music qualification.
 
 ## Explicit node-download retry
 

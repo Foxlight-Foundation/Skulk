@@ -1,0 +1,37 @@
+
+model_id = "adefossez/HTDemucs"
+source_revision = "cbc8a9b1a87023b7fd74e7b3412e6321c0eab003"
+n_layers = 5
+hidden_size = 512
+supports_tensor = false
+tasks = ["AudioSeparation"]
+family = "htdemucs"
+quantization = "F32"
+trust_remote_code = false
+
+[storage_size]
+in_bytes = 84025440
+
+[placement]
+compatible_backends = []
+backend_preference = []
+
+[separation]
+family = "htdemucs"
+stems = ["drums", "bass", "other", "vocals"]
+sample_rate = 44100
+audio_channels = 2
+weights_file = "955717e8.safetensors"
+encoder_depth = 4
+transformer_layers_per_branch = 5
+transformer_channels = 512
+trained_segment_seconds = 7.8
+
+[artifact_bundle]
+bundle_id = "bundle_5rscoqj523ybgklcxmqdz45qikjxa3ma442y3ivqsnsnzsez7veq"
+download_size = 84025440
+
+[[artifact_bundle.files]]
+path = "955717e8.safetensors"
+size_bytes = 84025440
+object_id = "sha256:d9fa14133cfcc034a6758923bb3a8ca9f8dfd0b582134643bbf83f72c17576dd"
