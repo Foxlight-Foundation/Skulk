@@ -515,3 +515,28 @@ it('opens a pasted install link and refuses anything else', async () => {
   await contains('Review Example Studio');
   expect(posts).toEqual([]);
 });
+
+it('holds a fresh-install link behind the unread-install pause, then resolves it once read', async () => {
+  freshHost = true;
+  stray = registered(strayId);
+  strayOperation = stoppedAt('5'.repeat(32));
+  failStrayRead = true;
+  await renderWithLink({ id: 1, bundleId: 'example.studio', version: '0.1.0', fromLink: true });
+  await contains('could not be read, so new installs are paused');
+  expect(host.textContent).not.toContain('Review Example Studio');
+  failStrayRead = false;
+  await click('Try again');
+  // Read, the stopped install is this capability's: the link says so instead of installing beside it.
+  await contains('An install of Example Studio has not finished on this host.');
+  expect(host.textContent).not.toContain('Review Example Studio');
+  expect(posts).toEqual([]);
+});
+
+it('opens a link on the list even while this browser follows another install', async () => {
+  freshHost = true;
+  saveJourney({ pluginId: `managed.${'7'.repeat(32)}`, title: 'Other Tool', bundleId: 'other.tool', sequence: 3, publisher: 'example', runtimeDigest: newDigest,
+    transferBytes: 1_000_000, installOperationId: '8'.repeat(32), activationOperationId: null, startedAt: 1 });
+  await renderWithLink({ id: 1, bundleId: 'example.studio', version: '0.1.0', fromLink: true });
+  await contains('Review Example Studio');
+  expect(host.textContent).not.toContain('Installing Other Tool');
+});
