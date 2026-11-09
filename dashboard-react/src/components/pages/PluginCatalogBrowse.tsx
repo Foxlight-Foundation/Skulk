@@ -96,7 +96,9 @@ function retryOfJourney(journey: BoundJourney, updating: boolean): RetryRequest 
  */
 export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, review }: PluginCatalogBrowseProps = {}) {
   const { t } = useSkulkTranslation();
-  const [view, setView] = useState<BrowseView>(resumedView);
+  // An install link opens on the list, where it is resolved; an install this
+  // browser follows keeps its progress card there.
+  const [view, setView] = useState<BrowseView>(() => (review?.fromLink ? { kind: 'list' } : resumedView()));
   const source = useGetCatalogSourceQuery();
   const configured = !!source.data?.configured;
   const onStore = !!source.data?.builtin_store;
@@ -124,6 +126,13 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
   // installation beside it.
   const installsKnown = operationIds.length === 0 || (installs.data !== undefined && !installs.isFetching);
   const inventoryKnown = (runtimes.data !== undefined || !!runtimes.error) && installsKnown;
+  // A read that failed leaves its installation out. One that never selected a
+  // release names no bundle until its install is read, so while any such read
+  // is missing, a new install might duplicate a stopped one: fresh installs
+  // pause until it is read.
+  const unreadInstalls = installs.data && installsKnown
+    ? (runtimes.data?.installations ?? []).filter((runtime) => operationIds.includes(runtime.plugin_id) && !(runtime.plugin_id in installs.data!) && !runtime.release).length
+    : 0;
   // An install link pasted here is handled like one the page was opened with.
   const [pasted, setPasted] = useState<BrowseReviewHandoff | null>(null);
   const [linkText, setLinkText] = useState('');
@@ -138,12 +147,18 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
   const [takenReview, setTakenReview] = useState<number | null>(null);
   const handoff = pasted && (!review || pasted.id > review.id) ? pasted : review;
   if (handoff && takenReview !== handoff.id && catalog.data && inventoryKnown && view.kind === 'list') {
-    setTakenReview(handoff.id);
     if (handoff.fromLink) {
       const outcome = resolveInstallLink({ bundleId: handoff.bundleId, version: handoff.version ?? null }, offers);
-      setLinkOutcome(outcome);
-      if (outcome.kind === 'review') setView({ kind: 'review', offer: outcome.offer, listing: catalog.data });
+      // A fresh install waits, like the cards' Install, while an installation
+      // that names no bundle is unread: it may be a stopped install of this
+      // one. The paused notice offers the retry; the link opens once it reads.
+      if (!(outcome.kind === 'review' && outcome.offer.state === 'available' && unreadInstalls > 0)) {
+        setTakenReview(handoff.id);
+        setLinkOutcome(outcome);
+        if (outcome.kind === 'review') setView({ kind: 'review', offer: outcome.offer, listing: catalog.data });
+      }
     } else {
+      setTakenReview(handoff.id);
       const offer = offers.find((item) => item.entry.bundle_id === handoff.bundleId && item.state === 'update');
       if (offer) setView({ kind: 'review', offer, listing: catalog.data });
     }
@@ -158,13 +173,6 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
     setLinkText('');
     setPasted({ id: Math.max(Date.now(), (review?.id ?? 0) + 1), bundleId: request.bundleId, version: request.version, fromLink: true });
   };
-  // A read that failed leaves its installation out. One that never selected a
-  // release names no bundle until its install is read, so while any such read
-  // is missing, a new install might duplicate a stopped one: fresh installs
-  // pause until it is read.
-  const unreadInstalls = installs.data && installsKnown
-    ? (runtimes.data?.installations ?? []).filter((runtime) => operationIds.includes(runtime.plugin_id) && !(runtime.plugin_id in installs.data!) && !runtime.release).length
-    : 0;
 
   // One consent starts one install, even if the button is clicked twice.
   const starting = useRef(false);
@@ -226,6 +234,8 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
     setStoreNotice('');
     try {
       await selectStore({ expected_revision: source.data.revision }).unwrap();
+      // What the link found in the old catalog no longer holds.
+      setLinkOutcome(null);
     } catch (error) {
       setStoreNotice(pluginRefusalDetail(error) ?? t('plugins.catalog.useStoreFailed', 'The host did not switch to the Foxlight store. Try again.'));
     }
