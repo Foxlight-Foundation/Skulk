@@ -467,9 +467,10 @@ const pluginsApi = apiSlice.injectEndpoints({
       query: ({ pluginId, operationId }) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/operations/${encodeURIComponent(operationId)}/recover`, method: 'POST', headers }),
       invalidatesTags: ['Plugins'],
     }),
-    getPluginCatalog: build.query<CatalogListing, void>({
+    getPluginCatalog: build.query<CatalogListing, number | void>({
       // Each read fetches and verifies the signed document on the host, so it
-      // is read on demand and never polled.
+      // is read on demand and never polled. The optional source revision is
+      // only a client cache key; it grants no catalog or server-side authority.
       query: () => ({ url: '/v1/plugins/managed/catalog', headers, cache: 'no-store' }),
       providesTags: ['PluginCatalog'],
       keepUnusedDataFor: 0,
