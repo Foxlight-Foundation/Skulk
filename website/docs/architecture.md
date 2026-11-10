@@ -33,6 +33,14 @@ The design choices that shape almost everything else:
 
 ## The shape of a node
 
+Each worker owns its event and media receiver subscriptions for its complete
+lifetime. Election replacement closes those receivers even when cancellation
+arrives during startup, before the ingress tasks enter their receive loops.
+Otherwise an abandoned rendezvous subscriber can block the live API or its
+replacement worker, including the handshake requesting an original audio file.
+Receiver retirement precedes joined native cleanup; cleanup still finishes
+before the replacement takes over.
+
 A single Skulk process hosts seven cooperating subsystems sharing one event loop and one set of typed channels:
 
 ```mermaid

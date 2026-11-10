@@ -376,7 +376,9 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Worker**: Handles inference tasks, downloads models, manages runner processes.
   Election replacement cancels and joins its complete run, including queued or
   off-loop startup before its task group exists; native cleanup finishes before
-  the replacement takes over.
+  the replacement takes over. Every retired Worker closes its owned receivers,
+  even if their ingress tasks never started, so stale rendezvous subscriptions
+  cannot block the replacement or the API's directed audio-source handshake.
 - **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
 - **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration. Better same-round proposals arriving after the local timeout correct the completed result using the original vote ordering. Connected nodes republish that immutable winning vote every five seconds to repair lost startup broadcasts, with a fixed receive deadline so incoming traffic cannot starve repair. The timer starts no campaign, changes no clock/seniority and suppresses older results while a new round runs; peerless nodes stay quiet and receiver closure ends repair.
 - **API**: FastAPI server for OpenAI-compatible chat completions. The scoped `/v1/instances/{instance_id}/chat/completions` extension requires `allowed_node_install_ids`, checks every assigned rank's persistent identity, and uses the existing exact-target command path without replica fallback; no placement authority is granted.

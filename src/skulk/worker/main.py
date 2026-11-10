@@ -2036,6 +2036,21 @@ class Worker:
                 await self._run_tasks()
         finally:
             self._run_scope = None
+            # Election replacement can cancel startup before the ingress tasks
+            # enter their receiver contexts. Retire those subscriptions even in
+            # that case: an idle rendezvous receiver otherwise blocks the live
+            # API/worker sharing its topic, including original-audio requests.
+            for receiver in (
+                self.event_receiver,
+                self._connection_message_receiver,
+                self._realtime_audio_receiver,
+                self._realtime_audio_packet_receiver,
+                self._speech_media_packet_receiver,
+                self._vision_media_packet_receiver,
+                self._output_media_packet_receiver,
+            ):
+                if receiver is not None:
+                    receiver.close()
             # Actual shutdown code - waits for all tasks to complete before executing.
             logger.info("Stopping Worker")
             try:
