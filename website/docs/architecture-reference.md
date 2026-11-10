@@ -432,6 +432,12 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Worker
 
+- `Worker.run()` retires every owned event, connection and media receiver in its
+  outer `finally`, including cancellation before task-group startup. Closure is
+  idempotent and precedes joined native cleanup. A retired rendezvous subscriber
+  cannot retain the topic's fan-out or block a live API's audio-source request;
+  `shutdown()` still waits for native cleanup before replacement.
+
 - `run()` owns one cancellation scope across startup and supervised tasks.
   `shutdown()` records retirement even before the scheduled coroutine enters,
   cancels that scope when available, and joins `_stopped` after shielded native

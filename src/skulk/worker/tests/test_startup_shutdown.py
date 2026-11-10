@@ -11,8 +11,11 @@ from anyio.lowlevel import checkpoint
 
 from skulk import facts
 from skulk.facts.derive import BackendDerivation
+from skulk.routing.router import OutboundPacket, TopicRouter
+from skulk.routing.topics import VISION_MEDIA
+from skulk.routing.vision_media import AudioSourcePayload, VisionMediaPacket
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.common import CommandId, ModelId, NodeId
 from skulk.shared.types.events import Event, IndexedEvent
 from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.utils.channels import channel
@@ -143,3 +146,65 @@ async def test_active_shutdown_joins_children_and_native_cleanup(
             assert not worker._stopped.is_set()
             release_cleanup.set()
     assert worker._stopped.is_set()
+
+
+@pytest.mark.parametrize("during_startup", [False, True])
+@pytest.mark.parametrize("payload", ["music_edit_source", "separation_source"])
+async def test_retired_startup_worker_cannot_block_directed_source_request(
+    monkeypatch: pytest.MonkeyPatch,
+    during_startup: bool,
+    payload: AudioSourcePayload,
+) -> None:
+    """An unused worker subscription must not strand a live API's source handshake."""
+    worker, _ = worker_fixture(monkeypatch)
+    network, _ = channel[OutboundPacket]()
+    topic = TopicRouter(VISION_MEDIA, network)
+    worker._vision_media_packet_receiver = topic.new_receiver()
+    api = topic.new_receiver()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_derivation() -> BackendDerivation:
+        """Retire a real Worker before its media receive task can start."""
+        entered.set()
+        assert release.wait(5)
+        return BackendDerivation(backends=frozenset())
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as group:
+            if during_startup:
+                monkeypatch.setattr(facts, "current_backend_derivation", blocked_derivation)
+                group.start_soon(worker.run)
+                assert await to_thread.run_sync(lambda: entered.wait(5))
+                try:
+                    group.start_soon(worker.shutdown)
+                    await checkpoint()
+                finally:
+                    release.set()
+            else:
+                group.start_soon(worker.shutdown)
+                await checkpoint()
+                group.start_soon(worker.run)
+    assert worker._stopped.is_set()
+    packet = VisionMediaPacket(
+        source_node=NodeId("source-worker"),
+        target_node=NodeId("owner-api"),
+        command_id=CommandId(),
+        model=ModelId("native-audio-model"),
+        sequence=0,
+        kind="requested",
+        total_chunks=66,
+        image_count=1,
+        payload=payload,
+    )
+
+    async def consume() -> None:
+        """Exercise the real live receiver while the old receiver is idle."""
+        assert await api.receive() == packet
+
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as group:
+            group.start_soon(consume)
+            await topic.publish(packet)
+    assert len(topic.senders) == 1
+    api.close()
