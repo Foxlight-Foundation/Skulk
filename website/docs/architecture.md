@@ -4346,7 +4346,12 @@ VISION_MEDIA and `music_edit` on OUTPUT_MEDIA carry addressed original/result
 bytes. API queues, generic cancellation, task failure and session replacement
 all include edits. Reverse ACK/cancellation sends run outside the result actor
 lock, and source/control drains retain admission until joined. Local routing
-filters reverse ACK echoes to prevent same-node rendezvous deadlock. Native
+filters reverse ACK echoes to prevent same-node rendezvous deadlock. The same
+role filtering covers generation's `music` purpose: only APIs consume WAV
+frames, and only Workers consume `accepted` and `cancelled` controls. An
+unrelated receiver cannot hold the other role's zero-buffer delivery; transport
+failures remain visible to both roles. Video/thumbnail subscriptions retain
+their existing admission. Native
 resident/worker activation and Studio integration remain acceptance-gated.
 Cancellation submits its bounded `TaskCancelled` attempt before stream
 finalization can publish `TaskFinished`. A durable-index uncertainty fence

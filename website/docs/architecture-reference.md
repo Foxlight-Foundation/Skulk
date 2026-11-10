@@ -3259,6 +3259,10 @@ the original indexed owner, including companions reached through a cached base.
   terminal DATA cannot cancel its bounded delivery. Explicit failure/cancellation
   and correlated reverse control still abort it; ACK and sender join precede cleanup.
   Existing audio.cpp output, speech and separation paths retain their contracts.
+  `routing/output_media.py` filters `music` and `music_edit` by receiver role:
+  APIs receive WAV frames, Workers receive `accepted`/`cancelled` controls, and
+  both receive transport failures. Neither role waits for the other's unrelated
+  rendezvous subscription. Video/thumbnail subscriptions remain unchanged.
 - `ace_step/resources.py::NativeMusicHostGuard`: immutable, picklable outer
   process callback; checks its actual child, current host capacity/pressure and
   RSS without capturing Worker State or importing Torch. The private native
