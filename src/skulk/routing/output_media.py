@@ -38,18 +38,18 @@ OutputMediaPurpose = Literal[
 
 
 def output_media_for_api(packet: OutputMediaPacket) -> bool:
-    """Filter native audio ACK echoes while preserving legacy media subscriptions.
+    """Deliver music/separation results without echoing worker-only ACKs to APIs.
 
     The API sends reverse terminals while consuming a result. Delivering those
     terminals back into its rendezvous receiver would wait for that same
     consumer and deadlock a same-node transfer.
     """
-    return not (packet.purpose.startswith("separation_") or packet.purpose == "music_edit") or packet.kind not in ("accepted", "cancelled")
+    return not (packet.purpose.startswith("separation_") or packet.purpose in ("music", "music_edit")) or packet.kind not in ("accepted", "cancelled")
 
 
 def output_media_for_worker(packet: OutputMediaPacket) -> bool:
-    """Filter unused native audio frames while preserving legacy media subscriptions."""
-    return not (packet.purpose.startswith("separation_") or packet.purpose == "music_edit") or packet.kind in ("accepted", "cancelled", "transport_failed")
+    """Deliver music/separation control without coupling WAVs to worker receivers."""
+    return not (packet.purpose.startswith("separation_") or packet.purpose in ("music", "music_edit")) or packet.kind in ("accepted", "cancelled", "transport_failed")
 
 
 class OutputMediaPacket(CamelCaseModel):

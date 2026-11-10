@@ -25,7 +25,13 @@ from skulk.api.types.api import (
     PlaceInstanceParams,
 )
 from skulk.api.video_store import VideoStore
-from skulk.routing.output_media import OutputMediaPacket
+from skulk.routing.output_media import (
+    OutputMediaPacket,
+    output_media_for_api,
+    output_media_for_worker,
+)
+from skulk.routing.router import OutboundPacket, TopicRouter
+from skulk.routing.topics import OUTPUT_MEDIA
 from skulk.shared.backends import (
     AUDIO_CPP_CUDA_BUILDS_BY_ARCHITECTURE,
     GB10_AUDIO_CPP_CUDA_BUILD,
@@ -54,7 +60,9 @@ from skulk.shared.types.worker.instances import (
 )
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata
-from skulk.utils.channels import channel
+from skulk.utils.channels import Receiver, channel
+from skulk.worker.native_music_output import NativeMusicOutputProducer, NativeMusicTask
+from skulk.worker.tests.test_native_music_output import completion
 
 MODEL = ModelId("audio-cpp/test-music")
 
@@ -1097,6 +1105,80 @@ async def test_media_before_terminal_settles_and_serves_wav(
     response = TestClient(api.app).get(f"/v1/music/{command_id}/content")
     assert response.status_code == 200 and response.content == data
     assert response.headers["content-type"] == "audio/wav"
+
+
+@pytest.mark.parametrize("render_finished", [False, True])
+async def test_cross_node_native_generation_retains_wav_and_acknowledges_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, render_finished: bool,
+) -> None:
+    """The actual API must release native custody for either manifest arrival order."""
+    root = tmp_path / "native"
+    task, manifest, data = completion(root, editing=False)
+    task = task.model_copy(update={
+        "owner_node": NodeId("api-node"),
+        "task_params": task.task_params.model_copy(update={"model": MODEL}),
+    })
+    api = _api(tmp_path, monkeypatch)
+    _job(api, task.command_id, data)
+    api._music_jobs.update(
+        task.command_id, output=manifest, render_finished=render_finished,
+    )
+    api_network_send, api_network_receive = channel[OutboundPacket]()
+    worker_network_send, worker_network_receive = channel[OutboundPacket]()
+    api_router = TopicRouter(OUTPUT_MEDIA, api_network_send, local_routing_key="api-node")
+    worker_router = TopicRouter(OUTPUT_MEDIA, worker_network_send, local_routing_key="worker-node")
+    api._output_media_packet_receiver = api_router.new_receiver(accept=output_media_for_api)
+    api._output_media_packet_sender = api_router.new_sender()
+    unused_worker_receive = api_router.new_receiver(accept=output_media_for_worker)
+    worker_receive = worker_router.new_receiver(accept=output_media_for_worker)
+    # An ACK belongs to the Worker alone. An unrelated API subscription must
+    # never consume its rendezvous admission, even while that API is stalled.
+    unused_api_receive = worker_router.new_receiver(accept=output_media_for_api)
+    failures: list[str] = []
+    acknowledgment_routed = anyio.Event()
+
+    async def fail(_task: NativeMusicTask, message: str) -> None:
+        failures.append(message)
+
+    producer = NativeMusicOutputProducer(
+        NodeId("worker-node"), worker_router.new_sender().send, fail,
+        timeout_seconds=2,
+    )
+
+    async def relay(
+        receive: Receiver[OutboundPacket], target: TopicRouter[OutputMediaPacket],
+    ) -> None:
+        with receive:
+            async for packet in receive:
+                await target.publish_bytes(packet.data, origin=None)
+                if target is worker_router:
+                    acknowledgment_routed.set()
+
+    async def acknowledge() -> None:
+        with worker_receive:
+            async for packet in worker_receive:
+                producer.receive(packet)
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(api_router.run)
+        group.start_soon(worker_router.run)
+        group.start_soon(relay, worker_network_receive, api_router)
+        group.start_soon(relay, api_network_receive, worker_router)
+        group.start_soon(api._apply_output_media)
+        group.start_soon(acknowledge)
+        assert producer.register(task, root, manifest)
+        with anyio.fail_after(3):
+            await producer.deliver(task.command_id)
+            await acknowledgment_routed.wait()
+        assert not failures and not producer.pending(task.command_id)
+        stored = api._music_store.get(task.command_id, "music")
+        assert stored is not None and stored.file_path.read_bytes() == data
+        api._music_jobs.update(task.command_id, render_finished=True)
+        api._settle_music_job(task.command_id)
+        assert api._music_jobs.get(task.command_id).status == "completed"
+        group.cancel_scope.cancel()
+    unused_api_receive.close()
+    unused_worker_receive.close()
 
 
 @pytest.mark.anyio

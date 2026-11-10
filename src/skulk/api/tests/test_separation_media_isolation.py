@@ -44,13 +44,13 @@ async def test_stem_open_is_refused_before_touching_video_music_state(
     assert not vars(api)
 
 
-@pytest.mark.parametrize("purpose", ["video", "thumbnail", "music"])
+@pytest.mark.parametrize("purpose", ["video", "thumbnail"])
 @pytest.mark.parametrize("kind", ["accepted", "cancelled", "transport_failed"])
 def test_separation_subscription_filters_preserve_legacy_control_admission(
     purpose: OutputMediaPurpose,
     kind: Literal["accepted", "cancelled", "transport_failed"],
 ) -> None:
-    """Existing video/music receivers retain their original packet admission."""
+    """Video and thumbnail receivers retain their original packet admission."""
     packet = OutputMediaPacket(
         source_node=NodeId("api"), target_node=NodeId("worker"),
         command_id=CommandId("legacy-media"), model=ModelId("org/model"),
