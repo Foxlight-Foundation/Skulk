@@ -3153,9 +3153,10 @@ the original indexed owner, including companions reached through a cached base.
   allocation ceilings. Failure propagates to normal resident retirement.
   CPU/CUDA/Metal handlers do not install this per-instance hook. Exact sealed
   package repetition and maximum-duration acceptance remain separate gates.
-- Package revisions: the published native ACE inventory pins build3. The
-  candidate producer uses build tag `5` and matching `Build: 5` WHEEL metadata
-  for per-window ROCm cache release. The reader accepts only the original
+- Package revisions: the native ACE reader pins ROCm build5 and retains all
+  five CPU/Metal/CUDA build3 objects and their original producer revision.
+  The ROCm producer uses build tag `5` and matching `Build: 5` WHEEL metadata
+  for request-boundary and per-window cache release and 10-second encoding. The reader accepts only the original
   untagged and build1 through build5 forms; fixed inventory hashes select bytes
   independently. A producer revision does not publish or qualify a package.
   `ace_step_package_revision` resolves provenance only for an exact fixed package

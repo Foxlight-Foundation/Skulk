@@ -4563,13 +4563,15 @@ larger window than this instance's workspace. The full output clock and live
 allocation guard remain unchanged. Long-edit memory fit and fidelity require
 execution against the exact new payload; the bounds grant no qualification.
 
-The published native ACE inventory pins build3. The candidate producer uses
-wheel build tag `4` and matching WHEEL metadata for request-boundary ROCm cache
-release. Original untagged and build1 through build3 archives keep their
-immutable identities; the reader admits only these forms and build4. Exact
-inventory hashes select bytes. A producer revision does not itself advance
-that inventory, establish hardware qualification or advertise ready model
-capacity.
+The native ACE reader pins ROCm build5 from its independent producer revision,
+retaining all five CPU/Metal/CUDA build3 objects and their original producer.
+Build5 uses wheel build tag `5` and matching `Build: 5` WHEEL metadata for both
+request-boundary and per-encoder-window ROCm cache release and the 10-second
+encoding bound. Original untagged and build1 through build4 archives retain their
+immutable identities; the reader admits only these forms and build5. Exact
+inventory hashes select bytes. Source selection does not publish a package,
+establish hardware qualification or advertise ready model capacity; the normal
+verified preparation, device probe and placement gates still apply.
 
 Any native request/protocol failure retires the model. A cooperative upstream
 timeout can leave an inference thread active, so the CLI terminates its dedicated
