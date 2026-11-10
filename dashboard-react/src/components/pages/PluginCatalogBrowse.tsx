@@ -76,7 +76,8 @@ export interface PluginCatalogBrowseProps {
   onRetryTaken?: () => void;
   /**
    * An update or install link to open for review once the catalog is read.
-   * Browse opens it at most once per `id`; the page drops the handoff when
+   * Browse opens an install link once per `id` and selected source revision;
+   * ordinary update handoffs open once per `id`. The page drops the handoff when
    * the owner changes tab.
    */
   review?: BrowseReviewHandoff | null;
@@ -105,7 +106,10 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
   const storeAvailable = !!source.data?.builtin_store_available;
   const [selectStore, storeSwitch] = useSelectBuiltinCatalogMutation();
   const [storeNotice, setStoreNotice] = useState('');
-  const catalog = useGetPluginCatalogQuery(undefined, { skip: !configured || view.kind === 'connect' });
+  // The host still chooses and verifies its own catalog. The source revision
+  // separates client caches so a response from the previous selection cannot
+  // consume an install link intended for the newly selected source.
+  const catalog = useGetPluginCatalogQuery(source.data?.revision, { skip: !configured || view.kind === 'connect' });
   const runtimes = useGetManagedRuntimesQuery();
   const operationIds = installOperationIds(runtimes.data?.installations);
   // Read fresh whenever Browse opens: a cached read from Installed can be
@@ -118,9 +122,9 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
   const [recover] = useRecoverRuntimeInstallationMutation();
   // What an installed plugin's nodes report now decides what its card offers.
   const { capabilityNodes, localNodeId } = useClusterState();
-  const offers = useMemo(() => catalog.data
-    ? catalogOffers(catalog.data, runtimes.data?.installations ?? [], unfinishedInstalls(runtimes.data?.installations ?? [], installs.data))
-    : [], [catalog.data, runtimes.data, installs.data]);
+  const offers = useMemo(() => catalog.currentData
+    ? catalogOffers(catalog.currentData, runtimes.data?.installations ?? [], unfinishedInstalls(runtimes.data?.installations ?? [], installs.data))
+    : [], [catalog.currentData, runtimes.data, installs.data]);
   // Offers wait for the installations and a fresh read of their installs: an
   // offer made before a stopped install is known would register a second
   // installation beside it.
@@ -144,23 +148,25 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
   // as one; an install link also opens a fresh install, and otherwise says
   // why it cannot. Adjusted while rendering, as React recommends for state
   // that follows a changing input.
-  const [takenReview, setTakenReview] = useState<number | null>(null);
+  const [takenReview, setTakenReview] = useState<{ id: number; sourceRevision: number | undefined } | null>(null);
   const handoff = pasted && (!review || pasted.id > review.id) ? pasted : review;
-  if (handoff && takenReview !== handoff.id && catalog.data && inventoryKnown && view.kind === 'list') {
+  const reviewTaken = handoff && takenReview?.id === handoff.id
+    && (!handoff.fromLink || takenReview.sourceRevision === source.data?.revision);
+  if (handoff && !reviewTaken && catalog.currentData && !catalog.isFetching && !source.isFetching && inventoryKnown && view.kind === 'list') {
     if (handoff.fromLink) {
       const outcome = resolveInstallLink({ bundleId: handoff.bundleId, version: handoff.version ?? null }, offers);
       // A fresh install waits, like the cards' Install, while an installation
       // that names no bundle is unread: it may be a stopped install of this
       // one. The paused notice offers the retry; the link opens once it reads.
       if (!(outcome.kind === 'review' && outcome.offer.state === 'available' && unreadInstalls > 0)) {
-        setTakenReview(handoff.id);
+        setTakenReview({ id: handoff.id, sourceRevision: source.data?.revision });
         setLinkOutcome(outcome);
-        if (outcome.kind === 'review') setView({ kind: 'review', offer: outcome.offer, listing: catalog.data });
+        if (outcome.kind === 'review') setView({ kind: 'review', offer: outcome.offer, listing: catalog.currentData });
       }
     } else {
-      setTakenReview(handoff.id);
+      setTakenReview({ id: handoff.id, sourceRevision: source.data?.revision });
       const offer = offers.find((item) => item.entry.bundle_id === handoff.bundleId && item.state === 'update');
-      if (offer) setView({ kind: 'review', offer, listing: catalog.data });
+      if (offer) setView({ kind: 'review', offer, listing: catalog.currentData });
     }
   }
   const openPastedLink = () => {
@@ -248,7 +254,7 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
   // Whether the release can spend money, from the listing of that release,
   // so the setup page claims nothing it was not told.
   const spendsMoney = (bundleId: string | undefined, sequence: number): boolean | undefined => {
-    const listed = bundleId === undefined ? undefined : catalog.data?.entries.find((candidate) => candidate.bundle_id === bundleId && candidate.sequence === sequence);
+    const listed = bundleId === undefined ? undefined : catalog.currentData?.entries.find((candidate) => candidate.bundle_id === bundleId && candidate.sequence === sequence);
     return listed ? canSpendMoney(listed) : undefined;
   };
   const setUp = (target: SetupTarget) => {
@@ -283,14 +289,14 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
     return <CatalogConnectPanel status={source.data} replacesStore={onStore} onConnected={() => { setView({ kind: 'list' }); void source.refetch(); }}
       onCancel={configured ? () => setView({ kind: 'list' }) : undefined} />;
   }
-  const updated = catalog.data ? new Date(catalog.data.created_at * 1000).toLocaleDateString() : '';
+  const updated = catalog.currentData ? new Date(catalog.currentData.created_at * 1000).toLocaleDateString() : '';
   return <section aria-labelledby="catalog-browse-title">
     <Heading>
       <div>
         <h2 id="catalog-browse-title">{t('plugins.catalog.browseTitle', 'Browse capabilities')}</h2>
-        {catalog.data ? <p>{onStore
+        {catalog.currentData ? <p>{onStore
           ? t('plugins.catalog.storeLead', 'From the Foxlight capability store. Signatures verified; listing updated {date}.', { date: updated })
-          : t('plugins.catalog.browseLead', 'From the {publisher} catalog. Signature verified; listing updated {date}.', { publisher: catalog.data.publisher, date: updated })}</p> : null}
+          : t('plugins.catalog.browseLead', 'From the {publisher} catalog. Signature verified; listing updated {date}.', { publisher: catalog.currentData.publisher, date: updated })}</p> : null}
       </div>
       <SourceActions>
         {onStore
@@ -321,18 +327,18 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
         : null}
     </Info> : null}
     {storeNotice ? <Notice role="alert">{storeNotice}</Notice> : null}
-    {catalog.isFetching && !catalog.data ? <Centered><Spinner size={22} /><span>{t('plugins.catalog.reading', 'Reading and verifying the catalog…')}</span></Centered> : null}
+    {catalog.isFetching && !catalog.currentData ? <Centered><Spinner size={22} /><span>{t('plugins.catalog.reading', 'Reading and verifying the catalog…')}</span></Centered> : null}
     {catalog.error ? <Notice role="alert">
       {pluginRefusalDetail(catalog.error) ?? t('plugins.catalog.readFailed', 'The catalog could not be read.')}
       <Button variant="outline" size="sm" disabled={catalog.isFetching} onClick={() => void catalog.refetch()}>{t('plugins.catalog.retry', 'Try again')}</Button>
     </Notice> : null}
-    {catalog.data && !inventoryKnown ? <Centered><Spinner size={22} /></Centered> : null}
-    {catalog.data && inventoryKnown && unreadInstalls > 0 ? <Notice role="alert">
+    {catalog.currentData && !inventoryKnown ? <Centered><Spinner size={22} /></Centered> : null}
+    {catalog.currentData && inventoryKnown && unreadInstalls > 0 ? <Notice role="alert">
       {t('plugins.catalog.installsUnread', 'The install status of {count} installation(s) on this host could not be read, so new installs are paused: one of them may be a stopped install of the same plugin, which a new install would duplicate.', { count: unreadInstalls })}
       <Button variant="outline" size="sm" disabled={installs.isFetching} onClick={() => void installs.refetch()}>{t('plugins.catalog.retry', 'Try again')}</Button>
     </Notice> : null}
-    {catalog.data && inventoryKnown && offers.length === 0 ? <p>{t('plugins.catalog.empty', 'This catalog lists nothing yet.')}</p> : null}
-    <Offers>{catalog.data && inventoryKnown ? offers.map((offer) => {
+    {catalog.currentData && inventoryKnown && offers.length === 0 ? <p>{t('plugins.catalog.empty', 'This catalog lists nothing yet.')}</p> : null}
+    <Offers>{catalog.currentData && inventoryKnown ? offers.map((offer) => {
       const progress = offerProgress(offer, journeys);
       const unfinished = offer.retry;
       return <CatalogOfferCard key={offer.entry.bundle_id} offer={offer} progress={progress} installPaused={unreadInstalls > 0}
@@ -344,7 +350,7 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
             transferBytes: unfinished.review.artifact_bytes, updating: unfinished.updating,
           });
         }}
-        onReview={() => setView({ kind: 'review', offer, listing: catalog.data! })}
+        onReview={() => setView({ kind: 'review', offer, listing: catalog.currentData! })}
         installedAction={offer.installed ? installedCardAction(hostedCapabilityNodes(capabilityNodes, offer.installed.plugin_id), localNodeId, window.location.hostname) : undefined}
         onSetUp={() => offer.installed && setUp({ pluginId: offer.installed.plugin_id, title: displayTitle(offer.entry), spendsMoney: canSpendMoney(offer.entry) })} />;
     }) : null}</Offers>
