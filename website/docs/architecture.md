@@ -4214,6 +4214,26 @@ reader, then publish expanded releases.
 
 ### Native ACE model contract
 
+Native ROCm requests synchronize the selected device and release unused Torch
+allocator cache before beginning the next admitted request. Live model tensors
+and the fixed memory ceilings remain in force. Request-entry reclamation cannot
+release cache accumulated later in a long edit. Before readiness, the candidate
+ROCm adapter therefore installs a public forward pre-hook on that resident's
+VAE encoder, synchronizing and returning unused blocks before each original
+encoding window. Inputs, parameters, codec math, window size and overlap remain
+unchanged; CPU, CUDA and Metal handlers do not install this hook. Candidate
+package availability remains separate from exact-payload hardware acceptance.
+Each exact inventory package resolves its own pinned producer revision. An AMD
+repair can therefore advance the ROCm object while retaining the five already
+qualified CPU/Metal/CUDA objects and their original source provenance. Inventory
+CI reproduces each profile from its own source and matches the full descriptor
+before publication.
+A native process failure is
+drained before its bounded, escaped stderr tail is attached to the private runner
+exception's traceback notes; shared startup failures and public job failures stay
+path-free. Device-ceiling diagnostics include the observed allocation and the
+admitted byte ceiling.
+
 Native ACE base cards preserve `TextToMusic` and `MusicEditing` as intrinsic
 tasks. Their `[music.native]` profile binds the primary safetensors/config/latent
 selection and independently pinned text encoder/tokenizer and audio autoencoder
@@ -4528,7 +4548,8 @@ the tail from that exact aligned extent or the decoder's 128-latent minimum
 the removed frames; other length mismatches fail.
 
 Before readiness, the native adapter binds only that resident handler's source
-encoder to at most 15-second windows (720,000 samples), retaining the pinned
+encoder to at most 15-second windows (720,000 samples), or 10-second windows
+(480,000 samples) for explicit ROCm policy, retaining the pinned
 2-second overlap-discard algorithm and any shorter explicit window. This avoids
 upstream's 30-second choice based on total GPU capacity rather than the admitted
 instance workspace. Codec computation and the full source clock stay upstream;
@@ -4542,11 +4563,15 @@ larger window than this instance's workspace. The full output clock and live
 allocation guard remain unchanged. Long-edit memory fit and fidelity require
 execution against the exact new payload; the bounds grant no qualification.
 
-The revised native ACE producer uses wheel build tag `2` and matching WHEEL
-metadata. Original untagged and build1 archives keep their immutable identities;
-the reader admits only these three closed filename forms. Exact inventory
-hashes select bytes, and a producer revision does not itself advance that
-inventory or advertise ready model capacity.
+The native ACE reader pins ROCm build5 from its independent producer revision,
+retaining all five CPU/Metal/CUDA build3 objects and their original producer.
+Build5 uses wheel build tag `5` and matching `Build: 5` WHEEL metadata for both
+request-boundary and per-encoder-window ROCm cache release and the 10-second
+encoding bound. Original untagged and build1 through build4 archives retain their
+immutable identities; the reader admits only these forms and build5. Exact
+inventory hashes select bytes. Source selection does not publish a package,
+establish hardware qualification or advertise ready model capacity; the normal
+verified preparation, device probe and placement gates still apply.
 
 Any native request/protocol failure retires the model. A cooperative upstream
 timeout can leave an inference thread active, so the CLI terminates its dedicated

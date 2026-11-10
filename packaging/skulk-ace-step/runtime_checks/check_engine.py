@@ -24,6 +24,7 @@ from skulk_ace_step.contracts import (
     NativeMusicReady,
     NativeMusicRequest,
     NativeMusicResult,
+    NativeMusicServeConfig,
 )
 from skulk_ace_step.engine import ResidentMusic
 from skulk_ace_step.policy import observe_execution, probe_device
@@ -102,6 +103,78 @@ class NativeEngineTests(unittest.TestCase):
             check_support.directory_identity(retained),
             request.output_directory_identity,
         )
+
+    @unittest.skipUnless(
+        torch.version.hip is not None, "ROCm-specific installed adapter policy"
+    )
+    def test_rocm_repeated_requests_release_idle_cache_before_generation(self) -> None:
+        """Two controlled requests preserve weights/output and order idle reclamation."""
+        values = self.configuration.model_dump(mode="json")
+        values["device"] = "rocm"
+        self.engine.configuration = NativeMusicServeConfig.model_validate_json(
+            json.dumps(values)
+        )
+        events: list[tuple[str, int]] = []
+        model_before = self.handler.model
+        with (
+            patch(
+                "torch.cuda.synchronize",
+                side_effect=lambda device: events.append(("synchronize", self.calls)),
+            ) as synchronize,
+            patch(
+                "torch.cuda.empty_cache",
+                side_effect=lambda: events.append(("release", self.calls)),
+            ),
+            patch(
+                "skulk_ace_step.engine.observe_execution",
+                return_value=self.ready.execution,
+            ),
+        ):
+            first = self.engine.run(
+                check_support.request(self.engine.configuration, "first"),
+                lambda _: None,
+            )
+            second = self.engine.run(
+                check_support.request(self.engine.configuration, "second"),
+                lambda _: None,
+            )
+        self.assertEqual(
+            events,
+            [("synchronize", 0), ("release", 0), ("synchronize", 1), ("release", 1)],
+        )
+        self.assertEqual(synchronize.call_args_list[0].args, (0,))
+        self.assertEqual(self.calls, 2)
+        self.assertIs(self.handler.model, model_before)
+        self.assertEqual(first.output.sha256, second.output.sha256)
+
+    @unittest.skipUnless(
+        torch.version.hip is not None, "ROCm-specific installed adapter policy"
+    )
+    def test_failed_rocm_cache_release_retires_before_any_generation(self) -> None:
+        """A failed reclamation never continues with an unknown native memory state."""
+        values = self.configuration.model_dump(mode="json")
+        values["device"] = "rocm"
+        self.engine.configuration = NativeMusicServeConfig.model_validate_json(
+            json.dumps(values)
+        )
+        with (
+            patch("torch.cuda.synchronize"),
+            patch(
+                "torch.cuda.empty_cache",
+                side_effect=RuntimeError("cache release failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "cache release failed"),
+        ):
+            self.engine.run(
+                check_support.request(self.engine.configuration), lambda _: None
+            )
+        self.assertEqual(self.calls, 0)
+        with self.assertRaisesRegex(RuntimeError, "must restart"):
+            self.engine.run(
+                check_support.request(self.engine.configuration, "after-failure"),
+                lambda _: None,
+            )
+        self.assertEqual(self.calls, 0)
 
     def generate(
         self,

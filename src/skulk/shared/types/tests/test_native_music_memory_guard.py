@@ -112,9 +112,9 @@ def test_process_ceiling_remains_the_admitted_host_or_shared_phase(
 def test_gpu_allocator_ceiling_cannot_borrow_spare_host_ram() -> None:
     """The actual selected device remains bounded even on a unified-memory host."""
     actual = observation("mps").model_copy(update={"device_allocated_bytes": 401})
-    assert "device allocation" in (
-        native_music_live_memory_error(budget("mps"), actual, now_unix_ms=1000) or ""
-    )
+    error = native_music_live_memory_error(budget("mps"), actual, now_unix_ms=1000)
+    assert error is not None and "device allocation" in error
+    assert "allocated=401 bytes" in error and "budget=400 bytes" in error
 
 
 def test_rss_aliases_are_not_added_or_used_as_free_memory_credits() -> None:

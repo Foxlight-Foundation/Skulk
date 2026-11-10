@@ -528,7 +528,7 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
         kit = tmp_path / "complete.foxkit"
         export_kit(source, identity, trust, kit)
         copy = await import_copy(host, kit.read_bytes())
-        page = await host.mirrors.page()
+        page = await configured_page(host)
         await complete(
             host,
             MirrorRequest(
@@ -541,7 +541,7 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
                 confirm_redistribution=True,
             ),
         )
-        page = await host.mirrors.page()
+        page = await configured_page(host)
         controller = await host.mirrors.start(
             MirrorRequest(
                 owner_id="library",

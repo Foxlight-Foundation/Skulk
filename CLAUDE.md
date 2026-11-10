@@ -2873,8 +2873,12 @@ audio layouts; Demucs runtime preparation retains an independent source-family
 fence. This is not an engine plugin ABI or ready-backend registration.
 
 The native ACE workflow keeps current-source checks separate from explicit
-`build-inventory` reproduction of `ACE_STEP_ADAPTER_REVISION` and all six fixed
-archives. The adapter Git revision participates in payload identity. Installed
+`build-inventory` reproduction of all six fixed archives. Each exact descriptor
+resolves its producer through `ace_step_package_revision`: the five retained
+CPU/Metal/CUDA build3 objects use `ACE_STEP_ADAPTER_REVISION`, while ROCm build5
+uses the independent `ACE_STEP_ROCM_ADAPTER_REVISION`. The selected adapter Git
+revision participates in that package's payload identity; advancing one profile
+does not rebuild or replace the other five. Installed
 boundary tests use the exact invoking workflow revision, with a separate sparse
 validation checkout moved outside the clean pinned producer in `build-inventory`
 mode. Candidate `validation-source.json` records both revisions; test-fixture

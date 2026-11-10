@@ -520,11 +520,30 @@ class ResidentMusic:
                 )
             self.ready = frame.ready
             return frame.ready
-        except BaseException:
-            self._stop()
+        except BaseException as error:
+            self._stop_after_error(error)
             raise
         finally:
             self._actor.release()
+
+    def _stop_after_error(self, error: BaseException) -> None:
+        """Drain native custody before retaining bounded private failure context."""
+        observed_exit = (
+            observe_process_exit(self._process)
+            if self._process is not None
+            else None
+        )
+        self._stop()
+        # The stderr reader must finish before its final resource-guard message
+        # is retained. Repr keeps native control characters out of log framing;
+        # bootstrap publishes str(error) as shared startup state, so private
+        # context belongs only in traceback notes, never in the public message.
+        tail = self.diagnostic_tail
+        if isinstance(error, NativeMusicProcessError) and tail:
+            error.add_note(
+                f"native_exit_before_cleanup={observed_exit}; "
+                f"native_stderr_tail={tail!r}"
+            )
 
     def _stop(self) -> None:
         self._stop_requested.set()
@@ -675,7 +694,7 @@ class ResidentMusic:
             self._pending_output = None
             return result
         except BaseException as error:
-            self._stop()
+            self._stop_after_error(error)
             if isinstance(error, InterruptedError):
                 return None
             raise

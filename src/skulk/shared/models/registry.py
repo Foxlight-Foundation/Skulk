@@ -211,11 +211,23 @@ class RegistryCard(BaseModel):
 
 
 class RegistryCardMetadata(BaseModel):
-    """Mutable catalog metadata that must not alter immutable card identity."""
+    """Mutable catalog metadata that must not alter immutable card identity.
 
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    Unknown fields are ignored rather than refused: this is signed, mutable
+    metadata the registry extends over time, and a field an older build does
+    not know must not take the whole catalog away from it. Card bodies keep
+    their own per-card vocabulary handling in ``registry_model_cards``.
+    """
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="ignore")
 
     provenance: Literal["foxlight", "agent", "community"]
+    license: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9.+-]{0,63}$"
+    )
+    """The licence the artifact's repository declares, as a lowercase
+    SPDX-style or Hugging Face identifier (``apache-2.0``, ``llama3.2``).
+    Descriptive only: Skulk never enforces it."""
     architecture: str | None = Field(default=None, min_length=1, max_length=300)
     capability_claims: tuple["RegistryCapabilityClaim", ...] = ()
     source_links: "RegistrySourceLinks | None" = None

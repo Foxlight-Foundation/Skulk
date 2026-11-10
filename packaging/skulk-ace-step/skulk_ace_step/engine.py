@@ -39,6 +39,7 @@ from .upstream_bindings import (
     install_bounded_source_decoding,
     install_bounded_source_encoding,
     install_offline_precheck,
+    install_rocm_encoding_cache_release,
     native_api,
     tensor_samples,
 )
@@ -140,6 +141,12 @@ class ResidentMusic:
             directory = verify_request_directory(
                 self.configuration, request, empty=True
             )
+            if self.configuration.device == "rocm":
+                # Kernel allocation accounting includes idle Torch cache blocks.
+                # Return the previous request's unused blocks before a different
+                # edit shape spends this resident's fixed admitted device budget.
+                torch.cuda.synchronize(0)
+                torch.cuda.empty_cache()
             context: Path | None = None
             conditioning: SeparationSource | None = None
             source: SeparationSource | None = None
@@ -338,8 +345,9 @@ def load_music(
             "native music activated an unadmitted alternate MLX implementation"
         )
     execution = observe_execution(handler, configuration)
-    install_bounded_source_encoding(handler)
+    install_bounded_source_encoding(handler, configuration.device)
     install_bounded_source_decoding(handler)
+    install_rocm_encoding_cache_release(handler, configuration.device)
     ready = NativeMusicReady(
         model_identity=configuration.model_identity,
         payload_sha256=payload_sha256,

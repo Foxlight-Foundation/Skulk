@@ -63,6 +63,31 @@ class RecordingEncoder(torch.nn.Module):
 class NativeEncodingTests(unittest.TestCase):
     """Use actual pinned handlers around an observable, deliberately tiny codec."""
 
+    @unittest.skipUnless(
+        torch.version.hip is not None, "ROCm-specific installed adapter policy"
+    )
+    def test_rocm_windows_keep_the_complete_clock_with_smaller_native_workspace(
+        self,
+    ) -> None:
+        """Actual overlap-discard assembly consumes every frame through 120s."""
+        for seconds in (5, 15, 30, 120):
+            for explicit_chunk in (None, 5 * 48000, 15 * 48000):
+                with self.subTest(seconds=seconds, explicit_chunk=explicit_chunk):
+                    values = torch.arange(seconds * 48000, dtype=torch.float32)
+                    audio = values.reshape(1, 1, -1).expand(1, 2, -1)
+                    handler = native_api().handler()
+                    encoder = RecordingEncoder()
+                    handler.vae = encoder
+                    install_bounded_source_encoding(handler, "rocm")
+                    actual = handler.tiled_encode(audio, chunk_size=explicit_chunk)
+                    torch.testing.assert_close(
+                        actual, values[::1920].reshape(1, 1, -1), rtol=0, atol=0
+                    )
+                    self.assertLessEqual(
+                        max(encoder.input_frames),
+                        min(explicit_chunk or 10 * 48000, 10 * 48000),
+                    )
+
     def test_complete_clock_and_zero_tail_survive_each_actual_tile_boundary(
         self,
     ) -> None:

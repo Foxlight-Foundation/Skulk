@@ -1,6 +1,6 @@
 """Exact native ACE package inventory; candidate availability is never readiness.
 
-These immutable objects reproduce from one pinned adapter and upstream source.
+Each immutable object reproduces from its pinned adapter and upstream source.
 Target installation, actual device probing, full model load and music quality
 remain distinct evidence. Selection has no filesystem or preparation effects.
 """
@@ -12,6 +12,7 @@ from skulk.provisioning.ace_step_runtime import AceStepWheel
 from skulk.shared.types.native_music import NativeMusicDevice
 
 ACE_STEP_ADAPTER_REVISION: Final = "1c4c3efbf9a6b0711c9814023c9cb9a802293352"
+ACE_STEP_ROCM_ADAPTER_REVISION: Final = "12a8335c271d2476e79b388a09e45a0629bb3fb4"
 ACE_STEP_PACKAGES: Final[tuple[AceStepWheel, ...]] = (
     AceStepWheel(
         variant="cpu",
@@ -56,12 +57,31 @@ ACE_STEP_PACKAGES: Final[tuple[AceStepWheel, ...]] = (
     AceStepWheel(
         variant="rocm",
         platform_tag="linux_x86_64",
-        filename="skulk_ace_step_rocm-0.1.0-3-cp312-cp312-linux_x86_64.whl",
-        size_bytes=2206559546,
-        sha256="b90a126ee3aed965a8888083769b01a308e662e0b26cbe26890a5d98852f4285",
-        payload_sha256="a14a7bf2b870884c5903ba0a9712ac1a88ed400537e56439df5aa439f02a2580",
+        filename="skulk_ace_step_rocm-0.1.0-5-cp312-cp312-linux_x86_64.whl",
+        size_bytes=2206561827,
+        sha256="17ef6097626fd350e96b848ce79e9793fbe0bd7a7e4f2a627f6fa2d3988dd1b7",
+        payload_sha256="25d72ddfc85964a3f042fc144baab1aacdbce49ce4844a712f0a6e91b086542d",
     ),
 )
+
+
+def ace_step_package_revision(package: AceStepWheel) -> str:
+    """Return the fixed producer revision for one exact built-in package.
+
+    ROCm may advance independently while already qualified CPU/Metal/CUDA
+    objects retain their bytes and source provenance. Reject modified or unknown
+    records rather than deriving trust from a profile name or caller digest.
+    This lookup performs no preparation, publication or readiness operation.
+    """
+    if package not in ACE_STEP_PACKAGES:
+        raise ValueError(
+            "native ACE producer requires an exact fixed inventory package"
+        )
+    return (
+        ACE_STEP_ROCM_ADAPTER_REVISION
+        if package.variant == "rocm"
+        else ACE_STEP_ADAPTER_REVISION
+    )
 
 
 def select_ace_step_package(

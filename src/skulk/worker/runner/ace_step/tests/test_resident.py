@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import venv
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -85,6 +86,9 @@ def loading_copy():
     path=Path(cfg['directory'])/'loader/checkpoints/acestep-v15-base'
     path.mkdir(parents=True,mode=0o700);(path/'config.json').write_bytes(b'partial')
 loading_copy()
+if mode=='stderr-load-exit':
+    sys.stderr.write('earlier diagnostic\\n'*5000+'private-model-root=/native/private/checkpoints\\tNative music live resource guard stopped: device allocation ceiling')
+    sys.stderr.flush();os._exit(23)
 if mode=='startup-slow':
     while True:time.sleep(.01)
 if mode=='malformed':
@@ -121,6 +125,9 @@ for line in sys.stdin.buffer:
     envelope=json.loads(line);request=envelope['request'];rid=request['request_id'];directory=Path(request['output_directory'])
     (root/'request-count').write_text(str(envelope['sequence']))
     active=(root/'mode').read_text() if (root/'mode').exists() else mode
+    if active=='stderr-exit':
+        sys.stderr.write('earlier diagnostic\\n'*5000+'private-model-root=/native/private/checkpoints\\tNative music live resource guard stopped: device allocation ceiling')
+        sys.stderr.flush();os._exit(23)
     if active=='slow':
         (directory/'result.wav').write_bytes(b'partial')
         signal.signal(signal.SIGTERM,signal.SIG_IGN)
@@ -401,6 +408,45 @@ def test_invalid_completion_retires_and_reclaims_only_the_active_call(
         assert not owner.is_ready()
         assert not Path(call.output_directory).exists()
         assert not process_alive(int((tmp_path / "native.pid").read_text()))
+    finally:
+        owner.close()
+
+
+@pytest.mark.parametrize("mode", ["stderr-load-exit", "stderr-exit"])
+def test_failed_native_retains_bounded_stderr_after_process_and_loader_drain(
+    tmp_path: Path, interpreter: Path, mode: str
+) -> None:
+    """A real exiting CLI keeps its final guard reason in private error context."""
+    owner = resident(tmp_path, interpreter, mode=mode)
+    call: NativeMusicRequest | None = None
+    try:
+        with pytest.raises(NativeMusicProcessError) as caught:
+            owner.start(is_cancelled=lambda: False)
+            call = request(owner)
+            owner.run(call, progress=lambda _: None, is_cancelled=lambda: False)
+        message = str(caught.value)
+        for private in (
+            "native_stderr_tail=",
+            "native_exit_before_cleanup=",
+            "device allocation ceiling",
+            "/native/private/checkpoints",
+        ):
+            assert private not in message
+        notes = caught.value.__notes__
+        assert len(notes) == 1
+        assert "native_stderr_tail=" in notes[0]
+        assert "device allocation ceiling" in notes[0]
+        assert "native_exit_before_cleanup=" in notes[0]
+        assert len(notes[0].encode()) < 8192 and "\n" not in notes[0]
+        assert "\\t" in notes[0] and "\t" not in notes[0]
+        assert "/native/private/checkpoints" in "".join(
+            traceback.format_exception(caught.value)
+        )
+        assert not owner.is_ready()
+        assert not process_alive(int((tmp_path / "native.pid").read_text()))
+        if call is not None:
+            assert not Path(call.output_directory).exists()
+        assert not tuple((tmp_path / "workspace/loader").iterdir())
     finally:
         owner.close()
 

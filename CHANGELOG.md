@@ -7,6 +7,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Capability store install links
+
+- Open a capability's review from a store install link: `/plugins?install=<bundle>&version=<version>`
+  (opened by Skulk Desktop from `skulk://install`) and links pasted into **Browse** resolve the
+  bundle against the host's own verified catalog and show the ordinary review, or explain why
+  not (already installed, unfinished, not built for this host, not listed). The link carries
+  only the two identifiers; nothing installs without the existing consent.
+
 ### Preservation supervision
 
 - Retain a completed mirror worker's final observation when an event-loop

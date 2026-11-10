@@ -410,7 +410,11 @@ def native_music_live_memory_error(
             "Native music process exceeded its admitted host or shared memory ceiling"
         )
     if observation.device_allocated_bytes > budget.device_peak_bytes:
-        return "Native music process exceeded its admitted device allocation ceiling"
+        return (
+            "Native music process exceeded its admitted device allocation ceiling "
+            f"(allocated={observation.device_allocated_bytes} bytes, "
+            f"budget={budget.device_peak_bytes} bytes)"
+        )
     host_floor = min(512 * 1024**2, capacity.host_total_bytes // 20)
     if capacity.host_available_bytes < host_floor:
         return "Native music stopped for current host memory pressure"

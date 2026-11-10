@@ -8,7 +8,7 @@ import { apiSlice } from '../../store/api';
 import type { CatalogEntry, ManagedRuntime, RuntimeInstallation, RuntimeRelease } from '../../store/endpoints/plugins';
 import { darkTheme } from '../../theme/theme';
 import { encodeInvitation, readJourneys, saveJourney, type InstallJourney } from './catalogJourney';
-import { PluginCatalogBrowse, type BrowseRetryHandoff } from './PluginCatalogBrowse';
+import { PluginCatalogBrowse, type BrowseRetryHandoff, type BrowseReviewHandoff } from './PluginCatalogBrowse';
 
 Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { value: true, configurable: true });
 vi.mock('../../i18n/tolgee', () => ({
@@ -170,6 +170,17 @@ afterEach(async () => {
 
 async function render(retry: BrowseRetryHandoff | null = null, onRetryTaken?: () => void) {
   await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><PluginCatalogBrowse retry={retry} onRetryTaken={onRetryTaken} /></ThemeProvider></Provider>); });
+}
+async function renderWithLink(review: BrowseReviewHandoff) {
+  await act(async () => { root.render(<Provider store={store}><ThemeProvider theme={darkTheme}><PluginCatalogBrowse review={review} /></ThemeProvider></Provider>); });
+}
+async function typeLink(text: string) {
+  const field = host.querySelector('input[aria-label="Install link from the capability store"]') as HTMLInputElement;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, text);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await click('Open');
 }
 // A finished install continues on the installed plugin's own page.
 async function running() {
@@ -464,4 +475,68 @@ it('follows a first install under way from another browser instead of installing
   // Nothing is recovered or bound: the staged release is activated with the accepted permissions.
   expect(posts.map((post) => post.path)).toEqual([`/v1/plugins/managed/installations/${strayId}/operations`]);
   expect(posts[0].body).toMatchObject({ runtime_digest: newDigest, accept_permissions: true });
+});
+
+it('opens the review for a storefront install link on a host without the capability', async () => {
+  freshHost = true;
+  await renderWithLink({ id: 1, bundleId: 'example.studio', version: '0.1.0', fromLink: true });
+  await contains('Review Example Studio');
+  expect(host.textContent).not.toContain('The install link named version');
+  // Opening a review installs nothing: consent still comes first.
+  expect(posts).toEqual([]);
+});
+
+it('says which release it reviews when the link named another version', async () => {
+  freshHost = true;
+  await renderWithLink({ id: 1, bundleId: 'example.studio', version: '0.0.9', fromLink: true });
+  await contains('Review Example Studio');
+  await contains('The install link named version 0.0.9. This host’s catalog offers 0.1.0, which is the release reviewed here.');
+});
+
+it('explains an install link for a capability that is already installed or not listed', async () => {
+  installed = { ...installed, release: { ...installed.release!, sequence: 51 } };
+  await renderWithLink({ id: 1, bundleId: 'example.studio', version: '0.1.0', fromLink: true });
+  await contains('Example Studio is already installed on this host.');
+  expect(host.textContent).not.toContain('Review Example Studio');
+  await act(async () => { root.unmount(); });
+  root = createRoot(host);
+  await renderWithLink({ id: 2, bundleId: 'other.tool', version: '1.0.0', fromLink: true });
+  await contains('This host’s catalog does not list other.tool.');
+  expect(posts).toEqual([]);
+});
+
+it('opens a pasted install link and refuses anything else', async () => {
+  freshHost = true;
+  await render();
+  await contains('Review and install');
+  await typeLink('skulk://pair?z=secret');
+  await contains('That is not a Skulk install link.');
+  await typeLink('skulk://install?bundle=example.studio&version=0.1.0');
+  await contains('Review Example Studio');
+  expect(posts).toEqual([]);
+});
+
+it('holds a fresh-install link behind the unread-install pause, then resolves it once read', async () => {
+  freshHost = true;
+  stray = registered(strayId);
+  strayOperation = stoppedAt('5'.repeat(32));
+  failStrayRead = true;
+  await renderWithLink({ id: 1, bundleId: 'example.studio', version: '0.1.0', fromLink: true });
+  await contains('could not be read, so new installs are paused');
+  expect(host.textContent).not.toContain('Review Example Studio');
+  failStrayRead = false;
+  await click('Try again');
+  // Read, the stopped install is this capability's: the link says so instead of installing beside it.
+  await contains('An install of Example Studio has not finished on this host.');
+  expect(host.textContent).not.toContain('Review Example Studio');
+  expect(posts).toEqual([]);
+});
+
+it('opens a link on the list even while this browser follows another install', async () => {
+  freshHost = true;
+  saveJourney({ pluginId: `managed.${'7'.repeat(32)}`, title: 'Other Tool', bundleId: 'other.tool', sequence: 3, publisher: 'example', runtimeDigest: newDigest,
+    transferBytes: 1_000_000, installOperationId: '8'.repeat(32), activationOperationId: null, startedAt: 1 });
+  await renderWithLink({ id: 1, bundleId: 'example.studio', version: '0.1.0', fromLink: true });
+  await contains('Review Example Studio');
+  expect(host.textContent).not.toContain('Installing Other Tool');
 });

@@ -200,8 +200,11 @@ canonical samples. Completion binds original and conditioning digests plus the
 conditioning gain. Generation cannot contain source context.
 
 Before readiness, the adapter bounds that loaded handler's `tiled_encode` to
-15-second / 720,000-sample windows with the pinned 2-second overlap-discard
-algorithm. Upstream otherwise chooses 30 seconds from total GPU capacity,
+15-second / 720,000-sample windows, or 10-second / 480,000-sample windows on
+explicit ROCm policy, with the pinned 2-second overlap-discard
+algorithm. ROCm uses the smaller window to retain working margin for repeated
+maximum-duration edits without raising the admitted device ceiling.
+Upstream otherwise chooses 30 seconds from total GPU capacity,
 independently of this instance's admitted workspace. Shorter explicit windows
 survive; codec math, full context, sample clock and short seeded encoding remain
 upstream behavior. No upstream class/module or caller options are changed.
@@ -283,12 +286,15 @@ accelerator performance or installed Core admission.
 ### Reproduce and publish the fixed inventory
 
 The workflow's default `verify-current` mode retains the current-source boundary
-checks. Explicit `build-inventory` mode instead reads Core's reviewed
-`ACE_STEP_ADAPTER_REVISION` and six `ACE_STEP_PACKAGES`, checks out that exact
-producer revision, builds each archive twice and compares its descriptor with
+checks. Explicit `build-inventory` mode instead reads Core's six reviewed
+`ACE_STEP_PACKAGES` and each `ace_step_package_revision`, checks out that
+profile's exact producer revision, builds each archive twice and compares its descriptor with
 the fixed inventory. This distinction matters: `adapter_revision` is part of the
 sealed payload identity, so a newer Core commit produces different archive bytes
 even when the native module files are unchanged.
+The ROCm producer pin can advance independently while all five existing
+CPU/Metal/CUDA objects retain their bytes and source pins. Altered package
+records are refused by provenance lookup; profile names alone confer no trust.
 
 Installed boundary tests come from the exact revision invoking the workflow.
 In `build-inventory` mode, that validation checkout is separate from the pinned
@@ -298,13 +304,31 @@ remain clean. The candidate retains both workflow and producer revisions in
 immutable package bytes; it does not substitute current source for installed
 engine modules or waive any verification or attestation.
 
-The current adapter uses wheel build tag `3`: for example,
-`skulk_ace_step_cpu-0.1.0-3-cp312-cp312-macosx_14_0_arm64.whl`.
-Its WHEEL metadata carries `Build: 3`; the distribution version remains `0.1.0`.
+The candidate adapter uses wheel build tag `5`: for example,
+`skulk_ace_step_rocm-0.1.0-5-cp312-cp312-linux_x86_64.whl`.
+Its WHEEL metadata carries `Build: 5`; the distribution version remains `0.1.0`.
+The published reader inventory remains pinned to build `3` until the replacement
+objects pass their independent source, package and hardware acceptance gates.
 Earlier packages remain immutable and readable for rollback.
 Future byte changes require another distinct build identity before publication;
 neither a new digest nor a rebuilt descriptor authorizes overwriting an old name.
 CI reads the producer's exact descriptor filename rather than reconstructing it.
+
+ROCm requests synchronize device zero and release unused Torch allocator cache
+after private request-directory validation and before starting the next request.
+This preserves live weights while preventing the previous edit shape's idle
+cache from consuming the next request's fixed device-allocation budget. Cache
+reclamation failure retires the native handle; no memory ceiling is increased.
+Request-entry reclamation alone is insufficient for repeated edits. Before
+readiness, explicit ROCm policy also installs a public `forward_pre_hook` on the
+one loaded VAE encoder. Each original encoding window synchronizes device zero
+and returns unused allocator blocks, including cache created within the request.
+This preserves live tensors, input samples, codec math, overlap and window size;
+it changes no upstream class or global method. CPU, CUDA and Metal handlers do
+not install this hook. The module retains the hook for its resident lifetime.
+Exact sealed-package repetition and maximum-duration acceptance remain required.
+Core drains native custody before retaining a bounded escaped stderr tail in its
+private failure exception. Public job errors remain fixed and path-free.
 
 Only a complete successful inventory build produces releasable candidates, with
 GitHub hosted-build attestations for the actual archives. It still loads no model
