@@ -932,10 +932,15 @@ class EncryptedAuthorityStore:
 
         if os.name != "posix":
             return
-        for suffix in ("", "-wal", "-shm"):
+        self._path.chmod(0o600)
+        for suffix in ("-wal", "-shm"):
             candidate = Path(f"{self._path}{suffix}")
-            if candidate.exists():
+            try:
                 candidate.chmod(0o600)
+            except FileNotFoundError:
+                # SQLite retires these files when its last connection closes;
+                # another thread can do so before our chmod reaches the kernel.
+                continue
 
 
 def iter_authority_record_types(records: tuple[AuthorityRecord, ...]) -> Iterator[str]:

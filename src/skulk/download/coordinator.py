@@ -358,7 +358,8 @@ class DownloadCoordinator:
                         await self._sync_config(config_yaml)
                         continue
                     case PurgeStagingCache(model_id=purge_model_id):
-                        await self._purge_staging_cache(purge_model_id)
+                        async with self._download_admission_lock:
+                            await self._purge_staging_cache(purge_model_id)
                         continue
                     case _:
                         pass  # Targeted commands handled below
@@ -993,54 +994,62 @@ class DownloadCoordinator:
                     )
                     models_path_logged = True
                 for card in await get_model_cards():
-                    mid = card.model_id
-                    if mid in self.active_downloads:
-                        continue
-                    if isinstance(
-                        self.download_status.get(mid),
-                        (DownloadCompleted, DownloadOngoing, DownloadFailed),
-                    ):
-                        continue
-                    found = resolve_model_in_path(
-                        mid,
-                        card.source_revision,
-                        expected_card=card,
-                        artifact_root=(
-                            card.artifact_bundle.root
-                            if card.artifact_bundle is not None
-                            else None
-                        ),
-                    )
-                    if found is not None and not model_companions_present_on_disk(
-                        card, required_only=self.offline
-                    ):
-                        # Same companion gate as _start_download: a staged
-                        # base missing a companion must not be advertised
-                        # as complete (offline nodes check only the
-                        # load-bearing vision weights — optional companions
-                        # can never arrive there).
-                        continue
-                    if found is not None:
-                        logger.info(
-                            f"DownloadCoordinator: SKULK_MODELS_PATH hit: {mid} -> {found}"
+                    # Filesystem scans and card validation can outlast managed
+                    # owner deadlines. Yield the event loop while preserving
+                    # the same ordering with starts, cancellation and deletion;
+                    # a result must never overwrite a newer command's state.
+                    async with self._download_admission_lock:
+                        mid = card.model_id
+                        if mid in self.active_downloads:
+                            continue
+                        if isinstance(
+                            self.download_status.get(mid),
+                            (DownloadCompleted, DownloadOngoing, DownloadFailed),
+                        ):
+                            continue
+                        found = await asyncio.to_thread(
+                            resolve_model_in_path,
+                            mid,
+                            card.source_revision,
+                            expected_card=card,
+                            artifact_root=(
+                                card.artifact_bundle.root
+                                if card.artifact_bundle is not None
+                                else None
+                            ),
                         )
-                        path_shard = PipelineShardMetadata(
-                            model_card=card,
-                            device_rank=0,
-                            world_size=1,
-                            start_layer=0,
-                            end_layer=card.n_layers,
-                            n_layers=card.n_layers,
-                        )
-                        self._begin_attempt(mid)
-                        path_completed: DownloadProgress = DownloadCompleted(
-                            node_id=self.node_id,
-                            shard_metadata=path_shard,
-                            total=card.storage_size,
-                            model_directory=str(found),
-                            read_only=True,
-                        )
-                        await self._emit_status(path_completed)
+                        if found is not None and not await asyncio.to_thread(
+                            model_companions_present_on_disk,
+                            card,
+                            required_only=self.offline,
+                        ):
+                            # Same companion gate as _start_download: a staged
+                            # base missing a companion must not be advertised
+                            # as complete (offline nodes check only the
+                            # load-bearing vision weights — optional companions
+                            # can never arrive there).
+                            continue
+                        if found is not None:
+                            logger.info(
+                                f"DownloadCoordinator: SKULK_MODELS_PATH hit: {mid} -> {found}"
+                            )
+                            path_shard = PipelineShardMetadata(
+                                model_card=card,
+                                device_rank=0,
+                                world_size=1,
+                                start_layer=0,
+                                end_layer=card.n_layers,
+                                n_layers=card.n_layers,
+                            )
+                            self._begin_attempt(mid)
+                            path_completed: DownloadProgress = DownloadCompleted(
+                                node_id=self.node_id,
+                                shard_metadata=path_shard,
+                                total=card.storage_size,
+                                model_directory=str(found),
+                                read_only=True,
+                            )
+                            await self._emit_status(path_completed)
 
             except Exception as e:
                 logger.error(

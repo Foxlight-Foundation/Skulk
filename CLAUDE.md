@@ -182,6 +182,9 @@ uv run pytest
 # Run all tests including slow tests
 uv run pytest -m ""
 
+# Normal signed native owner/child startup qualification (disposable fixture)
+uv run python scripts/qualify_native_startup.py --help
+
 # Run a specific test file
 uv run pytest src/skulk/shared/tests/test_election.py
 
@@ -296,6 +299,13 @@ The full Python CI job runs on macOS. A separate lightweight Linux job runs
 only, without project conftests or runtime dependencies. It exercises the Linux
 `renameat2(RENAME_NOREPLACE)` path, existing-entry refusal and pinned-parent
 publication. Keep both native publication APIs covered when changing this helper.
+
+The dashboard browser-test job uses the digest-pinned official Playwright
+1.58.2 Noble container on `ubuntu-24.04`. It includes matching browser binaries
+and system libraries, avoiding per-run apt provisioning after repeated mirror
+DNS failures. Update the image version/digest and locked Playwright together;
+the job verifies their version agreement before running the full browser suite.
+Validate the complete browser suite before changing this environment.
 
 ## Architecture
 

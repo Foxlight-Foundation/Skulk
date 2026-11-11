@@ -126,8 +126,12 @@ jobs:
 
   dashboard-test:
     name: Dashboard browser tests
-    # The locked Playwright release cannot install Chromium on Ubuntu 26.04.
     runs-on: ubuntu-24.04
+    # Keep browser binaries and system libraries matched to the lockfile without
+    # provisioning them through the runner's independently changing apt mirrors.
+    container:
+      image: mcr.microsoft.com/playwright:v1.58.2-noble@sha256:6446946a1d9fd62d9ae501312a2d76a43ee688542b21622056a372959b65d63d
+      options: --ipc=host --init
     steps:
       - uses: actions/checkout@v4
 
@@ -141,9 +145,9 @@ jobs:
         working-directory: dashboard-react
         run: npm ci
 
-      - name: Install Chromium
+      - name: Verify Playwright image version
         working-directory: dashboard-react
-        run: npx playwright install --with-deps chromium
+        run: node -e 'if (require("playwright/package.json").version !== "1.58.2") throw new Error("Update the pinned Playwright image and lockfile together")'
 
       - name: Run dashboard browser tests
         working-directory: dashboard-react

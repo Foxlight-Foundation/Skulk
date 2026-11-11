@@ -98,6 +98,14 @@ MLX binary architectures. Installation still checks each wheel's interpreter
 and platform tags. To qualify a disposable independently signed native fixture,
 run `scripts/qualify_native_staging.py --help` with the project interpreter;
 it stages a disabled generation in a new directory and never starts an owner.
+For normal installed startup, `scripts/qualify_native_startup.py --help` accepts
+an independently signed cleanup-capable native fixture and explicit disposable
+publisher trust. It exercises the real manager, offline installer and service,
+including abrupt owner death/restart, shutdown, retained synthetic state and
+revocation. Run it with the full frozen project environment on each platform;
+prepared Core test sources do not qualify this path. The receipt covers the
+measured platform and exact build, not full node bootstrap, live invocation,
+real application-state migration or a packaged application.
 
 ## Project Structure
 

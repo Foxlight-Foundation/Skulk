@@ -203,7 +203,7 @@ build-backend = "uv_build"
 ###
 
 [tool.basedpyright]
-include = [".venv/lib/mlx", ".venv/lib/mlx_lm", "src", "bench"]
+include = [".venv/lib/mlx", ".venv/lib/mlx_lm", "src", "bench", "scripts/qualify_native_startup.py"]
 typeCheckingMode = "strict"
 failOnWarnings = true
 
