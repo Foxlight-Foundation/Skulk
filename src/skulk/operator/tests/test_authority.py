@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
 import sqlite3
@@ -371,3 +372,88 @@ def test_authority_open_repairs_overly_broad_directory_mode(tmp_path: Path) -> N
 
     assert store.records()
     assert store.path.parent.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions only")
+@pytest.mark.parametrize("suffix", ("-wal", "-shm"))
+def test_authority_append_tolerates_disappearing_sqlite_sidecars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str
+) -> None:
+    """SQLite sidecar retirement cannot turn a valid authority append into failure."""
+
+    store = _store(tmp_path)
+    material = create_cluster_identity()
+    store.initialize_cluster(material.public_identity, material.private_key)
+    sidecar = Path(f"{store.path}{suffix}")
+    original_chmod = Path.chmod
+    disappeared: list[Path] = []
+
+    def chmod_after_sqlite_retirement(
+        path: Path, mode: int, *, follow_symlinks: bool = True
+    ) -> None:
+        """Inject the syscall result of another connection retiring its sidecar."""
+
+        if path == sidecar:
+            disappeared.append(path)
+            raise FileNotFoundError(errno.ENOENT, "SQLite retired sidecar", str(path))
+        original_chmod(path, mode, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "chmod", chmod_after_sqlite_retirement)
+    record = store.append(
+        expected_commit_index=1,
+        authority_term=1,
+        record_type="device",
+        record_id="new-device",
+        payload={"refreshVerifier": "retained-verifier"},
+    )
+
+    assert disappeared
+    assert record.commit_index == 2
+    assert store.read_latest_payload("device", "new-device") == {
+        "refreshVerifier": "retained-verifier"
+    }
+    assert store.path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions only")
+@pytest.mark.parametrize(
+    ("suffix", "failure"),
+    (
+        ("", FileNotFoundError),
+        ("", PermissionError),
+        ("-wal", PermissionError),
+        ("-shm", PermissionError),
+    ),
+)
+def test_authority_append_reports_persistent_file_or_permission_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    failure: type[OSError],
+) -> None:
+    """Optional sidecars never make real authority hardening failures ignorable."""
+
+    store = _store(tmp_path)
+    material = create_cluster_identity()
+    store.initialize_cluster(material.public_identity, material.private_key)
+    target = Path(f"{store.path}{suffix}")
+    original_chmod = Path.chmod
+
+    def rejected_chmod(
+        path: Path, mode: int, *, follow_symlinks: bool = True
+    ) -> None:
+        """Reject only the selected file at the operating-system boundary."""
+
+        if path == target:
+            raise failure("Authority hardening failed")
+        original_chmod(path, mode, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "chmod", rejected_chmod)
+    with pytest.raises(failure, match="Authority hardening failed"):
+        store.append(
+            expected_commit_index=1,
+            authority_term=1,
+            record_type="device",
+            record_id="new-device",
+            payload={"refreshVerifier": "must-not-commit"},
+        )
