@@ -294,6 +294,13 @@ only, without project conftests or runtime dependencies. It exercises the Linux
 `renameat2(RENAME_NOREPLACE)` path, existing-entry refusal and pinned-parent
 publication. Keep both native publication APIs covered when changing this helper.
 
+The dashboard browser-test job uses the digest-pinned official Playwright
+1.58.2 Noble container on `ubuntu-24.04`. It includes matching browser binaries
+and system libraries, avoiding per-run apt provisioning after repeated mirror
+DNS failures. Update the image version/digest and locked Playwright together;
+the job verifies their version agreement before running the full browser suite.
+Validate the complete browser suite before changing this environment.
+
 ## Architecture
 
 ### Node Composition
