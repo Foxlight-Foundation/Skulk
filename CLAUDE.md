@@ -294,10 +294,12 @@ only, without project conftests or runtime dependencies. It exercises the Linux
 `renameat2(RENAME_NOREPLACE)` path, existing-entry refusal and pinned-parent
 publication. Keep both native publication APIs covered when changing this helper.
 
-The dashboard browser-test job is pinned to `ubuntu-24.04`, which the locked
-Playwright release supports. Playwright 1.58.2 cannot install Chromium on Ubuntu
-26.04; validate browser installation and the full browser suite before advancing
-this runner label.
+The dashboard browser-test job uses the digest-pinned official Playwright
+1.58.2 Noble container on `ubuntu-24.04`. It includes matching browser binaries
+and system libraries, avoiding per-run apt provisioning after repeated mirror
+DNS failures. Update the image version/digest and locked Playwright together;
+the job verifies their version agreement before running the full browser suite.
+Validate the complete browser suite before changing this environment.
 
 ## Architecture
 
