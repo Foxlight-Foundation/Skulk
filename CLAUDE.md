@@ -2,6 +2,9 @@
 
 This file provides guidance to AI coding agents when working with code in this repository.
 
+Dashboard browser CI uses Ubuntu 24.04 because the locked Playwright release
+does not support Chromium installation on Ubuntu 26.04.
+
 ## Project Overview
 
 Experimental delegated capability chat lives in `api/inference_gateway.py`.
