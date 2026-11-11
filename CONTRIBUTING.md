@@ -91,6 +91,14 @@ Skulk's runtime contract on macOS follows the `uv` environment and the
 official `mlx`/`mlx-metal` wheel stack. Nix is used for reproducible
 development tooling and validation, not as a hidden alternate MLX runtime.
 
+Native capability contracts use the public kernel cohort pinned in
+`pyproject.toml`/`uv.lock`; `uv sync --frozen` acquires those exact release wheels.
+The resolver targets Apple Silicon and Linux x86_64/aarch64, matching the actual
+MLX binary architectures. Installation still checks each wheel's interpreter
+and platform tags. To qualify a disposable independently signed native fixture,
+run `scripts/qualify_native_staging.py --help` with the project interpreter;
+it stages a disabled generation in a new directory and never starts an owner.
+
 ## Project Structure
 
 Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard), and the codebase is actively evolving.

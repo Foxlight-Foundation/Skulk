@@ -2,6 +2,9 @@
 
 This file provides guidance to AI coding agents when working with code in this repository.
 
+Dashboard browser CI uses Ubuntu 24.04 because the locked Playwright release
+does not support Chromium installation on Ubuntu 26.04.
+
 ## Project Overview
 
 Experimental delegated capability chat lives in `api/inference_gateway.py`.
@@ -1147,6 +1150,18 @@ terminal publication preserve Fabric lifecycle. Cancellation or bad output
 invalidates/reaps that child through normal owner supervision; siblings and
 unary calls retain their contracts. Old unary owners remain supported; streaming
 requires protocol 4. No media enters State/event logs or imports a private SDK.
+
+Native runtime envelope 3 carries release envelope 2 and exact canonical
+protocol-five manifest bytes. `native_contracts.py` delegates their admission to
+the qualified public compiled kernel; Core does not emulate its author/schema
+rules. Native signatures and generation identities use the `skulk.runtime/3\0`
+domain. The complete public source/profile identity and artifact-family wheel
+hash/length are pinned. Staging retains `native-manifest.json` and checks the
+fresh installed reader's full manifest identity and all four fingerprints before
+completion. Legacy runtime envelope 2 retains its original signing bytes.
+Ordinary selection refuses a change between legacy and native author semantics,
+or between different native author/managed fingerprints. Matching state/schema
+labels do not authorize profile migration of retained settings or grants.
 
 Generic signed runtime verification and staging use `extensions/runtime_artifacts.py`,
 `runtime_files.py` and `runtime_install.py`. Provider manifest policy stays opaque;

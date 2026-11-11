@@ -2398,6 +2398,17 @@ journal retains operation IDs, monotonic trust and interrupted generations.
 Cancellation of a waiting interface does not abandon owned installation work;
 only the fsynced completion marker publishes a staged generation. Staging never
 switches the active owner or changes cleanup state.
+Native runtime envelope 3 carries release envelope 2 and exact canonical
+protocol-five manifest bytes. `native_contracts.py` delegates their admission to
+the qualified public compiled kernel; Core does not emulate its author/schema
+rules. Native signatures and generation identities use the `skulk.runtime/3\0`
+domain. The complete public source/profile identity and artifact-family wheel
+hash/length are pinned. Staging retains `native-manifest.json` and checks the
+fresh installed reader's full manifest identity and all four fingerprints before
+completion. Legacy runtime envelope 2 retains its original signing bytes.
+Ordinary selection refuses a change between legacy and native author semantics,
+or between different native author/managed fingerprints. Matching state/schema
+labels do not authorize profile migration of retained settings or grants.
 `runtime_integrity.py` seals installed files, permissions and interpreter identity.
 Cached verification refuses a missing or changed seal before private Python can
 execute startup code; runtime commands disable bytecode writes. The interpreter

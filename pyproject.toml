@@ -5,6 +5,8 @@ description = "Skulk: distributed AI inference across heterogeneous clusters (Ap
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+  # Qualified public native contracts; other artifact families refuse this profile.
+  "skulk-capability-kernel==0.4.0rc1; (sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64'))",
   "aiofiles>=24.1.0",
   "aiohttp>=3.14.4",
   "types-aiofiles>=24.1.0.20250708",
@@ -160,6 +162,12 @@ members = ["rust/skulk_pyo3_bindings", "bench"]
 
 [tool.uv.sources]
 skulk_pyo3_bindings = { workspace = true }
+# Public cohort assets remain immutable inputs to the normal frozen install.
+skulk-capability-kernel = [
+  { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.4.0-rc.1/skulk_capability_kernel-0.4.0rc1-cp313-abi3-manylinux_2_34_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.4.0-rc.1/skulk_capability_kernel-0.4.0rc1-cp313-abi3-manylinux_2_34_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+  { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.4.0-rc.1/skulk_capability_kernel-0.4.0rc1-cp313-abi3-macosx_11_0_arm64.whl", marker = "sys_platform == 'darwin' and platform_machine == 'arm64'" },
+]
 # Using official mlx — the RDMA fork (rltakashige/mlx-jaccl-fix-small-recv) doesn't
 # build on macOS 26 Metal SDK. The fork's only change is a DSB memory barrier for
 # Thunderbolt RDMA GPU coherence, which we don't need (Skulk uses libp2p, not RDMA).
@@ -232,7 +240,13 @@ root = "src"
 # supported platforms for this project
 [tool.uv]
 required-version = ">=0.8.6"
-environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
+# The MLX hard dependency already has binaries only for Apple Silicon and
+# Linux x86_64/aarch64. Declare those real installation targets so a new
+# platform-specific dependency does not ask uv to solve imaginary architectures.
+environments = [
+  "sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+]
 extra-build-dependencies = { "miniaudio" = ["setuptools", "cffi", "pycparser"] }
 
 ###

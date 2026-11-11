@@ -1,4 +1,4 @@
-"""Build-time resource closure for Skulk's public preservation dependency."""
+"""Build-time resource closure for Skulk's public native dependencies."""
 
 from importlib.metadata import distribution
 from pathlib import Path
@@ -7,6 +7,41 @@ from pathlib import Path
 def get_hook_dirs() -> list[str]:
     """Expose Skulk's dependency hooks to ordinary PyInstaller builds."""
     return [str(Path(__file__).parent)]
+
+
+def native_contract_data_files() -> list[tuple[str, str]]:
+    """Collect the native cohort and public reader metadata without installer state.
+
+    The module hook supplies the compiled reader as a hidden import. PyInstaller
+    then follows its binary dependencies; these data files retain the exact
+    cohort and distribution identity that Core checks at runtime. Missing inputs
+    fail the build instead of producing a frozen reader that fails admission.
+    """
+    cohort = Path(__file__).parents[1] / "extensions" / "native-cohort.json"
+    if not cohort.is_file():
+        raise FileNotFoundError("native contract cohort resource is missing")
+    package = distribution("skulk-capability-kernel")
+    result: list[tuple[str, str]] = [(str(cohort), "skulk/extensions")]
+    found_metadata = False
+    licenses: set[str] = set()
+    for entry in package.files or ():
+        if not entry.parts[0].endswith(".dist-info"):
+            continue
+        if entry.name == "METADATA":
+            found_metadata = True
+        elif len(entry.parts) > 2 and entry.parts[1] == "licenses":
+            licenses.add(Path(*entry.parts[2:]).as_posix())
+        else:
+            continue
+        source = Path(str(package.locate_file(entry)))
+        if not source.is_file():
+            raise FileNotFoundError("native reader distribution resource is missing")
+        result.append((str(source), str(entry.parent)))
+    if not found_metadata or not set(
+        package.metadata.get_all("License-File") or ()
+    ).issubset(licenses):
+        raise FileNotFoundError("native reader metadata or declared license is missing")
+    return result
 
 
 def preservation_data_files() -> list[tuple[str, str]]:
