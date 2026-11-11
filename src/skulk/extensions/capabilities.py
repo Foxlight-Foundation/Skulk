@@ -31,6 +31,7 @@ from typing import Literal, final
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from skulk.extensions.managed_limits import MAX_MANAGED_DESCRIPTORS
+from skulk.extensions.native_contracts import NativeDescriptor
 
 CapabilityIoMode = Literal[
     "unary", "server_streaming", "client_streaming", "bidirectional"
@@ -178,7 +179,7 @@ class CapabilityDescriptor(BaseModel):
         return f"{self.id}@{self.version}"
 
 
-def descriptor_revision(descriptor: CapabilityDescriptor) -> str:
+def descriptor_revision(descriptor: CapabilityDescriptor | NativeDescriptor) -> str:
     """Content digest of a descriptor, detecting any drift in its shape.
 
     Calls carry this revision alongside ``id@version`` so discovery and
@@ -191,8 +192,11 @@ def descriptor_revision(descriptor: CapabilityDescriptor) -> str:
         descriptor: The descriptor to digest.
 
     Returns:
-        A short hex SHA-256 digest of the canonical JSON form.
+        The legacy sixteen-character canonical SHA-256 digest, or the full
+        domain-separated native descriptor identity for an explicit native view.
     """
+    if isinstance(descriptor, NativeDescriptor):
+        return descriptor.revision
     canonical = json.dumps(
         descriptor.model_dump(mode="json"),
         sort_keys=True,
@@ -209,7 +213,8 @@ class RegisteredCapabilitySummary(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     qualified_id: str = Field(max_length=256, description="Declared id@version.")
     revision: str = Field(
-        pattern=r"^[a-f0-9]{16}$", description="Exact descriptor digest."
+        pattern=r"^(?:[a-f0-9]{16}|[a-f0-9]{64})$",
+        description="Exact legacy or full native descriptor digest.",
     )
     title: str = Field(max_length=128, description="Bounded declared title.")
     purpose: str = Field(

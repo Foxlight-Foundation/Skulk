@@ -216,7 +216,9 @@ def test_a_skulk_update_keeps_an_installed_release_running(tmp_path: Path) -> No
     updated = replace(host, skulk_version="1.9.4", skulk_build_sha256="f" * 64)
     assert verify_runtime(metadata, trust, updated, now=now).digest
     with pytest.raises(ValueError):
-        verify_runtime(metadata, trust, replace(updated, skulk_version="2.0.0"), now=now)
+        verify_runtime(
+            metadata, trust, replace(updated, skulk_version="2.0.0"), now=now
+        )
 
 
 @pytest.mark.parametrize(
@@ -467,10 +469,10 @@ async def test_cancelled_request_retains_installer_ownership(
 def test_the_protocol_window_is_current_and_previous_and_refuses_beyond_by_name(
     tmp_path: Path,
 ) -> None:
-    """Every accepted protocol installs; one beyond is refused naming the window.
+    """Keep legacy signing valid and refuse authenticated future versions by name.
 
-    Both windows hold one member today; the moment a second exists this runs
-    both rows, so compatibility code is never left untested.
+    Native runtime 3/release 2 has its own independently signed fixture in
+    test_native_runtime; envelope versions are paired, never a Cartesian product.
     """
     from skulk.extensions.runtime_artifacts import (
         ACCEPTED_RELEASE_PROTOCOLS,
@@ -478,17 +480,10 @@ def test_the_protocol_window_is_current_and_previous_and_refuses_beyond_by_name(
         ProtocolUnsupportedError,
     )
 
-    assert 1 <= len(ACCEPTED_RELEASE_PROTOCOLS) <= 2
-    assert 1 <= len(ACCEPTED_RUNTIME_PROTOCOLS) <= 2
-    for runtime_protocol in ACCEPTED_RUNTIME_PROTOCOLS:
-        for release_protocol in ACCEPTED_RELEASE_PROTOCOLS:
-            directory = tmp_path / f"{runtime_protocol}-{release_protocol}"
-            metadata, trust, host = artifacts(
-                directory,
-                runtime_protocol=runtime_protocol,
-                release_protocol=release_protocol,
-            )
-            assert verify_runtime(metadata, trust, host, now=int(time.time()))
+    assert ACCEPTED_RELEASE_PROTOCOLS == (1, 2)
+    assert ACCEPTED_RUNTIME_PROTOCOLS == (2, 3)
+    metadata, trust, host = artifacts(tmp_path / "legacy")
+    assert verify_runtime(metadata, trust, host, now=int(time.time()))
     beyond = tmp_path / "beyond"
     metadata, trust, host = artifacts(
         beyond, runtime_protocol=max(ACCEPTED_RUNTIME_PROTOCOLS) + 1

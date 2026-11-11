@@ -268,8 +268,8 @@ def create_managed_plugins_router(
             description="Exact installed id@version from the inventory.",
         ),
         revision: str = Query(
-            pattern=r"^[a-f0-9]{16}$",
-            description="Exact descriptor digest from the installed inventory.",
+            pattern=r"^(?:[a-f0-9]{16}|[a-f0-9]{64})$",
+            description="Exact legacy (16 hex) or native (64 hex) descriptor digest from the installed inventory.",
         ),
     ) -> InstalledContract:
         """Return the exact selected contract without invoking its operation."""
