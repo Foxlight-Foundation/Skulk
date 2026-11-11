@@ -126,7 +126,9 @@ jobs:
 
   dashboard-test:
     name: Dashboard browser tests
-    runs-on: ubuntu-latest
+    # The locked Playwright release must support the runner distribution before
+    # Chromium dependencies can be installed; ubuntu-latest can advance sooner.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
