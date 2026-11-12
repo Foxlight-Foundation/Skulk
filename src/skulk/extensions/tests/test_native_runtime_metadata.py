@@ -1,5 +1,6 @@
 """Native selected declarations retain full identity without granting execution."""
 
+import hashlib
 import json
 import time
 from collections.abc import AsyncIterator
@@ -9,6 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import JsonValue
 
 from skulk.api.plugins import create_plugins_router
 from skulk.api.tests.test_operator_gateway import paired_service
@@ -22,22 +24,146 @@ from skulk.extensions.native_contracts import NativeDescriptor
 from skulk.extensions.runtime_artifacts import (
     QualifiedHost,
     VerifiedRuntime,
+    canonical_json,
     verify_runtime,
 )
+from skulk.extensions.runtime_catalog import CatalogSourceUpdate
+from skulk.extensions.runtime_download import RuntimeDownloads
 from skulk.extensions.runtime_files import private_directory, write_private
 from skulk.extensions.runtime_manager import (
+    CatalogInstall,
+    CatalogInstallation,
+    CatalogInstallRequest,
+    CatalogRead,
+    CatalogRequest,
     InstallationRequest,
     InstalledContractRequest,
 )
 from skulk.extensions.runtime_selection import RuntimeSelection, RuntimeSelector
+from skulk.extensions.tests.test_call_runtime import call_fixture
 from skulk.extensions.tests.test_managed_services import connect, manager_fixture
 from skulk.extensions.tests.test_native_runtime import OBJECT, native_fixture, sign
 from skulk.extensions.tests.test_runtime_install import artifacts
 from skulk.operator.pairing import PluginGrantUpdate
 
 
+@pytest.mark.parametrize("calls", [False, True])
+@pytest.mark.parametrize("changed_artifact", [False, True])
+async def test_native_catalog_consent_reads_the_verified_inner_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calls: bool,
+    changed_artifact: bool,
+) -> None:
+    """Real signed catalog binding preserves native identity without staging code."""
+    factory = call_fixture if calls else native_fixture
+    payload, key, trust, host = factory(tmp_path / "source")
+    metadata = sign(
+        payload, key, b"skulk.runtime/4\0" if calls else b"skulk.runtime/3\0"
+    )
+    runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
+    release = runtime.claims.release
+    manifest = runtime.native_manifest
+    assert manifest is not None
+    now = int(time.time())
+    entry: dict[str, JsonValue] = {
+        "bundle_id": manifest.bundle_id,
+        "bundle_version": manifest.bundle_version,
+        "publisher": release.publisher,
+        "sequence": release.sequence,
+        "feed_url": "https://native.example.test/releases/",
+        "release_sha256": hashlib.sha256(metadata).hexdigest(),
+        "release_digest": runtime.digest,
+        "runtime_platform": host.platform,
+        "artifact_sha256": "b" * 64 if changed_artifact else manifest.executable_sha256,
+        "artifact_size": release.artifact_size,
+        "transfer_bytes": release.artifact_size
+        + sum(w.size for w in runtime.claims.wheels),
+        "platforms": list(release.platforms),
+        "skulk_build_sha256": release.skulk_build_sha256,
+        "skulk_requires": manifest.skulk_requires,
+        "permissions": list(release.permissions),
+        "descriptors": ["UpperCase:Echo@native@1.0.0"],
+        "expires_at": release.expires_at,
+    }
+    catalog: dict[str, JsonValue] = {
+        "protocol": 2,
+        "publisher": release.publisher,
+        "revision": 1,
+        "created_at": now - 1,
+        "expires_at": now + 3600,
+        "entries": [entry],
+    }
+    document = canonical_json(
+        {
+            "catalog": catalog,
+            "signature": key.sign(canonical_json(catalog)).hex(),
+        }
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://native.example.test/catalog.json":
+            return httpx.Response(200, content=document)
+        if str(request.url) == "https://native.example.test/releases/release.json":
+            return httpx.Response(200, content=metadata)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(respond)
+
+    def downloads(root: Path) -> RuntimeDownloads:
+        return RuntimeDownloads(root, transport=transport)
+
+    monkeypatch.setattr("skulk.extensions.runtime_manager.RuntimeDownloads", downloads)
+    manager = manager_fixture(tmp_path / "manager", monkeypatch)
+    monkeypatch.setattr("skulk.extensions.runtime_manager.measure_host", lambda: host)
+    monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
+    manager.catalog.transport = transport
+    await manager.start()
+    try:
+        await manager.catalog.configure(
+            CatalogSourceUpdate(
+                expected_revision=0,
+                base_url="https://native.example.test/",
+                document_filename="catalog.json",
+                trust=trust,
+            )
+        )
+        read = CatalogRead.model_validate_json(
+            json.dumps(
+                await manager.dispatch(
+                    CatalogRequest(action="read_catalog"),
+                )
+            )
+        )
+        request = CatalogInstallRequest(
+            request=CatalogInstall(
+                catalog_sha256=read.review.catalog_sha256,
+                bundle_id=manifest.bundle_id,
+                sequence=release.sequence,
+                runtime_platform=host.platform,
+                plugin_id="managed.native-catalog",
+            )
+        )
+        if changed_artifact:
+            with pytest.raises(ValueError, match="differs from the listing"):
+                await manager.dispatch(request)
+        else:
+            bound = CatalogInstallation.model_validate_json(
+                json.dumps(await manager.dispatch(request))
+            )
+            assert bound.review.runtime_digest == runtime.digest
+            assert bound.listing.artifact_sha256 == manifest.executable_sha256
+        controller = manager.controllers["managed.native-catalog"]
+        assert controller.selector.current() is None
+        assert controller.service is None or controller.service.process is None
+        assert not (controller.root / "generations").exists()
+    finally:
+        await manager.close()
+
+
+@pytest.mark.parametrize("calls", [False, True])
 async def test_native_installed_metadata_round_trips_without_startup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calls: bool
 ) -> None:
     """The real metadata RPC/HTTP path preserves native schemas and full revisions.
 
@@ -56,8 +182,11 @@ async def test_native_installed_metadata_round_trips_without_startup(
             InstallationRequest(action="register", plugin_id=identifier)
         )
         controller = manager.controllers[identifier]
-        payload, key, trust, host = native_fixture(tmp_path / "source")
-        metadata = sign(payload, key)
+        factory = call_fixture if calls else native_fixture
+        payload, key, trust, host = factory(tmp_path / "source")
+        metadata = sign(
+            payload, key, b"skulk.runtime/4\0" if calls else b"skulk.runtime/3\0"
+        )
         runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
         manifest = runtime.native_manifest
         assert manifest is not None

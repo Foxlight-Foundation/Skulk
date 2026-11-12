@@ -5255,6 +5255,8 @@ and native calls interpretations, or different profile fingerprints, even when
 state/schema labels match. Such a transition requires separately qualified
 explicit state migration. Existing disable and recovery remain available.
 Native call startup does not make native capabilities invocable or delegable.
+Catalog consent, installed inventory and exact contract reads unwrap the native
+manifest for both runtime envelopes 3 and 4 while retaining full descriptor IDs.
 
 `skulk-plugin-service install-plugin --from-catalog BUNDLE_ID [--sequence N]
 [--platform FAMILY] [MANAGED_ID]` installs a listed release. The terminal reads
