@@ -63,6 +63,28 @@ print(json.dumps({'version':importlib.metadata.version('skulk-capability-kernel'
 """
 
 
+_CALL_READER = """import importlib.metadata,json
+from pathlib import Path
+import _skulk_capability_kernel as kernel
+source=Path('native-manifest.json').read_bytes()
+record=kernel.ManagedContract.from_json('Manifest',source.decode())
+if record.canonical() != source: raise ValueError('noncanonical native manifest')
+health={'protocol':1,'contract_profile':'skulk.calls/1',
+'profile_digest':kernel.calls_profile_digest(),'kind':'health','payload_size':0,
+'nonce':'installed-qualification','ready':False,'surfaces':[]}
+metadata,body=kernel.decode_call_frame(kernel.encode_call_frame(json.dumps(health),b''))
+if json.loads(metadata) != health or body: raise ValueError('installed call codec refused')
+print(json.dumps({'version':importlib.metadata.version('skulk-capability-kernel'),
+'manifest_digest':record.digest,
+'portable':kernel.portable_profile_digest(),
+'managed':kernel.managed_profile_digest(),
+'handshake':kernel.handshake_profile_digest(),
+'transport':kernel.transport_profile_digest(),
+'composition':kernel.composition_profile_digest(),
+'calls':kernel.calls_profile_digest()},sort_keys=True))
+"""
+
+
 def _check_native_manifest(generation: Path, runtime: VerifiedRuntime) -> None:
     """Refuse changed retained native bytes before launching any generation code."""
     if (native := runtime.native_manifest) is not None and read_private(
@@ -559,8 +581,11 @@ class RuntimeInstaller:
                 if json.loads(inventory) != runtime.inventory:
                     raise ValueError("installed runtime inventory differs")
                 if (native := runtime.native_manifest) is not None:
+                    reader = (
+                        _CALL_READER if runtime.claims.protocol == 4 else _NATIVE_READER
+                    )
                     observed = await _execute(
-                        (python, "-I", "-B", "-c", _NATIVE_READER), generation, lock, 30
+                        (python, "-I", "-B", "-c", reader), generation, lock, 30
                     )
                     payload = TypeAdapter(dict[str, JsonValue]).validate_json(
                         runtime.payload

@@ -5243,10 +5243,20 @@ public-kernel profile identities and pinned native binaries; their signatures an
 generation digests use `skulk.runtime/3\0`. Installation repeats native-reader
 identity checks in the fresh offline runtime before completion. Staging does not
 activate the capability or migrate its protected state.
-Ordinary selection/activation refuses a change between legacy and native author
-semantics, or different native author/managed profile fingerprints, even when
-state/schema labels match. Such a transition requires a separately qualified
-profile migration. Existing disable and recovery remain available.
+Runtime envelope 4 adds an explicit `control_profile: "skulk.calls/1"`, all six
+public kernel 0.6.0rc1 profile fingerprints, exact native wheel bytes, and the
+separate `skulk.runtime/4\0` signature/digest domain. The installed interpreter
+must verify all six fingerprints and the compiled call codec before completion.
+The bounded migration window accepts runtime envelopes 2, 3 and 4; existing
+signed closures and signature bytes remain unchanged. Reader compatibility never
+authorizes changing an issued generation's binary.
+Ordinary selection/activation refuses a change between legacy, native transport
+and native calls interpretations, or different profile fingerprints, even when
+state/schema labels match. Such a transition requires separately qualified
+explicit state migration. Existing disable and recovery remain available.
+Native call startup does not make native capabilities invocable or delegable.
+Catalog consent, installed inventory and exact contract reads unwrap the native
+manifest for both runtime envelopes 3 and 4 while retaining full descriptor IDs.
 
 `skulk-plugin-service install-plugin --from-catalog BUNDLE_ID [--sequence N]
 [--platform FAMILY] [MANAGED_ID]` installs a listed release. The terminal reads

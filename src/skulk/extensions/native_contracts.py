@@ -114,21 +114,40 @@ def cohort() -> dict[str, JsonValue]:
 
 @lru_cache(maxsize=1)
 def public_native_kernel() -> NativeKernel:
-    """Load the qualified reader and refuse missing or different loaded semantics."""
+    """Load a qualified reader for frozen native semantics without swapping closures.
+
+    The new binary repeats the unchanged four profiles. Its ability to read old
+    records does not change the exact old wheel selected by a signed runtime.
+    """
+    from skulk.extensions.native_call_contracts import (
+        CALL_KERNEL_VERSION,
+        CallKernel,
+        call_cohort,
+    )
+
     try:
-        if importlib.metadata.version("skulk-capability-kernel") != KERNEL_VERSION:
+        version = importlib.metadata.version("skulk-capability-kernel")
+        if version not in (KERNEL_VERSION, CALL_KERNEL_VERSION):
             raise ValueError("native kernel version refused")
         kernel = cast(
             NativeKernel,
             cast(object, importlib.import_module("_skulk_capability_kernel")),
         )
-        profiles = cohort()["profiles"]
-        actual = (
+        actual: tuple[str, ...] = (
             kernel.portable_profile_digest(),
             kernel.managed_profile_digest(),
             kernel.handshake_profile_digest(),
             kernel.transport_profile_digest(),
         )
+        if version == CALL_KERNEL_VERSION:
+            selected = cast(CallKernel, kernel)
+            actual += (
+                selected.composition_profile_digest(),
+                selected.calls_profile_digest(),
+            )
+            profiles = call_cohort()["profiles"]
+        else:
+            profiles = cohort()["profiles"]
         if (
             not isinstance(profiles, list)
             or tuple(
@@ -213,7 +232,7 @@ class NativeDescriptor(BaseModel):
 
 @final
 class NativeManifest(BaseModel):
-    """Exact native manifest bytes carried by runtime envelope three."""
+    """Exact native manifest bytes carried by explicitly native runtime envelopes."""
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     canonical_json: str = Field(

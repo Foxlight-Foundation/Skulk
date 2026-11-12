@@ -182,7 +182,7 @@ def installed_release(staged: Path) -> InstalledRelease | None:
     manifest = release.get("manifest") if isinstance(release, dict) else None
     if not isinstance(release, dict) or not isinstance(manifest, dict):
         return None
-    native = isinstance(runtime, dict) and runtime.get("protocol") == 3
+    native = isinstance(runtime, dict) and runtime.get("protocol") in (3, 4)
     if native:
         try:
             manifest = NativeManifest.model_validate_json(
@@ -632,7 +632,7 @@ def _listing_matches(
     runtime = _OBJECT.validate_python(signed["runtime"])
     release = _OBJECT.validate_python(runtime["release"])
     manifest = _OBJECT.validate_python(release["manifest"])
-    if runtime.get("protocol") == 3:
+    if runtime.get("protocol") in (3, 4):
         # This metadata was authenticated during review. Read its exact native
         # manifest for consent comparison instead of treating the byte wrapper
         # as the legacy declaration.
@@ -1291,7 +1291,7 @@ class RuntimeManager:
             manifest = release.get("manifest") if isinstance(release, dict) else None
             if not isinstance(manifest, dict):
                 raise ValueError("installed contract metadata unavailable")
-            if isinstance(runtime, dict) and runtime.get("protocol") == 3:
+            if isinstance(runtime, dict) and runtime.get("protocol") in (3, 4):
                 manifest = NativeManifest.model_validate_json(
                     canonical_json(manifest)
                 ).value()
