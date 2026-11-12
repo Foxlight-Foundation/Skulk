@@ -48,6 +48,51 @@ def _shard(source_revision: str) -> PipelineShardMetadata:
     )
 
 
+@pytest.mark.parametrize("accepted_location", ["default", "staging", None])
+@pytest.mark.parametrize("search_default", [False, True])
+def test_signed_fallbacks_reject_stale_cards_and_continue_to_matching_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    accepted_location: str | None,
+    search_default: bool,
+) -> None:
+    """A default/staging fallback cannot undo the search path's signed refusal."""
+    card = _shard(_NEW_REVISION).model_card.model_copy(
+        update={
+            "registry_card_id": "card_" + "b" * 52,
+            "registry_snapshot_id": "snapshot_2_current",
+            "registry_provenance": "agent",
+        }
+    )
+    stale = card.model_copy(update={"registry_card_id": "card_" + "a" * 52})
+    models = tmp_path / "models"
+    home = tmp_path / "home"
+    locations = {
+        "default": models / card.model_id.normalize(),
+        "staging": home / ".skulk/staging" / card.model_id.normalize(),
+    }
+    for name, directory in locations.items():
+        directory.mkdir(parents=True)
+        (directory / "model.gguf").write_bytes(b"weights")
+        (directory / ".skulk-source-revision").write_text(_NEW_REVISION + "\n")
+        write_installed_card(
+            directory,
+            build_installed_card_record(
+                directory, card if name == accepted_location else stale
+            ),
+        )
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", models)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (models,) if search_default else ())
+    monkeypatch.setattr(Path, "home", lambda: home)
+    if accepted_location is None:
+        with pytest.raises(FileNotFoundError):
+            build_model_path(card.model_id, _NEW_REVISION, expected_card=card)
+    else:
+        assert build_model_path(
+            card.model_id, _NEW_REVISION, expected_card=card
+        ) == locations[accepted_location]
+
+
 def test_unpinned_resolution_rejects_pinned_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

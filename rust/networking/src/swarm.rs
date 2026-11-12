@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::pin::Pin;
+use std::time::{Duration, Instant};
 
 pub(crate) use crate::swarm::transport::data_plane_trust;
 #[cfg(test)]
@@ -28,6 +30,83 @@ const ELECTION_TOPIC: &str = "election_messages";
 const ELECTION_PROTOCOL_PREFIX: &str = "/skulk/election/meshsub";
 const TELEMETRY_TOPIC: &str = "telemetry";
 const TELEMETRY_PROTOCOL_PREFIX: &str = "/skulk/telemetry/meshsub";
+const TELEMETRY_NO_PEER_GRACE: Duration = Duration::from_secs(30);
+const TELEMETRY_NO_PEER_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct TelemetryNoPeerReporter {
+    first_failure_at: Option<Instant>,
+    previous_report_at: Option<Instant>,
+    consecutive_failures: u64,
+}
+
+struct TelemetryNoPeerReport {
+    elapsed: Duration,
+    failures: u64,
+}
+
+impl TelemetryNoPeerReporter {
+    fn observe(
+        &mut self,
+        connected_no_peer_failure: bool,
+        observed_at: Instant,
+    ) -> Option<TelemetryNoPeerReport> {
+        // A standalone node normally has no remote subscribers. Only diagnose
+        // repeated failures while another authenticated connection is present.
+        if !connected_no_peer_failure {
+            *self = Self::default();
+            return None;
+        }
+        let first_failure_at = *self.first_failure_at.get_or_insert(observed_at);
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let elapsed = observed_at.saturating_duration_since(first_failure_at);
+        if elapsed < TELEMETRY_NO_PEER_GRACE
+            || self.previous_report_at.is_some_and(|previous| {
+                observed_at.saturating_duration_since(previous)
+                    < TELEMETRY_NO_PEER_REPORT_INTERVAL
+            })
+        {
+            return None;
+        }
+        self.previous_report_at = Some(observed_at);
+        Some(TelemetryNoPeerReport {
+            elapsed,
+            failures: self.consecutive_failures,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TelemetrySubscriberSnapshot {
+    known_peers: usize,
+    protocol_peers: BTreeMap<&'static str, usize>,
+    topic_subscribers: usize,
+    mesh_peers: usize,
+    locally_subscribed: bool,
+}
+
+fn telemetry_subscriber_snapshot(
+    behaviour: &gossipsub::Behaviour,
+    topic: &gossipsub::TopicHash,
+) -> TelemetrySubscriberSnapshot {
+    // Upstream exposes protocol values without re-exporting their enum. Its
+    // public static labels preserve every kind without parsing Debug output or
+    // depending on private variants. Counts never contain peer identities.
+    let mut protocol_peers = BTreeMap::new();
+    for (_, kind) in behaviour.peer_protocol() {
+        *protocol_peers.entry(kind.as_static_ref()).or_insert(0) += 1;
+    }
+    TelemetrySubscriberSnapshot {
+        known_peers: behaviour.all_peers().count(),
+        protocol_peers,
+        topic_subscribers: behaviour
+            .all_peers()
+            .filter(|(_, topics)| topics.iter().any(|subscribed| *subscribed == topic))
+            .count(),
+        mesh_peers: behaviour.mesh_peers(topic).count(),
+        locally_subscribed: behaviour.topics().any(|subscribed| subscribed == topic),
+    }
+}
 
 // Uses oneshot senders to emulate function calling apis while avoiding requiring unique ownership
 // of the Swarm.
@@ -80,12 +159,13 @@ impl Swarm {
             mut swarm,
             mut from_client,
         } = self;
+        let mut telemetry_no_peer_reporter = TelemetryNoPeerReporter::default();
         let stream = async_stream::stream! {
             loop {
                 tokio::select! {
                     msg = from_client.recv() => {
                         let Some(msg) = msg else { break };
-                        on_message(&mut swarm, msg);
+                        on_message(&mut swarm, msg, &mut telemetry_no_peer_reporter);
                     }
                     event = swarm.next() => {
                         let Some(event) = event else { break };
@@ -100,7 +180,11 @@ impl Swarm {
     }
 }
 
-fn on_message(swarm: &mut libp2p::Swarm<Behaviour>, message: ToSwarm) {
+fn on_message(
+    swarm: &mut libp2p::Swarm<Behaviour>,
+    message: ToSwarm,
+    telemetry_no_peer_reporter: &mut TelemetryNoPeerReporter,
+) {
     match message {
         ToSwarm::ListenAddresses { result_sender } => {
             // Query the running swarm: the requested port may have been zero.
@@ -181,10 +265,44 @@ fn on_message(swarm: &mut libp2p::Swarm<Behaviour>, message: ToSwarm) {
                 let legacy = swarm.behaviour_mut().gossipsub.publish(topic_id, data);
                 combine_election_publish_results(isolated, legacy)
             } else if topic == TELEMETRY_TOPIC {
-                swarm
+                let topic_hash = topic_id.hash();
+                let result = swarm
                     .behaviour_mut()
                     .telemetry_gossipsub
-                    .publish(topic_id, data)
+                    .publish(topic_id, data);
+                let connected_peers = swarm.connected_peers().count();
+                let connected_no_peer_failure = connected_peers > 0
+                    && matches!(
+                        &result,
+                        Err(gossipsub::PublishError::NoPeersSubscribedToTopic)
+                    );
+                if let Some(report) =
+                    telemetry_no_peer_reporter.observe(connected_no_peer_failure, Instant::now())
+                {
+                    let snapshot = telemetry_subscriber_snapshot(
+                        &swarm.behaviour().telemetry_gossipsub,
+                        &topic_hash,
+                    );
+                    // PyO3 logging suppresses raw gossipsub behaviour dumps.
+                    // Keep this separate target at warning level, with counts
+                    // only: operators need evidence without payloads/peer IDs.
+                    log::warn!(
+                        "Telemetry publication repeatedly had no subscribed peers: \
+                         elapsed_seconds={}, consecutive_failures={}, connected_peers={}, \
+                         telemetry_known_peers={}, telemetry_protocol_peers={:?}, \
+                         topic_subscribers={}, mesh_peers={}, \
+                         locally_subscribed={}; inspect the telemetry protocol/subscriptions",
+                        report.elapsed.as_secs(),
+                        report.failures,
+                        connected_peers,
+                        snapshot.known_peers,
+                        snapshot.protocol_peers,
+                        snapshot.topic_subscribers,
+                        snapshot.mesh_peers,
+                        snapshot.locally_subscribed,
+                    );
+                }
+                result
             } else {
                 swarm.behaviour_mut().gossipsub.publish(topic_id, data)
             };
@@ -476,8 +594,133 @@ mod behaviour {
 
 #[cfg(test)]
 mod tests {
-    use super::{ELECTION_TOPIC, TELEMETRY_TOPIC, behaviour::Behaviour};
+    use super::{
+        ELECTION_TOPIC, TELEMETRY_TOPIC, TelemetryNoPeerReporter, TelemetrySubscriberSnapshot,
+        behaviour::Behaviour, telemetry_subscriber_snapshot,
+    };
     use libp2p::{gossipsub, identity};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn connected_no_peer_warning_waits_for_startup_grace() {
+        let mut reporter = TelemetryNoPeerReporter::default();
+        let start = Instant::now();
+        assert!(reporter.observe(true, start).is_none());
+        assert!(
+            reporter
+                .observe(true, start + Duration::from_secs(29))
+                .is_none()
+        );
+        let report = reporter
+            .observe(true, start + Duration::from_secs(30))
+            .expect("persistent connected failure is diagnostic");
+        assert_eq!(report.elapsed, Duration::from_secs(30));
+        assert_eq!(report.failures, 3);
+    }
+
+    #[test]
+    fn sustained_no_peer_warnings_are_rate_limited() {
+        let mut reporter = TelemetryNoPeerReporter::default();
+        let start = Instant::now();
+        assert!(reporter.observe(true, start).is_none());
+        assert!(
+            reporter
+                .observe(true, start + Duration::from_secs(30))
+                .is_some()
+        );
+        for seconds in [31, 60, 89] {
+            assert!(
+                reporter
+                    .observe(true, start + Duration::from_secs(seconds))
+                    .is_none()
+            );
+        }
+        assert!(
+            reporter
+                .observe(true, start + Duration::from_secs(90))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn success_or_loss_of_connections_resets_the_warning_interval() {
+        let mut reporter = TelemetryNoPeerReporter::default();
+        let start = Instant::now();
+        assert!(reporter.observe(true, start).is_none());
+        assert!(
+            reporter
+                .observe(true, start + Duration::from_secs(30))
+                .is_some()
+        );
+        assert!(
+            reporter
+                .observe(false, start + Duration::from_secs(31))
+                .is_none()
+        );
+        assert!(
+            reporter
+                .observe(true, start + Duration::from_secs(120))
+                .is_none()
+        );
+        let report = reporter
+            .observe(true, start + Duration::from_secs(150))
+            .expect("new failure interval must earn its own grace");
+        assert_eq!(report.elapsed, Duration::from_secs(30));
+        assert_eq!(report.failures, 2);
+    }
+
+    #[test]
+    fn standalone_node_does_not_accumulate_a_remote_subscriber_warning() {
+        let mut reporter = TelemetryNoPeerReporter::default();
+        let start = Instant::now();
+        for seconds in [0, 30, 90, 180] {
+            assert!(
+                reporter
+                    .observe(false, start + Duration::from_secs(seconds))
+                    .is_none()
+            );
+        }
+        assert!(reporter.first_failure_at.is_none());
+        assert_eq!(reporter.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn subscriber_snapshot_uses_the_actual_isolated_topic_state() {
+        let keypair = identity::Keypair::generate_ed25519();
+        let mut behaviour = Behaviour::new(&keypair, Vec::new()).expect("valid behaviour");
+        let topic = gossipsub::IdentTopic::new(TELEMETRY_TOPIC);
+        let hash = topic.hash();
+        let expected = TelemetrySubscriberSnapshot {
+            known_peers: 0,
+            protocol_peers: Default::default(),
+            topic_subscribers: 0,
+            mesh_peers: 0,
+            locally_subscribed: false,
+        };
+        assert_eq!(
+            telemetry_subscriber_snapshot(&behaviour.telemetry_gossipsub, &hash),
+            expected
+        );
+        behaviour
+            .gossipsub
+            .subscribe(&topic)
+            .expect("separate control behaviour");
+        assert_eq!(
+            telemetry_subscriber_snapshot(&behaviour.telemetry_gossipsub, &hash),
+            expected
+        );
+        behaviour
+            .telemetry_gossipsub
+            .subscribe(&topic)
+            .expect("isolated telemetry subscription");
+        assert_eq!(
+            telemetry_subscriber_snapshot(&behaviour.telemetry_gossipsub, &hash),
+            TelemetrySubscriberSnapshot {
+                locally_subscribed: true,
+                ..expected
+            }
+        );
+    }
 
     #[test]
     fn election_topic_can_subscribe_on_both_gossipsub_behaviours() {

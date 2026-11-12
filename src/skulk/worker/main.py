@@ -14,6 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import anyio
 from anyio import (
@@ -23,7 +24,9 @@ from anyio import (
     fail_after,
     to_thread,
 )
+from anyio.lowlevel import checkpoint, checkpoint_if_cancelled
 from loguru import logger
+from packaging.tags import platform_tags
 from PIL import Image
 
 from skulk.download.download_utils import (
@@ -31,6 +34,18 @@ from skulk.download.download_utils import (
     build_model_path,
     companion_download_specs,
     installed_artifact_in_path,
+    resolve_native_music_source_directory,
+)
+from skulk.provisioning.ace_step_inventory import (
+    ACE_STEP_PACKAGES,
+    select_ace_step_package,
+)
+from skulk.provisioning.ace_step_manager import AceStepRuntimeManager
+from skulk.provisioning.demucs_inventory import DEMUCS_PACKAGES, select_demucs_package
+from skulk.provisioning.demucs_manager import DemucsRuntimeManager
+from skulk.provisioning.demucs_runtime import (
+    DemucsBuildMismatchError,
+    DemucsStorageError,
 )
 from skulk.routing.connection_message import ConnectionMessage
 from skulk.routing.output_media import OutputMediaPacket
@@ -47,9 +62,14 @@ from skulk.shared.backends import (
     engine_of,
 )
 from skulk.shared.constants import (
+    SKULK_ENGINES_DIR,
     SKULK_IMAGE_TRANSPORT_DEBUG,
     SKULK_MAX_CHUNK_SIZE,
     SKULK_MUSIC_OUTPUT_DIR,
+    SKULK_NATIVE_MUSIC_INPUT_DIR,
+    SKULK_NATIVE_MUSIC_OUTPUT_DIR,
+    SKULK_SEPARATION_INPUT_DIR,
+    SKULK_SEPARATION_OUTPUT_DIR,
     SKULK_VIDEO_INPUT_DIR,
     SKULK_VIDEO_OUTPUT_DIR,
 )
@@ -78,13 +98,21 @@ from skulk.shared.models.model_cards import (
     record_custom_card_mutation_applied,
     register_installed_card_record,
 )
+from skulk.shared.models.native_music_admission import assess_native_music_placement
 from skulk.shared.models.remote_code_approval import (
     MODEL_TRUST_FAILURE_MARKER,
     require_remote_code_approval,
 )
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.capability_nodes import CapabilityNodeSummary
-from skulk.shared.types.chunks import DataChunk, InputImageChunk, MusicChunk, VideoChunk
+from skulk.shared.types.chunks import (
+    DataChunk,
+    InputImageChunk,
+    MusicChunk,
+    MusicEditingChunk,
+    SeparationChunk,
+    VideoChunk,
+)
 from skulk.shared.types.commands import (
     FailInstance,
     ForwarderCommand,
@@ -100,10 +128,14 @@ from skulk.shared.types.diagnostics import (
     VisionMediaIngressDiagnostics,
 )
 from skulk.shared.types.events import (
+    AceStepPreparationCompleted,
+    AceStepPreparationRequested,
     AudioCppPreparationCompleted,
     AudioCppPreparationRequested,
     CustomModelCardAdded,
     CustomModelCardDeleted,
+    DemucsPreparationCompleted,
+    DemucsPreparationRequested,
     Event,
     IndexedEvent,
     ModelTrustApprovalChanged,
@@ -122,9 +154,11 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
+from skulk.shared.types.music import MusicOutputManifest
 from skulk.shared.types.profiling import MemoryUsage, NodeDataTransport, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
+    AudioSeparation,
     AudioTranscription,
     CancelTask,
     CreateRunner,
@@ -132,6 +166,8 @@ from skulk.shared.types.tasks import (
     ImageEdits,
     InstallEngine,
     LoadModel,
+    MusicEditing,
+    MusicGeneration,
     RealtimeAudioTranscription,
     Shutdown,
     SpeechSynthesis,
@@ -166,7 +202,12 @@ from skulk.shared.types.worker.instances import (
     InstanceId,
     LlamaRpcInstance,
 )
-from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
+from skulk.shared.types.worker.runners import (
+    RunnerFailed,
+    RunnerId,
+    RunnerReady,
+    RunnerStatus,
+)
 from skulk.shared.types.worker.shards import (
     RpcDonorShardMetadata,
     ShardMetadata,
@@ -199,12 +240,38 @@ from skulk.utils.info_gatherer.info_gatherer import (
 )
 from skulk.utils.info_gatherer.net_profile import check_reachable
 from skulk.utils.keyed_backoff import KeyedBackoff
+from skulk.utils.runtime_files import RuntimeLock
 from skulk.utils.task_group import TaskGroup
+from skulk.worker.ace_step_preparation import AceStepPreparationController
+from skulk.worker.demucs_preparation import DemucsPreparationController
+from skulk.worker.native_music_media import (
+    NativeMusicMediaOwner,
+    local_native_music_task,
+)
+from skulk.worker.native_music_output import NativeMusicTask
 from skulk.worker.plan import plan
+from skulk.worker.runner.ace_step.context import NativeMusicRunnerContext
+from skulk.worker.runner.ace_step.resources import NativeMusicHostGuard
 from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
 from skulk.worker.runner.comfy.orphan_sweep import sweep_orphaned_comfy_servers
+from skulk.worker.runner.demucs.context import SeparationRunnerContext
+from skulk.worker.runner.demucs.source_fence import (
+    SourceReadFence,
+    acquire_source_read_fence,
+)
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 from skulk.worker.runner.vllm.orphan_sweep import sweep_orphaned_vllm_engines
+from skulk.worker.separation_custody import (
+    SeparationSourceCustody,
+    separation_reader_key,
+)
+from skulk.worker.separation_input import (
+    SeparationInputReceiver,
+    local_separation_input_task,
+    separation_file_effect,
+)
+from skulk.worker.separation_output import SeparationOutputProducer
+from skulk.worker.separation_sources import SeparationSourceStore
 
 _STALE_RESET_MAX_WAIT_TICKS = 300
 """How many ~100ms planning ticks to hold planning while stale download
@@ -1209,6 +1276,22 @@ class Worker:
         self.download_command_sender = download_command_sender
         self._telemetry_sender = telemetry_sender
         self._offline = offline
+        self._demucs_platforms = frozenset(platform_tags())
+        self._demucs_manager = DemucsRuntimeManager(
+            SKULK_ENGINES_DIR / "demucs",
+            DEMUCS_PACKAGES,
+            self._demucs_platforms,
+        )
+        self._demucs_preparation = DemucsPreparationController(
+            self._demucs_manager, offline=offline
+        )
+        self._ace_step_platforms = frozenset(platform_tags())
+        self._ace_step_manager = AceStepRuntimeManager(
+            SKULK_ENGINES_DIR / "ace-step", ACE_STEP_PACKAGES, self._ace_step_platforms
+        )
+        self._ace_step_preparation = AceStepPreparationController(
+            self._ace_step_manager, offline=offline
+        )
         self._api_available = api_available
         self._data_transport: NodeDataTransport = data_transport
         # Data-plane connectivity sampler threaded into the InfoGatherer so
@@ -1286,6 +1369,11 @@ class Worker:
         # that the already-snapshotted eviction pass still considers idle.
         self._staging_runner_transition_lock = anyio.Lock()
         self._tg: TaskGroup = TaskGroup()
+        # Elections can retire a queued worker or interrupt off-loop startup
+        # before its task group exists. Own cancellation for the entire run,
+        # then join cleanup before the replacement worker can take over.
+        self._run_scope: anyio.CancelScope | None = None
+        self._shutdown_requested = False
 
         self._system_id = SystemId()
 
@@ -1352,8 +1440,253 @@ class Worker:
         # task each waiting instance was given, and one shared job per engine.
         self._on_demand_backends: frozenset[str] = frozenset()
         self._engine_install_tasks: dict[InstanceId, TaskId] = {}
+        self._demucs_creations: dict[InstanceId, CreateRunner] = {}
+        self._native_music_creations: dict[InstanceId, CreateRunner] = {}
+        self._native_music_creation_requests: dict[InstanceId, CommandId] = {}
+        self._separation_sources: SeparationSourceStore | None = None
+        self._separation_inputs: SeparationInputReceiver | None = None
+        self._separation_init_lock = anyio.Lock()
+        self._separation_readers: dict[CommandId, tuple[RunnerId, Path]] = {}
+        self._separation_rendered: set[CommandId] = set()
+        self._separation_outputs = SeparationOutputProducer(
+            self.node_id,
+            self._send_separation_output_packet,
+            self._fail_separation,
+        )
+        self._native_music_media = NativeMusicMediaOwner(
+            self.node_id, lambda: self.state,
+            SKULK_NATIVE_MUSIC_INPUT_DIR, SKULK_NATIVE_MUSIC_OUTPUT_DIR,
+            self._send_native_music_source_packet, self._send_separation_output_packet,
+            self._fail_native_music, self._native_music_reader_drained,
+        )
         self._engine_install_jobs: dict[EngineType | tuple[EngineType, str | None, str | None], _EngineInstallJob] = {}
         self._stopped: anyio.Event = anyio.Event()
+
+    async def _gather_node_resources(self) -> NodeResources:
+        """Compose current facts with this worker's verified native observations.
+
+        Preparation and periodic telemetry use the same owner. An installable
+        package is candidate metadata only and never becomes a ready backend.
+        """
+        peers = (
+            await self._zenoh_peer_sampler.advertised_count()
+            if self._zenoh_peer_sampler is not None
+            else None
+        )
+        resources = await NodeResources.gather(
+            api_available=self._api_available,
+            data_transport=self._data_transport,
+            zenoh_connected_peers=peers,
+        )
+        ready = self._demucs_preparation.engine_builds()
+        # Derive builds from one locked probe snapshot. Separate build/probe
+        # reads could straddle a concurrent withdrawal or successful prepare.
+        native_probes = self._ace_step_preparation.library_probes()
+        for supervisor in self.runners.values():
+            bound = supervisor.bound_instance
+            if self.state.instances.get(bound.instance.instance_id) != bound.instance:
+                continue
+            observation = supervisor.native_music_memory_snapshot()
+            policy = bound.bound_shard.native_music_policy
+            if observation is None or policy is None:
+                continue
+            probe = native_probes.get(policy.backend)
+            original = probe.memory_capacity if probe is not None else None
+            capacity = observation.capacity
+            if (
+                probe is None or original is None
+                or observation.payload_sha256 != probe.payload_sha256
+                or observation.device != probe.device
+                or capacity.sampled_at_unix_ms <= original.sampled_at_unix_ms
+                or any(getattr(capacity, field) != getattr(original, field) for field in (
+                    "host_total_bytes", "device_index", "device_memory_kind",
+                    "device_total_bytes", "shared_total_bytes",
+                ))
+            ):
+                continue
+            # Refresh only actual free capacity of the same physical pools.
+            # Native RSS/allocator observations never become allocation credit,
+            # and no sample can restore a withdrawn library or change its math.
+            native_probes[policy.backend] = probe.model_copy(update={"memory_capacity": capacity})
+        ready.update({
+            lane: "ace_step@sha256:" + probe.payload_sha256
+            for lane, probe in native_probes.items()
+        })
+        installable: dict[str, str] = {}
+        devices: tuple[Literal["cpu", "mps"], ...] = ("cpu", "mps")
+        for device in devices:
+            lane = "demucs-metal" if device == "mps" else "demucs-cpu"
+            try:
+                package = select_demucs_package(self._demucs_platforms, device=device)
+            except ValueError:
+                continue
+            installable[lane] = package.build_identity
+        native_devices: tuple[Literal["cpu", "mps", "cuda", "rocm"], ...] = (
+            "cpu", "mps", "cuda", "rocm"
+        )
+        for device in native_devices:
+            lane = "ace_step-metal" if device == "mps" else f"ace_step-{device}"
+            try:
+                native_package = select_ace_step_package(
+                    self._ace_step_platforms, device=device
+                )
+            except ValueError:
+                continue
+            installable[lane] = native_package.build_identity
+        return resources.model_copy(
+            update={
+                "backends": frozenset(
+                    lane for lane in resources.backends
+                    if not lane.startswith(("demucs", "ace_step"))
+                )
+                | frozenset(ready),
+                "on_demand_backends": frozenset(
+                    lane
+                    for lane in resources.on_demand_backends
+                    if not lane.startswith(("demucs", "ace_step"))
+                ),
+                "engine_builds": {
+                    **{
+                        lane: build
+                        for lane, build in resources.engine_builds.items()
+                        if not lane.startswith(("demucs", "ace_step"))
+                    },
+                    **ready,
+                },
+                "installable_engine_builds": {
+                    **{
+                        lane: build
+                        for lane, build in resources.installable_engine_builds.items()
+                        if not lane.startswith(("demucs", "ace_step"))
+                    },
+                    **installable,
+                },
+                "native_music_probes": native_probes,
+            }
+        )
+
+    async def _restore_cached_native_runtimes(self) -> None:
+        """Recheck retained libraries off-loop before restart placement can use them.
+
+        A clean installation remains download-free. Each engine owns one bounded
+        cached-only attempt and publishes only its newly verified observations;
+        ordinary placement and actual model loading still provide later gates.
+        """
+        await self._ace_step_preparation.restore_cached()
+        await self._publish_fresh_node_resources()
+        await self._demucs_preparation.restore_cached()
+        await self._publish_fresh_node_resources()
+
+    async def _prepare_ace_step_engine(self, request: AceStepPreparationRequested) -> None:
+        """Verify fixed native libraries off-loop and publish their ordered barrier."""
+        resources: NodeResources | None = None
+        error: str | None = None
+        try:
+            package = select_ace_step_package(
+                self._ace_step_platforms, device=request.device
+            )
+            if package.sha256 != request.package_sha256:
+                raise ValueError("requested native music package is outside the fixed inventory")
+            await self._ace_step_preparation.prepare(
+                request.request_id, package, device=request.device,
+                expires_at=request.expires_at,
+                progress=lambda phase: logger.debug("native music preparation: {}", phase),
+            )
+            resources = await self._gather_node_resources()
+            lane = "ace_step-metal" if request.device == "mps" else f"ace_step-{request.device}"
+            observed = resources.native_music_probes.get(lane)
+            if (
+                lane not in resources.backends
+                or resources.engine_builds.get(lane) != package.build_identity
+                or observed is None
+                or observed.payload_sha256 != package.payload_sha256
+                or observed.device != request.device
+            ):
+                raise RuntimeError("native music verification returned no matching library observation")
+            if self._telemetry_sender is None:
+                raise RuntimeError("node resource telemetry is unavailable")
+            await self._telemetry_sender.send(NodeTelemetry(node_id=self.node_id, info=resources))
+        except Exception as failure:  # noqa: BLE001 - settle only this preparation
+            resources = None
+            # Classify the known storage refusal without publishing exception
+            # text, which can contain private cache paths or command details.
+            error = (
+                "Native music preparation needs more free disk space on the selected worker; free storage and retry."
+                if isinstance(failure, DemucsStorageError)
+                else "Native music package/device preparation failed; inspect worker diagnostics, verified cache availability and offline policy."
+            )
+            logger.opt(exception=failure).warning("native music preparation failed")
+            # Failed revalidation withdraws the manager's old receipt. Publish
+            # that withdrawal promptly without letting a telemetry problem
+            # turn this request failure into a Worker-wide failure.
+            try:
+                await self._publish_fresh_node_resources()
+            except Exception as withdrawal:  # noqa: BLE001 - the request still settles
+                logger.opt(exception=withdrawal).warning(
+                    "native music resource withdrawal publication failed"
+                )
+        await self.event_sender.send(AceStepPreparationCompleted(
+            request_id=request.request_id, target_node=self.node_id,
+            owner_node=request.owner_node, package_sha256=request.package_sha256,
+            device=request.device, success=resources is not None, error=error,
+            resources=resources,
+        ))
+
+    async def _prepare_demucs_engine(self, request: DemucsPreparationRequested) -> None:
+        """Verify exact package/device off-loop before publishing an ordered barrier."""
+        resources: NodeResources | None = None
+        error: str | None = None
+        try:
+            package = select_demucs_package(
+                self._demucs_platforms, device=request.device
+            )
+            if package.sha256 != request.package_sha256:
+                raise ValueError(
+                    "requested package differs from this host's fixed inventory"
+                )
+            await self._demucs_preparation.prepare(
+                request.request_id,
+                package,
+                device=request.device,
+                expires_at=request.expires_at,
+                progress=lambda phase: logger.debug(
+                    "native separation preparation: {}", phase
+                ),
+            )
+            resources = await self._gather_node_resources()
+            lane = "demucs-metal" if request.device == "mps" else "demucs-cpu"
+            if (
+                lane not in resources.backends
+                or resources.engine_builds.get(lane) != package.build_identity
+            ):
+                raise RuntimeError(
+                    "native verification returned no exact prepared library observation"
+                )
+            if self._telemetry_sender is None:
+                raise RuntimeError("node resource telemetry is unavailable")
+            await self._telemetry_sender.send(
+                NodeTelemetry(node_id=self.node_id, info=resources)
+            )
+        except Exception as failure:  # noqa: BLE001 - settle this explicit preparation
+            resources = None
+            error = (
+                "Native separator preparation needs more free disk space on the selected worker; free storage and retry."
+                if isinstance(failure, DemucsStorageError)
+                else "Native separator package/device preparation failed; inspect worker diagnostics, cached package availability and offline policy."
+            )
+            logger.opt(exception=failure).warning(
+                "native separation preparation failed"
+            )
+        await self.event_sender.send(
+            DemucsPreparationCompleted(
+                request_id=request.request_id,
+                target_node=self.node_id,
+                owner_node=request.owner_node,
+                success=resources is not None,
+                error=error,
+                resources=resources,
+            )
+        )
 
     async def _prepare_audio_cpp_engine(
         self, request: AudioCppPreparationRequested
@@ -1375,18 +1708,10 @@ class Worker:
                 )
             )
             await to_thread.run_sync(refresh_node_facts)
-            peers = (
-                await self._zenoh_peer_sampler.advertised_count()
-                if self._zenoh_peer_sampler is not None
-                else None
-            )
-            resources = await NodeResources.gather(
-                api_available=self._api_available,
-                data_transport=self._data_transport,
-                zenoh_connected_peers=peers,
-            )
+            resources = await self._gather_node_resources()
             ready_lanes = {
-                backend for backend in resources.backends
+                backend
+                for backend in resources.backends
                 if backend.startswith("audio_cpp-")
                 and backend in resources.engine_builds
             }
@@ -1394,8 +1719,10 @@ class Worker:
                 ready_lanes
                 & {
                     "cpu": {
-                        "audio_cpp-cpu", "audio_cpp-metal",
-                        "audio_cpp-cuda", "audio_cpp-rocm",
+                        "audio_cpp-cpu",
+                        "audio_cpp-metal",
+                        "audio_cpp-cuda",
+                        "audio_cpp-rocm",
                     },
                     "vulkan": {"audio_cpp-vulkan"},
                     "cuda": {"audio_cpp-cuda"},
@@ -1403,11 +1730,13 @@ class Worker:
             )
             if not requested_ready:
                 details = "; ".join(
-                    conflict.message for conflict in resources.capability_conflicts
+                    conflict.message
+                    for conflict in resources.capability_conflicts
                     if "audio.cpp" in conflict.message.lower()
                 )
                 raise RuntimeError(
-                    details or f"prepared audio.cpp {request.variant} has no verified ready backend and build"
+                    details
+                    or f"prepared audio.cpp {request.variant} has no verified ready backend and build"
                 )
             if self._telemetry_sender is None:
                 raise RuntimeError("node resources telemetry is unavailable")
@@ -1479,6 +1808,15 @@ class Worker:
         instance). MLX grows KV lazily (no up-front window), so the budget floor is
         the correct estimate there, capped by a smaller enforced serving window.
         """
+        if shard.model_card.separation is not None:
+            from skulk.shared.models.separation_runtime import resolve_demucs_policy
+
+            try:
+                policy = resolve_demucs_policy(shard.model_card, shard.resolved_backend or "")
+            except ValueError:
+                return "Native separation has no implemented explicit engine policy; replan this configuration"
+            if shard.separation_policy != policy:
+                return "Native separation policy differs from placement; refresh resources and replan this configuration"
         if shard.memory_settings is not None and shard.resolved_backend is not None:
             actual = observe_engine_memory_settings(
                 os.environ,
@@ -1548,9 +1886,19 @@ class Worker:
                     )
         else:
             local = MemoryUsage.from_local_gpu_wireable()
-            usable = min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
+            native_cpu = (
+                shard.model_card.separation is not None
+                and shard.resolved_backend == "demucs-cpu"
+            )
+            usable = (
+                local.ram_available
+                if native_cpu
+                else min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
+            )
             pool = (
-                f"{local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
+                f"{local.ram_available.in_gb:.1f}GB available system RAM"
+                if native_cpu
+                else f"{local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
                 "the GPU working-set ceiling"
             )
         # Refuse only on a shortfall beyond the tolerance (#383): the footprint
@@ -1673,7 +2021,61 @@ class Worker:
             return ()
         return tuple(self._telemetry_view.local_capability_nodes.values())
 
-    async def run(self):
+    async def run(self) -> None:
+        """Run startup and worker tasks until cancellation, then join owned cleanup.
+
+        A shutdown requested before this coroutine starts prevents startup work.
+        Off-loop startup effects and native owners drain before shutdown returns.
+        """
+        try:
+            with anyio.CancelScope() as run_scope:
+                self._run_scope = run_scope
+                if self._shutdown_requested:
+                    run_scope.cancel()
+                await checkpoint()
+                await self._run_tasks()
+        finally:
+            self._run_scope = None
+            # Election replacement can cancel startup before the ingress tasks
+            # enter their receiver contexts. Retire those subscriptions even in
+            # that case: an idle rendezvous receiver otherwise blocks the live
+            # API/worker sharing its topic, including original-audio requests.
+            for receiver in (
+                self.event_receiver,
+                self._connection_message_receiver,
+                self._realtime_audio_receiver,
+                self._realtime_audio_packet_receiver,
+                self._speech_media_packet_receiver,
+                self._vision_media_packet_receiver,
+                self._output_media_packet_receiver,
+            ):
+                if receiver is not None:
+                    receiver.close()
+            # Actual shutdown code - waits for all tasks to complete before executing.
+            logger.info("Stopping Worker")
+            try:
+                with anyio.CancelScope(shield=True):
+                    # The task group has joined receiver/transfer file effects.
+                    # Do not delete originals merely because parent shutdown
+                    # finished: a native descendant may still hold its fence.
+                    if self._separation_sources is not None:
+                        await separation_file_effect(self._separation_sources.detach)
+                    await self._native_music_media.detach()
+                    try:
+                        await self._ace_step_preparation.close()
+                    finally:
+                        await self._demucs_preparation.close()
+            finally:
+                self.event_sender.close()
+                self.command_sender.close()
+                self.download_command_sender.close()
+                for runner in self.runners.values():
+                    runner.shutdown()
+                self._stopped.set()
+
+
+    async def _run_tasks(self) -> None:
+        """Prepare runtime resources and start the worker's supervised task group."""
         logger.info("Starting Worker")
         self._reconcile_staging_on_startup()
         # A vLLM engine core orphaned by an abrupt previous shutdown holds
@@ -1691,12 +2093,14 @@ class Worker:
         self._on_demand_backends = (
             await to_thread.run_sync(current_backend_derivation)
         ).on_demand_backends
+        await checkpoint_if_cancelled()
 
         info_send, info_recv = channel[GatheredInfo]()
         info_gatherer: InfoGatherer = InfoGatherer(
             info_send,
             api_available=self._api_available,
             data_transport=self._data_transport,
+            node_resources_provider=self._gather_node_resources,
             # Fabric-citizenship: the gatherer publishes whatever the API-side
             # extension surface has advertised on the shared TelemetryView. The
             # provider snapshots the outbound set each poll (empty -> nothing
@@ -1710,47 +2114,42 @@ class Worker:
             zenoh_peer_sampler=self._zenoh_peer_sampler,
         )
 
-        try:
-            # Reference files and unacknowledged containers from a previous
-            # process have no tracking record; nothing can ever release them.
-            _purge_stale_video_directories()
-            await _provision_test_video_engine()
-            async with self._tg as tg:
-                tg.start_soon(info_gatherer.run)
-                tg.start_soon(self._forward_info, info_recv)
-                tg.start_soon(self.plan_step)
-                tg.start_soon(self._event_applier)
-                tg.start_soon(self._poll_connection_updates)
-                if self._connection_message_receiver is not None:
-                    tg.start_soon(self._session_edge_ingress)
-                if self._realtime_audio_receiver is not None:
-                    tg.start_soon(self._realtime_audio_ingress)
-                if self._realtime_audio_packet_receiver is not None:
-                    tg.start_soon(self._realtime_audio_packet_ingress)
-                if self._speech_media_packet_receiver is not None:
-                    tg.start_soon(self._speech_media_packet_ingress)
-                    tg.start_soon(self._speech_media_janitor)
-                if self._vision_media_packet_receiver is not None:
-                    tg.start_soon(self._vision_media_packet_ingress)
-                    tg.start_soon(self._vision_media_janitor)
-                    tg.start_soon(self._reference_media_janitor)
-                if self._output_media_packet_receiver is not None:
-                    tg.start_soon(self._output_media_packet_ingress)
-                    tg.start_soon(self._output_media_janitor)
-                if (
-                    self._realtime_audio_receiver is not None
-                    or self._realtime_audio_packet_receiver is not None
-                ):
-                    tg.start_soon(self._realtime_audio_janitor)
-        finally:
-            # Actual shutdown code - waits for all tasks to complete before executing.
-            logger.info("Stopping Worker")
-            self.event_sender.close()
-            self.command_sender.close()
-            self.download_command_sender.close()
-            for runner in self.runners.values():
-                runner.shutdown()
-            self._stopped.set()
+        # Reference files and unacknowledged containers from a previous
+        # process have no tracking record; nothing can ever release them.
+        _purge_stale_video_directories()
+        await _provision_test_video_engine()
+        await checkpoint_if_cancelled()
+        async with self._tg as tg:
+            tg.start_soon(info_gatherer.run)
+            tg.start_soon(self._forward_info, info_recv)
+            tg.start_soon(self._restore_cached_native_runtimes)
+            tg.start_soon(self.plan_step)
+            tg.start_soon(self._event_applier)
+            tg.start_soon(self._poll_connection_updates)
+            if self._connection_message_receiver is not None:
+                tg.start_soon(self._session_edge_ingress)
+            if self._realtime_audio_receiver is not None:
+                tg.start_soon(self._realtime_audio_ingress)
+            if self._realtime_audio_packet_receiver is not None:
+                tg.start_soon(self._realtime_audio_packet_ingress)
+            if self._speech_media_packet_receiver is not None:
+                tg.start_soon(self._speech_media_packet_ingress)
+                tg.start_soon(self._speech_media_janitor)
+            if self._vision_media_packet_receiver is not None:
+                tg.start_soon(self._vision_media_packet_ingress)
+                tg.start_soon(self._vision_media_janitor)
+                tg.start_soon(self._reference_media_janitor)
+                tg.start_soon(self._separation_janitor)
+                tg.start_soon(self._native_music_janitor)
+            if self._output_media_packet_receiver is not None:
+                tg.start_soon(self._output_media_packet_ingress)
+                tg.start_soon(self._output_media_janitor)
+            if (
+                self._realtime_audio_receiver is not None
+                or self._realtime_audio_packet_receiver is not None
+            ):
+                tg.start_soon(self._realtime_audio_janitor)
+
 
     async def _realtime_audio_ingress(self) -> None:
         """Route bounded non-event PCM frames to the selected local runner."""
@@ -1860,6 +2259,18 @@ class Worker:
         assert self._vision_media_packet_receiver is not None
         with self._vision_media_packet_receiver as packets:
             async for packet in packets:
+                # Native originals have their own authoritative task handshake;
+                # never reinterpret their raw WAV bytes as image/reference input.
+                if packet.payload == "separation_source":
+                    receiver: SeparationInputReceiver | None = getattr(
+                        self, "_separation_inputs", None
+                    )
+                    if receiver is not None:
+                        await receiver.receive(packet)
+                    continue
+                if packet.payload == "music_edit_source":
+                    await self._native_music_media.receive_input(packet)
+                    continue
                 if packet.target_node != self.node_id or packet.kind in (
                     "accepted",
                     "transport_failed",
@@ -2406,6 +2817,277 @@ class Worker:
             self._reference_media_ready.discard(command_id)
             shutil.rmtree(SKULK_VIDEO_INPUT_DIR / str(command_id), ignore_errors=True)
 
+    async def _fail_separation(self, task: AudioSeparation, message: str) -> None:
+        """Report a path-free task failure without affecting other model instances."""
+        await self.event_sender.send(
+            TaskFailed(
+                task_id=task.task_id,
+                error_type="separation_failed",
+                error_message=message,
+            )
+        )
+
+    def _separation_reader_key(self, task: AudioSeparation) -> str:
+        """Resolve the captured authoritative reader, never packet-supplied paths."""
+        captured = self._separation_readers.get(task.command_id)
+        if captured is None:
+            raise ValueError("separation source has no admitted reader")
+        return captured[1].name
+
+    def _open_separation_sources(self) -> None:
+        # Called as an owned joined file effect. Retain the constructed owner on
+        # this Worker even if its awaiting coroutine is cancelled immediately.
+        if self._separation_sources is None:
+            custody = SeparationSourceCustody(
+                SKULK_SEPARATION_INPUT_DIR,
+                SKULK_SEPARATION_OUTPUT_DIR,
+                self._separation_reader_key,
+            )
+            self._separation_sources = SeparationSourceStore(
+                SKULK_SEPARATION_INPUT_DIR, custody=custody
+            )
+
+    async def _begin_separation_input(self, command: CommandId) -> None:
+        """Attach source custody only after authoritative complete local placement."""
+        task = local_separation_input_task(self.state, self.node_id, command)
+        if task is None or task.task_status != TaskStatus.Pending:
+            return
+        if (
+            self._vision_media_packet_sender is None
+            or self._output_media_packet_sender is None
+        ):
+            await self._fail_separation(
+                task, "Separation requires addressed input and output media transport."
+            )
+            return
+        try:
+            async with self._separation_init_lock:
+                if self._separation_inputs is None:
+                    await separation_file_effect(self._open_separation_sources)
+                    assert self._separation_sources is not None
+                    self._separation_inputs = SeparationInputReceiver(
+                        self.node_id,
+                        lambda: self.state,
+                        self._separation_sources,
+                        self._vision_media_packet_sender.send,
+                        self._fail_separation,
+                    )
+            receiver = self._separation_inputs
+            if any(owned.command_id == command for owned in receiver.tracked_tasks()):
+                return
+            instance = self.state.instances.get(task.instance_id)
+            if (
+                instance is None
+                or local_separation_input_task(self.state, self.node_id, command)
+                != task
+            ):
+                return
+            runner_id = instance.shard_assignments.node_to_runner[self.node_id]
+            self._separation_readers[command] = (
+                runner_id,
+                SKULK_SEPARATION_OUTPUT_DIR
+                / separation_reader_key(task.instance_id, runner_id),
+            )
+            try:
+                await receiver.begin(command)
+            finally:
+                if not any(
+                    owned.command_id == command for owned in receiver.tracked_tasks()
+                ):
+                    self._separation_readers.pop(command, None)
+        except (OSError, ValueError) as error:
+            logger.opt(exception=error).warning("Separation source admission failed")
+            await self._fail_separation(
+                task,
+                "Separation source storage is unavailable or still held by a prior reader; inspect diagnostics and retry.",
+            )
+
+    async def _send_separation_output_packet(self, packet: OutputMediaPacket) -> None:
+        """Use the existing node-addressed binary output plane."""
+        sender = self._output_media_packet_sender
+        if sender is None:
+            raise ClosedResourceError
+        await sender.send(packet)
+
+    def _schedule_separation_output_transfer(
+        self,
+        command: CommandId,
+        owner: NodeId | None,
+        chunk: SeparationChunk,
+    ) -> None:
+        """Bind a native completion to its admitted source and private reader root."""
+        receiver = self._separation_inputs
+        task = (
+            next(
+                (
+                    task
+                    for task in receiver.tracked_tasks()
+                    if task.command_id == command
+                ),
+                None,
+            )
+            if receiver is not None
+            else None
+        )
+        reader = self._separation_readers.get(command)
+        if (
+            task is None
+            or reader is None
+            or chunk.output is None
+            or owner != task.owner_node
+            or chunk.model != task.task_params.model
+        ):
+            logger.error("Separation completion has no matching admitted source owner")
+            return
+        if self._separation_outputs.register(task, reader[1], chunk.output):
+            # A verified native completion proves this command finished reading,
+            # even if restoring the model for the next request subsequently fails.
+            self._separation_rendered.add(command)
+            self._tg.start_soon(self._separation_outputs.deliver, command)
+
+    def _separation_reader_drained(self, task: AudioSeparation) -> bool:
+        captured = self._separation_readers.get(task.command_id)
+        if captured is None:
+            return False
+        runner_id, root = captured
+        supervisor = self.runners.get(runner_id)
+        if supervisor is not None:
+            if (
+                task.task_id in supervisor.in_progress
+                or task.task_id in supervisor.pending
+            ):
+                return False
+            if isinstance(supervisor.status, RunnerReady):
+                return True
+        # A dead parent/PID alone is insufficient. The inherited kernel fence
+        # remains busy while any native descendant still owns source reads.
+        try:
+            owner = RuntimeLock(root, name="attachment.lock")
+        except BlockingIOError:
+            return False
+        owner.close()
+        return True
+
+    async def _reconcile_separation_media(self) -> None:
+        receiver = self._separation_inputs
+        if receiver is None:
+            return
+        await receiver.tick()
+        await self._separation_outputs.tick()
+        for task in receiver.tracked_tasks():
+            live = self.state.tasks.get(task.task_id)
+            terminal = live is None or live.task_status not in (
+                TaskStatus.Pending,
+                TaskStatus.Running,
+            )
+            if (
+                terminal
+                and live is not None
+                and live.task_status != TaskStatus.Complete
+            ):
+                self._separation_outputs.cancel(task.command_id)
+            if not terminal or self._separation_outputs.pending(task.command_id):
+                continue
+            drained = (
+                task.command_id in self._separation_rendered
+                or await separation_file_effect(
+                    lambda task=task: self._separation_reader_drained(task)
+                )
+            )
+            if drained:
+                await receiver.release_after_drain(task.command_id)
+                self._separation_readers.pop(task.command_id, None)
+                self._separation_rendered.discard(task.command_id)
+        if self._separation_sources is not None:
+            await separation_file_effect(self._separation_sources.recover_stale)
+
+    async def _separation_janitor(self) -> None:
+        """Expire source transfers and release only drained, settled native copies."""
+        while True:
+            await anyio.sleep(0.5)
+            try:
+                await self._reconcile_separation_media()
+            except (OSError, ValueError) as error:
+                logger.opt(exception=error).warning(
+                    "Separation media cleanup remains reserved for retry"
+                )
+
+    async def _fail_native_music(self, task: NativeMusicTask, message: str) -> None:
+        """Settle one native operation without changing other engines or models."""
+        await self.event_sender.send(TaskFailed(
+            task_id=task.task_id, error_type="native_music_failed", error_message=message,
+        ))
+
+    async def _send_native_music_source_packet(self, packet: VisionMediaPacket) -> None:
+        """Use the existing node-addressed original-media plane."""
+        sender = self._vision_media_packet_sender
+        if sender is None:
+            raise ClosedResourceError
+        await sender.send(packet)
+
+    async def _begin_native_music_task(self, command: CommandId) -> None:
+        """Capture authoritative native custody before allowing the planner to dispatch."""
+        task = local_native_music_task(self.state, self.node_id, command)
+        if task is None:
+            return
+        if self._vision_media_packet_sender is None or self._output_media_packet_sender is None:
+            await self._fail_native_music(task, "Native music requires addressed source and output media transport.")
+            return
+        try:
+            await self._native_music_media.begin(command)
+        except (OSError, ValueError, RuntimeError) as error:
+            logger.opt(exception=error).warning("Native music media admission failed")
+            await self._fail_native_music(task, "Native music media storage is unavailable or held by a prior reader; inspect diagnostics and retry.")
+
+    def _native_music_reader_drained(
+        self, task: NativeMusicTask, runner_id: RunnerId, root: Path,
+    ) -> bool:
+        """Prove actual task drain or acquire the inherited reader fence after a crash."""
+        supervisor = self.runners.get(runner_id)
+        if supervisor is not None:
+            if task.task_id in supervisor.in_progress or task.task_id in supervisor.pending:
+                return False
+            if isinstance(supervisor.status, RunnerReady):
+                return True
+        try:
+            owner = RuntimeLock(root, name="attachment.lock")
+        except BlockingIOError:
+            return False
+        owner.close()
+        return True
+
+    def _schedule_music_edit_output_transfer(
+        self, command: CommandId, owner: NodeId | None, chunk: MusicEditingChunk,
+    ) -> None:
+        """Bind a complete native edit to its admitted source and addressed result owner."""
+        if chunk.output is None:
+            return
+        result = chunk.output.result
+        if result.request_id != str(command):
+            self._tg.start_soon(self._native_music_media.reject_output, command)
+            return
+        output = result.output
+        manifest = MusicOutputManifest(
+            size_bytes=output.size_bytes, sha256=output.sha256,
+            duration_seconds=output.frames / output.sample_rate,
+            sample_rate=output.sample_rate, channels=output.channels,
+        )
+        native = self._native_music_media
+        try:
+            if native.register_output(command, owner, str(chunk.model), manifest):
+                self._tg.start_soon(native.outputs.deliver, command)
+        except ValueError:
+            self._tg.start_soon(native.reject_output, command)
+
+    async def _native_music_janitor(self) -> None:
+        """Keep originals and results reserved until joined native and media drain."""
+        while True:
+            await anyio.sleep(0.5)
+            try:
+                await self._native_music_media.reconcile()
+            except (OSError, ValueError) as error:
+                logger.opt(exception=error).warning("Native music media cleanup remains reserved for retry")
+
     def _schedule_video_output_transfer(
         self, command_id: CommandId, owner_node: NodeId | None, chunk: VideoChunk
     ) -> None:
@@ -2440,6 +3122,14 @@ class Worker:
 
         manifest = chunk.output
         if manifest is None:
+            return
+        native: NativeMusicMediaOwner | None = getattr(self, "_native_music_media", None)
+        if native is not None and native.owns(command_id):
+            try:
+                if native.register_output(command_id, owner_node, str(chunk.model), manifest):
+                    self._tg.start_soon(native.outputs.deliver, command_id)
+            except ValueError:
+                self._tg.start_soon(native.reject_output, command_id)
             return
         if owner_node is None or self._output_media_packet_sender is None:
             logger.error(f"Cannot deliver music output for {command_id}: no owner or transport")
@@ -2676,6 +3366,11 @@ class Worker:
         with self._output_media_packet_receiver as packets:
             async for packet in packets:
                 if packet.target_node != self.node_id:
+                    continue
+                if packet.purpose.startswith("separation_"):
+                    self._separation_outputs.receive(packet)
+                    continue
+                if self._native_music_media.outputs.receive(packet):
                     continue
                 pending = self._output_media_pending.get(packet.command_id)
                 if pending is None or pending[0] != packet.source_node:
@@ -3083,6 +3778,12 @@ class Worker:
                 previous_tasks = self.state.tasks
                 self.state = apply(self.state, event=event)
                 event = event.event
+                for instance_id, request in tuple(self._native_music_creation_requests.items()):
+                    creation = self._native_music_creations.get(instance_id)
+                    if creation is None or self.state.instances.get(instance_id) != creation.bound_instance.instance:
+                        # Stop an owned download/probe when its authoritative
+                        # creation disappears, including snapshot replacement.
+                        self._ace_step_preparation.cancel(request)
 
                 if (
                     isinstance(event, AudioCppPreparationRequested)
@@ -3090,6 +3791,20 @@ class Worker:
                     and event.expires_at > time.time()
                 ):
                     self._tg.start_soon(self._prepare_audio_cpp_engine, event)
+
+                if (
+                    isinstance(event, DemucsPreparationRequested)
+                    and event.target_node == self.node_id
+                    and event.expires_at > time.time()
+                ):
+                    self._tg.start_soon(self._prepare_demucs_engine, event)
+
+                if (
+                    isinstance(event, AceStepPreparationRequested)
+                    and event.target_node == self.node_id
+                    and event.expires_at > time.time()
+                ):
+                    self._tg.start_soon(self._prepare_ace_step_engine, event)
 
                 if isinstance(
                     event, (ModelTrustApprovalChanged, StateSnapshotHydrated)
@@ -3157,6 +3872,52 @@ class Worker:
                             self._acknowledge_vision_media_if_admitted,
                             event.task.command_id,
                         )
+
+                if isinstance(event, TaskCreated) and isinstance(
+                    event.task, (MusicGeneration, MusicEditing)
+                ) and local_native_music_task(self.state, self.node_id, event.task.command_id) is not None:
+                    self._tg.start_soon(self._begin_native_music_task, event.task.command_id)
+                elif isinstance(event, StateSnapshotHydrated) and any(
+                    isinstance(task, (MusicGeneration, MusicEditing))
+                    and local_native_music_task(self.state, self.node_id, task.command_id) is not None
+                    for task in self.state.tasks.values()
+                ):
+                    self._tg.start_soon(self._native_music_media.fail_recovered)
+
+                if isinstance(event, TaskCreated) and isinstance(
+                    event.task, AudioSeparation
+                ):
+                    self._tg.start_soon(
+                        self._begin_separation_input, event.task.command_id
+                    )
+                elif isinstance(event, StateSnapshotHydrated):
+                    known: set[TaskId] = (
+                        {
+                            task.task_id
+                            for task in self._separation_inputs.tracked_tasks()
+                        }
+                        if self._separation_inputs is not None
+                        else set()
+                    )
+                    # A process restart must never silently replay an uncertain
+                    # native edit. Existing live owners survive election replay.
+                    for task in self.state.tasks.values():
+                        if (
+                            isinstance(task, AudioSeparation)
+                            and task.task_id not in known
+                            # Snapshots are cluster-wide. A new follower owns no
+                            # input records for healthy work placed elsewhere.
+                            and local_separation_input_task(
+                                self.state, self.node_id, task.command_id
+                            ) == task
+                            and task.task_status
+                            in (TaskStatus.Pending, TaskStatus.Running)
+                        ):
+                            self._tg.start_soon(
+                                self._fail_separation,
+                                task,
+                                "Separation was interrupted before this worker recovered; retry the operation.",
+                            )
 
                 if isinstance(event, TaskCreated) and isinstance(
                     event.task, AudioTranscription
@@ -3364,7 +4125,14 @@ class Worker:
                     # Only a base whose declared companions are on disk too
                     # is already installed; otherwise the coordinator's
                     # download path fetches what is missing.
-                    found_path = installed_artifact_in_path(shard.model_card)
+                    found_path = installed_artifact_in_path(
+                        shard.model_card,
+                        include_store_index=(
+                            shard.model_card.separation is not None
+                            and self._staging_config is not None
+                            and not self._staging_config.enabled
+                        ),
+                    )
                     if found_path is not None:
                         logger.info(
                             f"Model {model_id} found in SKULK_MODELS_PATH at {found_path}"
@@ -3950,16 +4718,7 @@ class Worker:
         """Advertise this node's resources now rather than at the next poll."""
         if self._telemetry_sender is None:
             return
-        peers = (
-            await self._zenoh_peer_sampler.advertised_count()
-            if self._zenoh_peer_sampler is not None
-            else None
-        )
-        resources = await NodeResources.gather(
-            api_available=self._api_available,
-            data_transport=self._data_transport,
-            zenoh_connected_peers=peers,
-        )
+        resources = await self._gather_node_resources()
         await self._telemetry_sender.send(
             NodeTelemetry(node_id=self.node_id, info=resources)
         )
@@ -4009,6 +4768,11 @@ class Worker:
                 self._speech_media_ready,
                 self._reference_media_ready,
                 on_demand_backends=self._on_demand_backends,
+                runner_creation_pending=frozenset(self._demucs_creations) | frozenset(self._native_music_creations),
+                separation_media_ready=self._separation_inputs.ready_commands()
+                if self._separation_inputs is not None
+                else frozenset(),
+                native_music_media_ready=self._native_music_media.ready_commands(),
                 engine_install_requested=frozenset(self._engine_install_tasks),
                 engine_install_ready=frozenset(
                     instance_id
@@ -4052,6 +4816,15 @@ class Worker:
             )
             return
 
+        card = task.bound_instance.bound_shard.model_card
+        if card.music is not None and card.music.native is not None:
+            # Native admission needs its actual library/device observation and
+            # complete three-pool policy, not the generic text-shard fit guard.
+            if task.instance_id not in self._native_music_creations:
+                self._native_music_creations[task.instance_id] = task
+                self._tg.start_soon(self._complete_native_music_runner_creation, task)
+            return
+
         # The local fit guard sizes a shard's footprint against this node's
         # memory, but an RPC placement's shares are decided by llama.cpp at
         # load (the driver's shard nominally spans ALL layers and a donor holds
@@ -4077,14 +4850,230 @@ class Worker:
                 await self._refuse_instance_placement(task.instance_id, fit_error)
             return
 
+        if task.bound_instance.is_separation_model:
+            self._demucs_creations[task.instance_id] = task
+            self._tg.start_soon(self._complete_demucs_runner_creation, task)
+            return
         self._create_supervisor(task)
         await self.event_sender.send(
             TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Complete)
         )
 
-    async def shutdown(self):
-        self._tg.cancel_tasks()
+    async def _complete_native_music_runner_creation(self, task: CreateRunner) -> None:
+        """Prepare current native resources and transfer exact reader/guard ownership.
+
+        Every creation, including restored placements, refreshes the actual
+        library math/memory probe through the persistent verified cache. Model
+        sources remain lazy until normal DownloadModel and LoadModel. Staging
+        serializes the final placement/trust/commitment check with ownership
+        transfer; cancellation or failure before that transfer releases custody.
+        """
+        fence: SourceReadFence | None = None
+        preparation_request = CommandId()
+        self._native_music_creation_requests[task.instance_id] = preparation_request
+        try:
+            bound = task.bound_instance
+            shard = bound.bound_shard
+            backend, build, policy = shard.resolved_backend, shard.resolved_engine_build, shard.native_music_policy
+            if (
+                policy is None or backend is None or build is None or backend != policy.backend
+                or build != "ace_step@sha256:" + policy.payload_sha256
+                or bound.bound_node_id != self.node_id
+            ):
+                raise ValueError("Native music placement lacks its exact local execution policy")
+            package = select_ace_step_package(self._ace_step_platforms, device=policy.execution.device)
+            if package.build_identity != build:
+                raise ValueError("Native music placement differs from this host's fixed inventory")
+            runtime = await self._ace_step_preparation.prepare(
+                preparation_request, package, device=policy.execution.device,
+                expires_at=time.time() + 30 * 60,
+                progress=lambda phase: logger.debug("Native music creation preparation: {}", phase),
+            )
+            await self._publish_fresh_node_resources()
+            root = self._native_music_media.readers_root / separation_reader_key(task.instance_id, bound.bound_runner_id)
+            fence = await self._native_music_media.prepare_reader(root)
+            async with self._staging_runner_transition_lock:
+                observed = await self._gather_node_resources()
+                if self.state.instances.get(task.instance_id) != bound.instance:
+                    await self.event_sender.send(TaskStatusUpdated(
+                        task_id=task.task_id, task_status=TaskStatus.Cancelled,
+                    ))
+                    return
+                _require_worker_model_execution_identity(shard.model_card, self.state)
+                # A concurrent prepare can withdraw/replace this observation.
+                # Never spawn using the earlier private path after withdrawal.
+                if self._ace_step_manager.prepared_runtime(backend, build) != runtime:
+                    raise ValueError("Native music library ownership changed during creation")
+                assessment = assess_native_music_placement(
+                    shard.model_card, backend, self.node_id, observed, self.state.instances,
+                    now_unix_ms=int(time.time() * 1000), excluded_instance=bound.instance,
+                )
+                if assessment.policy != policy:
+                    raise ValueError("Native music placement policy differs from current card/library math")
+                if assessment.refusal is not None:
+                    raise ValueError(assessment.refusal)
+                context = NativeMusicRunnerContext(
+                    runtime, root, self._native_music_media.source_root, fence,
+                    resource_guard=NativeMusicHostGuard(
+                        budget=assessment.estimate.process_budget(),
+                        host_total_bytes=assessment.capacity.host_total_bytes,
+                        unified=assessment.capacity.device_memory_kind == "unified",
+                    ),
+                )
+                self._create_supervisor(task, native_music_context=context)
+                fence = None  # The supervisor owns the parent descriptor now.
+            await self.event_sender.send(TaskStatusUpdated(
+                task_id=task.task_id, task_status=TaskStatus.Complete,
+            ))
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception as error:  # noqa: BLE001 - settle one instance without failing the Worker
+            if self.state.instances.get(task.instance_id) != task.bound_instance.instance:
+                await self.event_sender.send(TaskStatusUpdated(
+                    task_id=task.task_id, task_status=TaskStatus.Cancelled,
+                ))
+                return
+            logger.opt(exception=error).warning("Native music runner preparation failed")
+            # Failed revalidation must not leave old readiness advertised.
+            try:
+                await self._publish_fresh_node_resources()
+            except Exception:
+                logger.exception("Could not publish native music resource withdrawal")
+            await self.event_sender.send(TaskFailed(
+                task_id=task.task_id, error_type="native_music_unavailable",
+                error_message="Native music package/device, memory policy or reader ownership failed; inspect worker diagnostics and retry this configuration.",
+            ))
+            if task.instance_id in self.state.instances:
+                await self._give_up_on_instance(
+                    task.instance_id,
+                    "Native music preparation or admission failed; inspect worker diagnostics and retry this configuration.",
+                    error_code="engine_install_failed",
+                )
+        finally:
+            if fence is not None:
+                fence.close()
+            self._native_music_creations.pop(task.instance_id, None)
+            self._native_music_creation_requests.pop(task.instance_id, None)
+
+    async def _prepare_separation_reader(self, root: Path) -> SourceReadFence:
+        """Reconcile old sources/results before the new model holds its reader fence.
+
+        Keep the exclusive source-service owner across both acquisitions. It
+        prevents another Worker from activating source readers in the gap, while
+        stale cleanup independently takes each kernel reader fence. The new
+        model must not hold that fence yet or it would block its own recovery.
+        """
+        deadline = time.monotonic() + 30
+        async with self._separation_init_lock:
+            await separation_file_effect(self._open_separation_sources)
+        observed = await acquire_source_read_fence(root)
+        observed.close()
+        assert self._separation_sources is not None
+        await separation_file_effect(self._separation_sources.recover_stale)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("native source reconciliation exceeded its complete budget")
+        return await acquire_source_read_fence(root, timeout_seconds=remaining)
+
+    async def _complete_demucs_runner_creation(self, task: CreateRunner) -> None:
+        """Prepare a restored placement off-loop without blocking other planning.
+
+        A restarted worker has no trusted in-memory library observation. Verify
+        its cached exact runtime before spawn, then recheck current placement,
+        trust and memory. First mounts still download weights through the normal
+        idle-runner lifecycle; the child resolves them only at LoadModel.
+        """
+        context: SeparationRunnerContext | None = None
+        try:
+            bound = task.bound_instance
+            shard = bound.bound_shard
+            backend, build = shard.resolved_backend, shard.resolved_engine_build
+            if backend not in {"demucs-cpu", "demucs-metal"} or build is None:
+                raise ValueError(
+                    "native placement has no implemented explicit package/device"
+                )
+            device = "mps" if backend == "demucs-metal" else "cpu"
+            package = select_demucs_package(self._demucs_platforms, device=device)
+            if package.build_identity != build:
+                raise ValueError(
+                    "native placement build differs from this host's fixed inventory"
+                )
+            try:
+                runtime = self._demucs_manager.prepared_runtime(backend, build)
+            except DemucsBuildMismatchError:
+                runtime = await self._demucs_preparation.prepare(
+                    CommandId(),
+                    package,
+                    device=device,
+                    expires_at=time.time() + 30 * 60,
+                    progress=lambda phase: logger.debug(
+                        "restored native separation preparation: {}", phase
+                    ),
+                )
+                await self._publish_fresh_node_resources()
+            root = SKULK_SEPARATION_OUTPUT_DIR / separation_reader_key(
+                task.instance_id, bound.bound_runner_id
+            )
+            fence = await self._prepare_separation_reader(root)
+            context = SeparationRunnerContext(
+                runtime, root, SKULK_SEPARATION_INPUT_DIR, fence
+            )
+            async with self._staging_runner_transition_lock:
+                if self.state.instances.get(task.instance_id) != bound.instance:
+                    await self.event_sender.send(
+                        TaskStatusUpdated(
+                            task_id=task.task_id, task_status=TaskStatus.Cancelled
+                        )
+                    )
+                    return
+                _require_worker_model_execution_identity(shard.model_card, self.state)
+                fit = self._local_shard_fit_error(
+                    shard, bound.instance.context_token_limit
+                )
+                if fit is not None:
+                    raise ValueError(
+                        "native placement no longer fits current available memory"
+                    )
+                self._create_supervisor(task, separation_context=context)
+                context = None  # The supervisor owns the parent descriptor now.
+            await self.event_sender.send(
+                TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Complete)
+            )
+        except anyio.get_cancelled_exc_class():
+            raise
+        except Exception as error:  # noqa: BLE001 - settle this instance without failing the worker
+            logger.opt(exception=error).warning(
+                "Native separation runner preparation failed"
+            )
+            await self.event_sender.send(
+                TaskFailed(
+                    task_id=task.task_id,
+                    error_type="native_separation_unavailable",
+                    error_message="Native separator package/device verification or reader ownership failed; inspect worker diagnostics and retry.",
+                )
+            )
+            if task.instance_id in self.state.instances:
+                await self._give_up_on_instance(
+                    task.instance_id,
+                    "Native separator preparation failed; inspect worker diagnostics and retry this configuration.",
+                    error_code="engine_install_failed",
+                )
+        finally:
+            if context is not None:
+                context.source_fence.close()
+            self._demucs_creations.pop(task.instance_id, None)
+
+    async def shutdown(self) -> None:
+        """Request retirement and wait for startup, tasks and owned cleanup to drain.
+
+        Safe before a scheduled run starts, during off-loop initialization and
+        after an earlier shutdown. No replacement may outlive this join boundary.
+        """
+        self._shutdown_requested = True
+        if self._run_scope is not None:
+            self._run_scope.cancel()
         await self._stopped.wait()
+
 
     async def _start_runner_task(self, task: Task):
         if (instance := self.state.instances.get(task.instance_id)) is not None:
@@ -4097,10 +5086,51 @@ class Worker:
                         shard.model_card,
                         self.state,
                     )
-                    model_directory = build_model_path(
-                        shard.model_card.model_id,
-                        shard.model_card.source_revision,
-                    )
+                    if (
+                        shard.model_card.music is not None
+                        and shard.model_card.music.native is not None
+                    ):
+                        # Native data can live in a recorded installed generation
+                        # with no generic normalized-name alias. Preflight must
+                        # use the same exact primary selection as deferred load;
+                        # otherwise a complete cold cache fails before binding.
+                        native_card = shard.model_card
+                        revision = native_card.source_revision
+                        if revision is None:
+                            raise FileNotFoundError(
+                                "native music primary source has no pinned revision"
+                            )
+                        model_directory = await to_thread.run_sync(
+                            lambda: resolve_native_music_source_directory(
+                                native_card,
+                                str(native_card.artifact_repository),
+                                revision,
+                                require_card_identity=True,
+                            )
+                        )
+                        if model_directory is None:
+                            raise FileNotFoundError(
+                                "native music primary source is not installed"
+                            )
+                    elif (
+                        shard.model_card.separation is not None
+                        and self._staging_config is not None
+                        and not self._staging_config.enabled
+                    ):
+                        # The separator can load directly from a canonical
+                        # bundle generation; preflight must resolve the same
+                        # exact card as its deferred runner loader. Staged
+                        # copies retain the current-catalog adoption below.
+                        model_directory = build_model_path(
+                            shard.model_card.model_id,
+                            shard.model_card.source_revision,
+                            expected_card=shard.model_card,
+                        )
+                    else:
+                        model_directory = build_model_path(
+                            shard.model_card.model_id,
+                            shard.model_card.source_revision,
+                        )
                     await _require_installed_artifact_for_load(
                         model_directory,
                         shard.model_card,
@@ -4202,7 +5232,13 @@ class Worker:
                 return
             await runner.start_task(task)
 
-    def _create_supervisor(self, task: CreateRunner) -> RunnerSupervisor:
+    def _create_supervisor(
+        self,
+        task: CreateRunner,
+        *,
+        separation_context: SeparationRunnerContext | None = None,
+        native_music_context: NativeMusicRunnerContext | None = None,
+    ) -> RunnerSupervisor:
         """Creates and stores a new AssignedRunner with initial downloading status."""
         shard = task.bound_instance.bound_shard
         logger.info(
@@ -4228,6 +5264,8 @@ class Worker:
         runner = RunnerSupervisor.create(
             bound_instance=task.bound_instance,
             event_sender=self.event_sender.clone(),
+            separation_context=separation_context,
+            native_music_context=native_music_context,
             context_token_limit=context_token_limit,
             data_sender=self._data_sender.clone()
             if self._data_sender is not None
@@ -4237,6 +5275,8 @@ class Worker:
             else None,
             on_video_output=self._schedule_video_output_transfer,
             on_music_output=self._schedule_music_output_transfer,
+            on_music_edit_output=self._schedule_music_edit_output_transfer,
+            on_separation_output=self._schedule_separation_output_transfer,
         )
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)

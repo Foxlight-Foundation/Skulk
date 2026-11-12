@@ -26,6 +26,8 @@ from skulk.shared.types.chunks import (
     ErrorChunk,
     GenerationChunk,
     MusicChunk,
+    MusicEditingChunk,
+    SeparationChunk,
     VideoChunk,
 )
 from skulk.shared.types.common import CommandId, NodeId
@@ -49,12 +51,15 @@ from skulk.shared.types.events import (
     TaskStatusUpdated,
     TracesCollected,
 )
+from skulk.shared.types.native_music import NativeMusicMemoryObservation
 from skulk.shared.types.streaming import StreamFrameKind, is_terminal_stream_frame_kind
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
+    AudioSeparation,
     AudioTranscription,
     ImageEdits,
     ImageGeneration,
+    MusicEditing,
     MusicGeneration,
     RealtimeAudioTranscription,
     SpeechSynthesis,
@@ -79,15 +84,18 @@ from skulk.shared.types.worker.runners import (
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata, ShardMetadata
 from skulk.utils.channels import MpReceiver, MpSender, Sender, mp_channel
 from skulk.utils.task_group import TaskGroup
+from skulk.worker.runner.ace_step.context import NativeMusicRunnerContext
 from skulk.worker.runner.bootstrap import (
     WEDGE_EXIT_CODE,
     WEDGE_FAILURE_MARKER,
     entrypoint,
 )
+from skulk.worker.runner.demucs.context import SeparationRunnerContext
 from skulk.worker.runner.image_models.output import is_primary_image_output_node
 
 _TRACE_ROUTE_CAPACITY = 256
 _TRACE_ROUTE_TTL_SECONDS = 5 * 60.0
+_NATIVE_FAILURE_MESSAGE_MAX_CHARS = 1024
 
 PREFILL_TIMEOUT_SECONDS = 60
 DECODE_TIMEOUT_SECONDS = 5
@@ -153,6 +161,10 @@ class RunnerSupervisor:
     _data_sender: "Sender[DataChunk] | None" = None
     _on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None
     _on_music_output: "Callable[[CommandId, NodeId | None, MusicChunk], None] | None" = None
+    _on_music_edit_output: "Callable[[CommandId, NodeId | None, MusicEditingChunk], None] | None" = None
+    _on_separation_output: "Callable[[CommandId, NodeId | None, SeparationChunk], None] | None" = None
+    _separation_context: SeparationRunnerContext | None = None
+    _native_music_context: NativeMusicRunnerContext | None = None
     _trace_sender: "Sender[TraceDataPacket] | None" = None
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
@@ -219,6 +231,7 @@ class RunnerSupervisor:
     _active_command_id: str | None = field(default=None, init=False)
     _phase_detail: str | None = field(default=None, init=False)
     _last_mlx_memory: MlxMemorySnapshot | None = field(default=None, init=False)
+    _native_music_memory: tuple[NativeMusicMemoryObservation, float] | None = field(default=None, init=False)
     _flight_recorder: deque[RunnerFlightRecorderEntry] = field(
         default_factory=lambda: deque(maxlen=128), init=False
     )
@@ -253,6 +266,10 @@ class RunnerSupervisor:
         trace_sender: "Sender[TraceDataPacket] | None" = None,
         on_video_output: "Callable[[CommandId, NodeId | None, VideoChunk], None] | None" = None,
         on_music_output: "Callable[[CommandId, NodeId | None, MusicChunk], None] | None" = None,
+        on_music_edit_output: "Callable[[CommandId, NodeId | None, MusicEditingChunk], None] | None" = None,
+        on_separation_output: "Callable[[CommandId, NodeId | None, SeparationChunk], None] | None" = None,
+        separation_context: SeparationRunnerContext | None = None,
+        native_music_context: NativeMusicRunnerContext | None = None,
     ) -> Self:
         """Spawn the runner subprocess for one shard of a placed instance.
 
@@ -260,6 +277,16 @@ class RunnerSupervisor:
         ceiling (#145), threaded through the local (same-binary) process
         boundary precisely so no gossiped type needs a new field.
         """
+        if separation_context is not None and native_music_context is not None:
+            raise ValueError("one runner cannot own both native model contexts")
+        if native_music_context is not None and (
+            data_sender is None
+            or on_music_output is None
+            or on_music_edit_output is None
+        ):
+            raise ValueError(
+                "native music requires addressed generation and edit media delivery"
+            )
         ev_send, ev_recv = mp_channel[Event]()
         diag_send, diag_recv = mp_channel[RunnerDiagnosticUpdate](max_buffer_size=256)
         # Bounded like the sibling channels (#692): cluster-level admission keeps
@@ -283,6 +310,13 @@ class RunnerSupervisor:
                 realtime_audio_recv,
                 logger,
                 context_token_limit,
+            )
+            + (
+                (separation_context, native_music_context)
+                if native_music_context is not None
+                else (separation_context,)
+                if separation_context is not None
+                else ()
             ),
             daemon=True,
         )
@@ -304,6 +338,10 @@ class RunnerSupervisor:
             _trace_sender=trace_sender,
             _on_video_output=on_video_output,
             _on_music_output=on_music_output,
+            _on_music_edit_output=on_music_edit_output,
+            _on_separation_output=on_separation_output,
+            _separation_context=separation_context,
+            _native_music_context=native_music_context,
         )
 
         return self
@@ -368,6 +406,26 @@ class RunnerSupervisor:
                     self._command_owner.get(event.command_id),
                     event.chunk,
                 )
+            if (
+                isinstance(event.chunk, SeparationChunk)
+                and event.chunk.output is not None
+                and self._on_separation_output is not None
+            ):
+                self._on_separation_output(
+                    event.command_id,
+                    self._command_owner.get(event.command_id),
+                    event.chunk,
+                )
+            if (
+                isinstance(event.chunk, MusicEditingChunk)
+                and event.chunk.output is not None
+                and self._on_music_edit_output is not None
+            ):
+                self._on_music_edit_output(
+                    event.command_id,
+                    self._command_owner.get(event.command_id),
+                    event.chunk,
+                )
             await self._send_data_frame(
                 event.command_id,
                 _stream_frame_kind(event.chunk),
@@ -415,6 +473,8 @@ class RunnerSupervisor:
                     ImageEdits,
                     VideoGeneration,
                     MusicGeneration,
+                    MusicEditing,
+                    AudioSeparation,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -472,7 +532,14 @@ class RunnerSupervisor:
 
     async def run(self):
         self._record_milestone("process_start_requested")
-        self.runner_process.start()
+        try:
+            self.runner_process.start()
+        except BaseException:
+            if self._separation_context is not None:
+                self._separation_context.source_fence.close()
+            if self._native_music_context is not None:
+                self._native_music_context.source_fence.close()
+            raise
         self._record_milestone(
             "process_started",
             f"pid={self.runner_process.pid}",
@@ -552,14 +619,18 @@ class RunnerSupervisor:
                     )
                 else:
                     self.runner_process.close()
+                    if self._separation_context is not None:
+                        # Native descendants retain their own duplicate until
+                        # actual exit, even if this runner was forcibly killed.
+                        self._separation_context.source_fence.close()
+                    if self._native_music_context is not None:
+                        self._native_music_context.source_fence.close()
 
     def shutdown(self):
         self._record_milestone("shutdown_requested")
         self._tg.cancel_tasks()
 
-    async def start_task(
-        self, task: Task, *, wait_for_terminal: bool = False
-    ) -> None:
+    async def start_task(self, task: Task, *, wait_for_terminal: bool = False) -> None:
         """Submit a task and wait for its acknowledgement or terminal status.
 
         Args:
@@ -600,6 +671,8 @@ class RunnerSupervisor:
                     ImageEdits,
                     VideoGeneration,
                     MusicGeneration,
+                    MusicEditing,
+                    AudioSeparation,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -610,19 +683,24 @@ class RunnerSupervisor:
             and self._owns_data_stream()
         ):
             self._command_owner[task.command_id] = task.owner_node
-        if isinstance(
-            task,
-            (
-                TextGeneration,
-                ImageGeneration,
-                ImageEdits,
-                VideoGeneration,
-                MusicGeneration,
-                TextEmbedding,
-                SpeechSynthesis,
-                AudioTranscription,
-            ),
-        ) and task.trace_enabled:
+        if (
+            isinstance(
+                task,
+                (
+                    TextGeneration,
+                    ImageGeneration,
+                    ImageEdits,
+                    VideoGeneration,
+                    MusicGeneration,
+                    MusicEditing,
+                    AudioSeparation,
+                    TextEmbedding,
+                    SpeechSynthesis,
+                    AudioTranscription,
+                ),
+            )
+            and task.trace_enabled
+        ):
             now = time.monotonic()
             for stale_task_id in [
                 task_id
@@ -704,6 +782,11 @@ class RunnerSupervisor:
             await self._check_runner(TimeoutError("cancel pipe blocked"))
 
     async def _forward_events(self):
+        # The runner pipe orders its public error before terminal status, but
+        # DATA and indexed control delivery may reorder after this boundary.
+        # Retain only active native task diagnostics until their final status
+        # so one ordered event carries both the failure and its bounded cause.
+        native_failure_messages: dict[TaskId, str] = {}
         try:
             with self._ev_recv as events:
                 async for event in events:
@@ -725,6 +808,23 @@ class RunnerSupervisor:
                             pending.set()
                         self._record_milestone("task_acknowledged", str(event.task_id))
                         continue
+                    if (
+                        isinstance(event, ChunkGenerated)
+                        and isinstance(event.chunk, ErrorChunk)
+                        and event.chunk.error_message
+                    ):
+                        for task in self.in_progress.values():
+                            if (
+                                isinstance(task, (MusicEditing, AudioSeparation))
+                                and task.command_id == event.command_id
+                            ):
+                                native_failure_messages.setdefault(
+                                    task.task_id,
+                                    event.chunk.error_message[
+                                        :_NATIVE_FAILURE_MESSAGE_MAX_CHARS
+                                    ],
+                                )
+                                break
                     if (
                         isinstance(event, TaskStatusUpdated)
                         and event.task_status in _TERMINAL_TASK_STATUSES
@@ -756,6 +856,9 @@ class RunnerSupervisor:
                         # task->command mapping. This covers no-payload completion,
                         # cancellation, failure, and timeout paths.
                         ending_task = self.in_progress.get(event.task_id)
+                        native_failure_message = native_failure_messages.pop(
+                            event.task_id, None
+                        )
                         if isinstance(
                             ending_task,
                             (
@@ -764,6 +867,8 @@ class RunnerSupervisor:
                                 ImageEdits,
                                 VideoGeneration,
                                 MusicGeneration,
+                                MusicEditing,
+                                AudioSeparation,
                                 TextEmbedding,
                                 SpeechSynthesis,
                                 AudioTranscription,
@@ -786,7 +891,20 @@ class RunnerSupervisor:
                                 "task_terminal",
                                 f"{event.task_status.value}:{event.task_id}",
                             )
-                        await self._event_sender.send(event)
+                        if (
+                            isinstance(ending_task, (MusicEditing, AudioSeparation))
+                            and event.task_status == TaskStatus.Failed
+                            and native_failure_message is not None
+                        ):
+                            await self._event_sender.send(
+                                TaskFailed(
+                                    task_id=event.task_id,
+                                    error_type="native_execution_failed",
+                                    error_message=native_failure_message,
+                                )
+                            )
+                        else:
+                            await self._event_sender.send(event)
                         if event.task_status == TaskStatus.Cancelled:
                             # Cancelled tasks need an explicit event-sourced delete
                             # because local API cleanup suppresses TaskFinished
@@ -872,6 +990,8 @@ class RunnerSupervisor:
                     ImageEdits,
                     VideoGeneration,
                     MusicGeneration,
+                    MusicEditing,
+                    AudioSeparation,
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
@@ -976,9 +1096,58 @@ class RunnerSupervisor:
         )
         self._apply_diagnostic_update(update)
 
+    def native_music_memory_snapshot(self) -> NativeMusicMemoryObservation | None:
+        """Read one current owned native observation without probing or allocation credit.
+
+        Dead/closed runner processes and stale local receipt or native sample
+        clocks withdraw this transient view. Actual device/child sequence was
+        verified by the resident reader before emitting diagnostic IPC.
+        """
+        current = self._native_music_memory
+        if current is None or self._native_music_context is None:
+            return None
+        observation, received = current
+        if time.monotonic() - received > 5 or not -30_000 <= time.time_ns() // 1_000_000 - observation.capacity.sampled_at_unix_ms <= 5_000:
+            return None
+        try:
+            if not self.runner_process.is_alive():
+                return None
+        except ValueError:
+            return None
+        return observation
+
+    def _observe_native_music_memory(self, update: RunnerDiagnosticUpdate) -> None:
+        """Validate current local runner and immutable payload/lane before refresh."""
+        context = self._native_music_context
+        observed = update.native_music_memory
+        expected_context = self._diagnostic_context()
+        if (
+            context is None or observed is None or expected_context.pid is None
+            or update.context != expected_context
+        ):
+            return
+        try:
+            observed = NativeMusicMemoryObservation.model_validate_json(observed.model_dump_json())
+        except ValueError:
+            return
+        if (
+            observed.payload_sha256 != context.runtime.wheel.payload_sha256
+            or observed.device != context.runtime.device
+            or not -30_000 <= time.time_ns() // 1_000_000 - observed.capacity.sampled_at_unix_ms <= 5_000
+            or self._native_music_memory is not None
+            and observed.capacity.sampled_at_unix_ms <= self._native_music_memory[0].capacity.sampled_at_unix_ms
+        ):
+            return
+        self._native_music_memory = observed, time.monotonic()
+
     def _apply_diagnostic_update(self, update: RunnerDiagnosticUpdate) -> None:
         """Update live supervisor diagnostics from one runner diagnostic event."""
 
+        if update.native_music_memory is not None:
+            # Half-second native measurements are not phase transitions or a
+            # retained history. Keep one owned sample for periodic resources.
+            self._observe_native_music_memory(update)
+            return
         if update.phase != self._phase:
             self._phase = update.phase
             self._phase_started_at = update.at
@@ -1022,6 +1191,8 @@ class RunnerSupervisor:
                 ImageEdits,
                 VideoGeneration,
                 MusicGeneration,
+                MusicEditing,
+                AudioSeparation,
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,

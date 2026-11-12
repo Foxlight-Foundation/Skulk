@@ -362,12 +362,56 @@ def _commit_replacement_model_dir(replacement_dir: Path, target_dir: Path) -> No
 
 
 def _artifact_candidates(
-    root: Path, model_id: ModelId, source_revision: str | None
+    root: Path,
+    model_id: ModelId,
+    source_revision: str | None,
+    *,
+    expected_card: ModelCard | None = None,
+    include_store_index: bool = False,
 ) -> list[Path]:
-    from skulk.store.installed_cards import indexed_recovery_artifact
+    from skulk.store.installed_cards import (
+        indexed_recovery_artifact,
+        installed_card_matches,
+    )
+    from skulk.store.model_store import (
+        StoreRegistryIndex,
+        read_reconciliation_tombstones,
+    )
 
     recovered = indexed_recovery_artifact(root, model_id)
     result = [recovered] if recovered is not None else []
+    if expected_card is not None:
+        try:
+            if str(model_id) in read_reconciliation_tombstones(root):
+                return []
+        except (OSError, ValueError):
+            return []
+        try:
+            index = StoreRegistryIndex.model_validate_json(
+                (root / "registry.json").read_bytes()
+            )
+            entry = index.entries.get(str(model_id)) if include_store_index else None
+            if (
+                entry is not None
+                and entry.model_id == str(model_id)
+                and entry.source_revision == source_revision
+                and (entry.source_repository or entry.model_id)
+                == str(expected_card.artifact_repository)
+            ):
+                candidate = (root / entry.store_path).resolve()
+                resolved_root = root.resolve()
+                # The index is a location hint, not authority to select another
+                # card, escape the Store, or skip installed-artifact checks.
+                if (
+                    candidate != resolved_root
+                    and candidate.is_relative_to(resolved_root)
+                    and installed_card_matches(candidate, expected_card)
+                ):
+                    result.append(candidate)
+        except (OSError, ValueError):
+            # An absent/damaged index cannot grant a new candidate. Existing
+            # revision-qualified and staged locations remain independent.
+            pass
     result.append(root / model_id.normalize())
     if source_revision is not None:
         result.append(root / f"{model_id.normalize()}--revision-{source_revision}")
@@ -380,11 +424,14 @@ def resolve_model_in_path(
     *,
     expected_card: ModelCard | None = None,
     artifact_root: str | None = None,
+    include_store_index: bool = False,
 ) -> Path | None:
     """Search SKULK_MODELS_PATH directories for a pre-existing model.
 
     Checks each directory for the normalized name (org--model) and, for pinned
-    artifacts, the store's revision-qualified sibling name. A candidate is only
+    artifacts, the store's revision-qualified sibling name. An exact card with
+    explicit index access also permits a contained location with matching identity,
+    including bundle-qualified names when staging is disabled. A candidate is only
     returned if ``is_model_directory_complete`` confirms all weight files are
     present and its revision marker matches. When ``expected_card`` is a signed
     registry card, the installed-card sidecar must also prove that exact card
@@ -399,6 +446,9 @@ def resolve_model_in_path(
             must match the resolved directory.
         artifact_root: Optional repository-relative loader root whose contents
             determine runtime completeness for a directory-scoped bundle.
+        include_store_index: Explicit loader or Store-direct separator permission
+            to consider canonical index hints. Defaults to false so completion
+            probes cannot bypass the configured staging transaction.
 
     Returns:
         The first complete matching model directory, or ``None``.
@@ -410,7 +460,13 @@ def resolve_model_in_path(
 
     search_path: tuple[Path, ...] = _constants.SKULK_MODELS_PATH or ()
     for search_dir in search_path:
-        for candidate in _artifact_candidates(search_dir, model_id, source_revision):
+        for candidate in _artifact_candidates(
+            search_dir,
+            model_id,
+            source_revision,
+            expected_card=expected_card,
+            include_store_index=include_store_index,
+        ):
             load_candidate = (
                 candidate / artifact_root if artifact_root is not None else candidate
             )
@@ -504,6 +560,9 @@ def companion_artifact_location(
     """Resolve a companion repo to its staged identity and immutable revision."""
     if repository == str(model_card.artifact_repository):
         return model_card.model_id, model_card.source_revision
+    for source in model_card.native_music_artifact_sources():
+        if (source.repository, source.revision) == (repository, companion_revision):
+            return source.model_id(), source.revision
     return ModelId(repository), companion_revision
 
 
@@ -531,6 +590,7 @@ def companion_download_specs(
     fail the base), while MTP sidecars and assistants degrade gracefully to
     run-without-speculation (best-effort).
     """
+
 
     def _bare_shard(
         repo: str,
@@ -564,6 +624,13 @@ def companion_download_specs(
         )
 
     specs: list[tuple[PipelineShardMetadata, list[str], bool]] = []
+    for source in model_card.native_music_artifact_sources():
+        if source.repository != str(model_card.artifact_repository):
+            specs.append((
+                _bare_shard(source.repository, source.revision, artifact_bundle=source.download_bundle()),
+                [item.path for item in source.files],
+                True,
+            ))
     if model_card.image is not None:
         groups: dict[tuple[str, str], list[str]] = {}
         for component in model_card.image.components:
@@ -716,7 +783,9 @@ def same_repo_served_draft_files(model_card: ModelCard) -> list[str]:
     return []
 
 
-def installed_artifact_in_path(model_card: ModelCard) -> Path | None:
+def installed_artifact_in_path(
+    model_card: ModelCard, *, include_store_index: bool = False
+) -> Path | None:
     """The card's artifact on ``SKULK_MODELS_PATH`` when nothing is left to fetch.
 
     A base found on the search path is installed only if every companion the
@@ -727,8 +796,14 @@ def installed_artifact_in_path(model_card: ModelCard) -> Path | None:
     caller down the download path, where the coordinator fetches what is
     missing and, offline, decides which companions are load-bearing.
 
+    Canonical Store-index hints require explicit loader support with staging
+    disabled. Otherwise the configured downloader must stage those bytes
+    before declaring the download complete.
+
     Args:
         model_card: The card whose artifact and companions must be present.
+        include_store_index: Whether the caller can load a canonical Store copy
+            directly without staging, including in offline mode.
 
     Returns:
         The complete matching model directory, or ``None``.
@@ -737,6 +812,7 @@ def installed_artifact_in_path(model_card: ModelCard) -> Path | None:
         ModelId(model_card.model_id),
         model_card.source_revision,
         expected_card=model_card,
+        include_store_index=include_store_index,
         artifact_root=(
             model_card.artifact_bundle.root
             if model_card.artifact_bundle is not None
@@ -770,6 +846,9 @@ def model_companions_present_on_disk(
     model complete after ensure_shard returns, so the gate cannot loop
     within a session.
     """
+    for source in model_card.native_music_artifact_sources():
+        if resolve_native_music_source_directory(model_card, source.repository, source.revision) is None:
+            return False
     if model_card.image is not None:
         for component in model_card.image.components:
             identifier, revision = companion_artifact_location(
@@ -896,6 +975,98 @@ def _apply_artifact_root(model_directory: Path, artifact_root: str | None) -> Pa
     return resolved_root
 
 
+def resolve_native_music_source_directory(
+    model_card: ModelCard, repository: str, revision: str,
+    *, require_card_identity: bool = False,
+) -> Path | None:
+    """Resolve one complete recorded native source, without downloading bytes.
+
+    Each selected path may be found in a different cache generation. Accept
+    only one directory whose installed record covers the entire exact source;
+    never assemble an apparent model from unrelated partial cache directories.
+    Returns ``None`` for an undeclared, absent or incomplete source.
+    ``require_card_identity`` additionally requires a primary installation of
+    this exact card, including its signed identity when present. This prevents
+    data-equivalent companion records or stale custom policy from becoming a
+    completed model download.
+    """
+    import skulk.shared.constants as _constants
+    from skulk.store.installed_cards import (
+        installed_card_matches,
+        read_installed_card_with_fallback,
+        require_registry_installed_artifact,
+        verify_installed_card,
+    )
+    from skulk.store.model_store import (
+        StoreRegistryIndex,
+        read_reconciliation_tombstones,
+    )
+
+    expected = model_card.native_music_files_for_source(repository, revision)
+    if not expected:
+        return None
+    identifier, effective_revision = companion_artifact_location(model_card, repository, revision)
+    directories: list[Path] = []
+    # A first-match file lookup can hide a later verified generation when an
+    # interrupted earlier copy has all names but lacks an installed record.
+    # Enumerate locations independently of individual files, then verify each
+    # complete source. A store index is only a bounded-path location hint.
+    identifiers = (identifier,) if identifier == model_card.model_id else tuple(dict.fromkeys((identifier, ModelId(repository))))
+    for search_root in dict.fromkeys([*(_constants.SKULK_MODELS_PATH or ()), SKULK_MODELS_DIR]):
+        try:
+            deleted = read_reconciliation_tombstones(search_root)
+        except (OSError, ValueError):
+            # A damaged store cannot override deletion intent. Other roots
+            # remain independent candidates and the shared coordinator lives.
+            continue
+        if str(identifier) in deleted or str(model_card.model_id) in deleted:
+            continue
+        candidates = [candidate for alias in identifiers
+            if str(alias) not in deleted
+            for candidate in _artifact_candidates(search_root, alias, effective_revision)]
+        try:
+            index = StoreRegistryIndex.model_validate_json((search_root / "registry.json").read_bytes())
+            for alias in identifiers:
+                entry = index.entries.get(str(alias))
+                if entry is not None and (
+                    entry.model_id == str(alias)
+                    and (entry.source_repository or entry.model_id) == repository
+                    and entry.source_revision == revision
+                    and str(alias) not in deleted
+                    and str(identifier) not in deleted
+                    and str(model_card.model_id) not in deleted
+                ):
+                    candidate = (search_root / entry.store_path).resolve()
+                    resolved_root = search_root.resolve()
+                    if candidate != resolved_root and candidate.is_relative_to(resolved_root):
+                        candidates.insert(0, candidate)
+        except (OSError, ValueError):
+            pass
+        directories.extend(candidates)
+    for directory in dict.fromkeys(directories):
+        try:
+            record = read_installed_card_with_fallback(directory)
+            if record is not None and (
+                record.artifact_repository == repository
+                and record.artifact_revision == revision
+                and _source_revision_matches(directory, revision)
+                and record.model_card.native_music_files_for_source(repository, revision) == expected
+                and verify_installed_card(directory, record)
+            ):
+                if require_card_identity:
+                    if (
+                        record.artifact_role != "base"
+                        or record.artifact_model_id != str(model_card.model_id)
+                        or not installed_card_matches(directory, model_card)
+                    ):
+                        continue
+                    require_registry_installed_artifact(directory, model_card)
+                return directory
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def artifact_install_directory(load_directory: Path, artifact_root: str | None) -> Path:
     """Recover the staged generation root from its bundle loader directory.
 
@@ -953,10 +1124,27 @@ def resolve_artifact_file(
     return candidate
 
 
+def _matches_requested_registry_card(
+    directory: Path, expected_card: ModelCard | None
+) -> bool:
+    """Keep every fallback behind the requested signed installed-card identity."""
+    if expected_card is None or expected_card.registry_card_id is None:
+        return True
+    from skulk.store.installed_cards import require_registry_installed_artifact
+
+    try:
+        require_registry_installed_artifact(directory, expected_card)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def build_model_path(
     model_id: ModelId,
     source_revision: str | None = None,
     artifact_root: str | None = None,
+    *,
+    expected_card: ModelCard | None = None,
 ) -> Path:
     """Resolve a local filesystem path for *model_id*.
 
@@ -971,6 +1159,8 @@ def build_model_path(
             or ``None`` for an unpinned mutable-main cache.
         artifact_root: Optional repository-relative working directory declared
             by a bundle-aware card.
+        expected_card: Optional exact card permitting an authenticated canonical
+            Store index location, including bundle-qualified directory names.
 
     Returns:
         The complete local model directory.
@@ -978,13 +1168,22 @@ def build_model_path(
     Raises:
         FileNotFoundError: If no complete revision-matching directory exists.
     """
-    found = (
-        resolve_model_in_path(model_id, source_revision)
-        if artifact_root is None
-        else resolve_model_in_path(
-            model_id, source_revision, artifact_root=artifact_root
+    if expected_card is not None:
+        found = resolve_model_in_path(
+            model_id,
+            source_revision,
+            artifact_root=artifact_root,
+            expected_card=expected_card,
+            include_store_index=True,
         )
-    )
+    else:
+        found = (
+            resolve_model_in_path(model_id, source_revision)
+            if artifact_root is None
+            else resolve_model_in_path(
+                model_id, source_revision, artifact_root=artifact_root
+            )
+        )
     if found is not None:
         return _apply_artifact_root(found, artifact_root)
     # A safetensors/MLX repo is identified by its config.json; a bare GGUF repo
@@ -1000,6 +1199,7 @@ def build_model_path(
         and default_load_root.is_dir()
         and _rooted_bundle_is_complete(default, default_load_root)
         and _source_revision_matches(default, source_revision)
+        and _matches_requested_registry_card(default, expected_card)
     ):
         return _apply_artifact_root(default, artifact_root)
     # Fallback: check the default staging directory directly.
@@ -1016,6 +1216,7 @@ def build_model_path(
         and staging_load_root.is_dir()
         and _rooted_bundle_is_complete(staging_fallback, staging_load_root)
         and _source_revision_matches(staging_fallback, source_revision)
+        and _matches_requested_registry_card(staging_fallback, expected_card)
     ):
         return _apply_artifact_root(staging_fallback, artifact_root)
     raise FileNotFoundError(
@@ -1324,6 +1525,14 @@ def _installed_bundle_covers_card(
         entry.path: entry.object_id
         for entry in record.model_card.artifact_bundle.files
     } if record.model_card.artifact_bundle is not None else {}
+    requested.extend(
+        (entry.path, entry.size_bytes, entry.object_id)
+        for entry in card.native_music_files_for_source(str(card.artifact_repository), card.source_revision)
+    )
+    identities.update(
+        (entry.path, entry.object_id)
+        for entry in record.model_card.native_music_files_for_source(record.artifact_repository, record.artifact_revision)
+    )
     if card.image is not None:
         requested.extend(
             (entry.path, entry.size_bytes, entry.object_id)
@@ -1621,9 +1830,29 @@ async def calc_hash(path: Path, hash_type: Literal["sha1", "sha256"] = "sha1") -
     return hasher.hexdigest()
 
 
+def _file_metadata_length(value: str | None, url: str) -> int:
+    """Distinguish an explicit empty object from absent or invalid HTTP metadata."""
+    if value is None:
+        raise ValueError(f"No content length for {url}")
+    try:
+        length = int(value)
+    except ValueError:
+        raise ValueError(f"Invalid content length for {url}") from None
+    if length < 0:
+        raise ValueError(f"Invalid content length for {url}")
+    return length
+
+
 async def file_meta(
     model_id: ModelId, revision: str, path: str, redirected_location: str | None = None
 ) -> tuple[int, str]:
+    """Fetch an explicit nonnegative byte length and immutable object hash.
+
+    Read HEAD metadata for the repository/revision/path, preferring Hub linked
+    headers and following its relative redirect when needed. Zero is a valid
+    declared object length. Missing/invalid size metadata and missing hashes
+    fail before a caller can accept or download the selected object.
+    """
     url = (
         urljoin(f"{get_hf_endpoint()}/{model_id}/resolve/{revision}/", path)
         if redirected_location is None
@@ -1639,7 +1868,7 @@ async def file_meta(
             x_linked_size = r.headers.get("x-linked-size")
             x_linked_etag = r.headers.get("x-linked-etag")
             if x_linked_size and x_linked_etag:
-                content_length = int(x_linked_size)
+                content_length = _file_metadata_length(x_linked_size, url)
                 etag = trim_etag(x_linked_etag)
                 return content_length, etag
             # Otherwise, follow the redirect to get authoritative size/hash
@@ -1648,11 +1877,10 @@ async def file_meta(
         if r.status in [401, 403]:
             msg = await build_auth_error_message(r.status, model_id)
             raise HuggingFaceAuthenticationError(msg)
-        content_length = int(
-            r.headers.get("x-linked-size") or r.headers.get("content-length") or 0
+        content_length = _file_metadata_length(
+            r.headers.get("x-linked-size") or r.headers.get("content-length"), url
         )
         etag = r.headers.get("x-linked-etag") or r.headers.get("etag")
-        assert content_length > 0, f"No content length for {url}"
         assert etag is not None, f"No remote hash for {url}"
         etag = trim_etag(etag)
         return content_length, etag
@@ -1776,10 +2004,13 @@ async def _download_file(
     target_path = target_dir / path
 
     if await aios.path.exists(target_path):
-        if skip_internet:
-            return target_path
-
         local_size = (await aios.stat(target_path)).st_size
+        if skip_internet:
+            if not await _cached_file_matches_pin(
+                target_path, local_size, expected_size, expected_object_id
+            ):
+                raise ValueError(f"Cached file {path} object mismatch in offline mode")
+            return target_path
 
         # Transport failure may use a complete cached file for offline operation.
         # A successful metadata lookup followed by a signed identity mismatch is
@@ -1788,7 +2019,14 @@ async def _download_file(
         try:
             remote_size, remote_etag = await file_meta(model_id, revision, path)
         except Exception as e:
-            # Offline or network error - trust local file
+            # Original signed pins remain available even when the Hub is not.
+            # An unpinned legacy request keeps its existing offline behavior.
+            if not await _cached_file_matches_pin(
+                target_path, local_size, expected_size, expected_object_id
+            ):
+                raise ValueError(
+                    f"Cached file {path} object mismatch while remote metadata is unavailable"
+                ) from e
             logger.debug(
                 f"Could not verify {path} against remote (offline?): {e}, using local file"
             )
@@ -1800,9 +2038,11 @@ async def _download_file(
             expected_size=expected_size,
             expected_object_id=expected_object_id,
         )
-        if local_size != remote_size:
+        if local_size != remote_size or not await _cached_file_matches_pin(
+            target_path, local_size, expected_size, expected_object_id
+        ):
             logger.info(
-                f"File {path} size mismatch (local={local_size}, remote={remote_size}), re-downloading"
+                f"File {path} size or pinned identity mismatch, re-downloading"
             )
             await aios.remove(target_path)
         else:
@@ -1880,6 +2120,27 @@ async def _download_file(
     await aios.rename(partial_path, target_dir / path)
     on_progress(length, length, True)
     return target_dir / path
+
+
+async def _cached_file_matches_pin(
+    path: Path, size: int, expected_size: int | None, expected_object_id: str | None
+) -> bool:
+    """Verify original immutable truth before accepting existing pinned bytes.
+
+    Do not hash unpinned legacy files or turn their old offline fallback into a
+    new contract. A signed Git blob uses its length-prefixed object identity;
+    tensors use their full SHA-256. Size alone never authorizes pinned reuse.
+    """
+    if expected_size is not None and size != expected_size:
+        return False
+    if expected_object_id is None:
+        return True
+    algorithm, separator, digest = expected_object_id.partition(":")
+    if not separator or algorithm not in {"sha256", "git-sha1"}:
+        raise ValueError("Cached file object mismatch: invalid immutable identity")
+    return await calc_hash(
+        path, hash_type="sha256" if algorithm == "sha256" else "sha1"
+    ) == digest
 
 
 def _require_expected_remote_identity(
@@ -1990,7 +2251,13 @@ async def get_weight_map(model_id: ModelId, revision: str = "main") -> dict[str,
 
 
 async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
+    """Select download paths, refusing component layouts not yet supported."""
     bundle = shard.model_card.artifact_bundle
+    native_files = shard.model_card.native_music_files_for_source(
+        str(shard.model_card.artifact_repository), shard.model_card.source_revision
+    )
+    if native_files:
+        return [item.path for item in native_files]
     if shard.model_card.image is not None:
         # Primary-repository companions belong to the base transaction; the
         # companion downloader handles only the other pinned repositories.
@@ -2067,6 +2334,11 @@ async def download_shard(
     capacity_preflight: DownloadCapacityPreflight | None = None,
     replacement_identity: str | None = None,
 ) -> tuple[Path, RepoDownloadProgress]:
+    """Download or inspect selected shard bytes and return their progress.
+
+    Unsupported artifact layouts raise before cache mutation or network access,
+    including requests that supply explicit patterns or skip the transfer.
+    """
     if not skip_download:
         require_remote_code_approval(shard.model_card)
         logger.debug(f"Downloading {shard.model_card.model_id=}")
@@ -2151,12 +2423,16 @@ async def download_shard(
         filter_repo_objects(
             file_list,
             allow_patterns=allow_patterns,
-            ignore_patterns=[] if shard.model_card.image is not None else ["original/*", "metal/*"],
+            ignore_patterns=[] if shard.model_card.artifact_bundle is not None or shard.model_card.image is not None or shard.model_card.native_music_artifact_sources() else ["original/*", "metal/*"],
             key=lambda x: x.path,
         )
     )
     bundle = shard.model_card.artifact_bundle
     expected_files = {item.path: (item.size_bytes, item.object_id) for item in bundle.files} if bundle is not None else {}
+    expected_files.update(
+        (item.path, (item.size_bytes, item.object_id))
+        for item in shard.model_card.native_music_files_for_source(str(shard.model_card.artifact_repository), revision)
+    )
     if shard.model_card.image is not None:
         # A primary bundle does not replace same-repository component sources.
         # Their exact manifest outranks the legacy MLX layout exclusions.

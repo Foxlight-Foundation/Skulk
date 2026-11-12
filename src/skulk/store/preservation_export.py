@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.models.registry import EMBEDDED_REGISTRY_ROOT
+from skulk.store.installed_cards import PRESERVATION_CAPTURE_NOTICE as CAPTURE_NOTICE
 from skulk.store.installed_cards import (
     InstalledCardRecord,
     companion_owner_matches,
@@ -69,9 +70,6 @@ class PreservePlan(BaseModel):
     retains_registry_proof: bool = Field(
         description="Whether explicit original registry evidence was supplied."
     )
-
-
-CAPTURE_NOTICE = b"Private owner capture. Original license/attribution may be incomplete. No redistribution rights, upstream authorship or runtime qualification are granted.\n"
 
 
 @dataclass(frozen=True)
@@ -166,21 +164,25 @@ def _sources(
     roots = tuple(dict.fromkeys((model_directory.parent, *artifact_roots)))
     for index, (role, selection) in enumerate(companion_selections(record.model_card)):
         matches: dict[Path, _Source] = {}
-        for root in roots:
-            for candidate in _artifact_directories(root, str(selection.model_id)):
-                if not candidate.is_dir():
-                    continue
-                child = read_installed_card(candidate)
-                if child is not None and (
-                    child.artifact_role == role
-                    and child.artifact_model_id == str(selection.model_id)
-                    and child.artifact_repository == str(selection.artifact_repository)
-                    and child.artifact_revision == selection.source_revision
-                    and companion_owner_matches(child, record.model_card)
-                ):
-                    matches[candidate.resolve()] = _Source(
-                        candidate, child, f"companion-{index}"
-                    )
+        aliases = (str(selection.model_id), str(selection.artifact_repository)) if role == "music_component" else (str(selection.model_id),)
+        for alias in dict.fromkeys(aliases):
+            for root in roots:
+                for candidate in _artifact_directories(root, alias):
+                    if not candidate.is_dir():
+                        continue
+                    child = read_installed_card(candidate)
+                    if child is not None and (
+                        child.artifact_role == role
+                        and child.artifact_model_id == alias
+                        and child.artifact_repository == str(selection.artifact_repository)
+                        and child.artifact_revision == selection.source_revision
+                        and companion_owner_matches(child, record.model_card)
+                    ):
+                        matches[candidate.resolve()] = _Source(
+                            candidate, child, f"companion-{index}"
+                        )
+            if matches:
+                break
         if len(matches) != 1:
             raise PreservationError(
                 f"required companions are missing or ambiguous: {role} {selection.model_id}"

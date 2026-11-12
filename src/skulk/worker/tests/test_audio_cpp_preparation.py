@@ -32,10 +32,14 @@ from skulk.worker.main import Worker
     ],
 )
 async def test_prepared_gpu_only_lane_requires_matching_build(
-    monkeypatch: pytest.MonkeyPatch, variant: Literal["cpu", "vulkan", "cuda"], lane: str,
-    builds: dict[str, str], expected_success: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    variant: Literal["cpu", "vulkan", "cuda"],
+    lane: str,
+    builds: dict[str, str],
+    expected_success: bool,
 ) -> None:
     """A GPU-only override can mount, while an unverified lane cannot."""
+
     def prepared(*, allow_download: bool, variant: Literal["cpu", "vulkan", "cuda"]) -> None:
         assert allow_download
         assert variant == requested_variant
@@ -57,6 +61,7 @@ async def test_prepared_gpu_only_lane_requires_matching_build(
     worker._data_transport = "gossipsub"
     worker._telemetry_sender = SimpleNamespace(send=AsyncMock())
     worker.event_sender = SimpleNamespace(send=AsyncMock())
+    worker._gather_node_resources = AsyncMock(return_value=resources)
     request = AudioCppPreparationRequested(
         request_id=CommandId("prepare-music"),
         target_node=worker.node_id,

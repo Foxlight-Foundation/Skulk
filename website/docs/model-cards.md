@@ -379,9 +379,10 @@ flags false.
 
 ### `[music]`
 
-Declares text-to-music model truth. A music card has `tasks = ["TextToMusic"]`
-as its sole task, a complete `artifact_bundle`, and no speech `[audio]`
-section. The registry derives `music.generate` from that task; it does not
+Declares music model truth, separate from speech `[audio]`. GGUF music cards
+have `tasks = ["TextToMusic"]` as their sole task and a complete
+`artifact_bundle`. Native ACE base cards declare both `TextToMusic` and
+`MusicEditing`, with the component contract below. The registry derives `music.generate` from that task; it does not
 classify every upstream `text-to-audio` repository as music.
 
 - `family`
@@ -401,14 +402,14 @@ classify every upstream `text-to-audio` repository as music.
 
 MiniMax's selected language model is also the card's `gguf_file`. Its bundle
 contains that model, the selected RVQ decoder and flow transformer, plus the
-required conditioner, vocoder, tokenizer, and configuration files. ACE-Step
+required conditioner, vocoder, tokenizer, and configuration files. ACE-Step GGUF
 selects one GGUF as `gguf_file`; its bundle contains only that file. See the
 registry's complete [MiniMax Q4](https://github.com/Foxlight-Foundation/foxlight-model-registry/blob/main/seed/cards/music_model_cards/audio-cpp--MiniMax-Music3-GGUF-Q4.toml)
 and [ACE-Step Turbo BF16](https://github.com/Foxlight-Foundation/foxlight-model-registry/blob/main/seed/cards/music_model_cards/audio-cpp--ACE-Step1.5-Turbo-BF16.toml)
 cards for exact component identities and sizes. Each other quant or selected
 variant requires its own card.
 
-Music cards declare `placement.compatible_backends = ["audio_cpp"]`. Placement
+GGUF music cards declare `placement.compatible_backends = ["audio_cpp"]`. Placement
 resolves an available concrete `audio_cpp-cpu`, `audio_cpp-metal`,
 `audio_cpp-vulkan`, `audio_cpp-cuda` or `audio_cpp-rocm` lane. First-use preparation
 can install a compatible engine; its ready probe and actual package requirements
@@ -417,6 +418,115 @@ requirements and current single-device binding limitation. Qualification records
 are scoped observations, not prerequisites for loading or publication. The
 [Strix Vulkan qualification record](audio-cpp-strix-qualification.md) reports one
 tested configuration without excluding other compatible hardware.
+
+### `[music.native]`
+
+Native ACE-Step 1.5 base uses **safetensors**, independently of audio.cpp's
+Turbo GGUF. The reader preserves its intrinsic generation and editing truth;
+this metadata does not assert that a native runner or editing endpoint is
+available. Current audio.cpp and MLX runners cannot load this selection.
+Master placement and manual/legacy worker startup refuse that mismatch.
+Downloads group all selected files by immutable repository/revision. A shared
+text-encoder/autoencoder source is one required `music_component` transaction;
+components mirrored into the primary source are included in its base transfer.
+Installed records bind each complete source to its sizes and object pins. Offline
+completeness requires every source, its revision marker and installed record;
+a cached primary bundle alone is never considered download-complete. Preservation
+exports and restores this complete closure while retaining each role's loader
+root. Downloaded bytes do not advertise a ready engine or enable placement.
+
+| Field | Meaning |
+| --- | --- |
+| `variant` | `base`; Turbo is not admitted as a native lego checkpoint. |
+| `sample_rate` / `audio_channels` | Native output geometry, 48,000 Hz / stereo. |
+| `editing_modes` | Unique closed values `add_part`, `repaint`, `continue`. Continue means temporal outpainting, not native track completion. |
+| `part_classes` | Unique native track classes: `woodwinds`, `brass`, `fx`, `synth`, `strings`, `percussion`, `keyboard`, `guitar`, `bass`, `drums`, `backing_vocals`, `vocals`. Finer instrumentation belongs in the prompt. |
+| `text_encoder` / `autoencoder` | Each has its own `repo`, immutable 40-character `revision`, `license`, and complete `artifact_bundle`. |
+| `tensor_layouts` | Optional all-three-role serialized tensor facts. Does not prescribe loaded precision, peak RAM or hardware qualification. |
+
+When `tensor_layouts` is present, it contains exactly `base`, `text_encoder` and
+`autoencoder`. Each role describes its one selected safetensors object:
+
+| Role field | Contract |
+| --- | --- |
+| `header_bytes` | Complete prefix size, including its eight-byte little-endian length word; 10 bytes through 8 MiB. |
+| `header_sha256` | Lowercase SHA-256 of that exact prefix, including original JSON whitespace/padding. |
+| `dtypes` | One through twenty unique scalar groups, each with `dtype`, positive `tensor_count`, and nonnegative logical `element_count`. |
+
+Scalar names follow the pinned Safetensors format: `BOOL`, `F4`, `F6_E2M3`,
+`F6_E3M2`, `U8`, `I8`, `F8_E5M2`, `F8_E4M3`, `F8_E8M0`, `I16`, `U16`,
+`F16`, `BF16`, `I32`, `U32`, `F32`, `C64`, `F64`, `I64`, `U64`.
+Complete groups must be byte-aligned and their serialized bytes plus the header
+must equal the exact selected object's size. Header projection rejects duplicate
+keys, invalid shapes, unindexed tails, holes and overlaps; it does not checksum
+the tensor body. The worker separately verifies every complete selected object
+and compares its actual header facts before loading.
+
+Omitting the section preserves historical card serialization and identities.
+Adding it changes declarative metadata without changing model files or granting
+an engine/hardware support permission. Runtime policy binds actual library-probed
+component precision independently. For example, BF16 checkpoint state expands
+when the selected loader uses FP32. Integer, packed and complex buffer/casting
+semantics remain explicit memory-estimation unknowns. Even a complete floating
+state projection excludes initialized buffers, libraries, loading copies and
+inference workspace; it is not a peak-memory admission threshold.
+
+The primary bundle contains only `config.json`, `model.safetensors` and
+`silence_latent.pt`. The 24-layer / 2048-wide base geometry must match the
+card. The text-encoder bundle contains its model, config, tokenizer and
+supporting vocabulary/template files; the autoencoder contains config and
+safetensors weights. All files require positive byte sizes and immutable
+object identities; tensor/latent weights require SHA-256. Each bundle keeps
+its own canonical source-relative loader root. Mirrors may use different
+roots without changing component roles. Components sharing a repository pin
+the same revision. `storage_size` includes all three complete selections.
+
+External native data sources use a deterministic `skulk-native/<digest>` cache
+alias. The digest binds the source repository, immutable revision and complete
+grouped file selection. Identical encoder/VAE data can serve different cards;
+different selections at one commit have independent transfers and directories.
+The alias conveys no model-code trust. Each owning card retains its own signed
+identity, loader roots, licenses and execution policy. Existing repository-only
+caches remain readable only when their recorded complete selection matches.
+For roles sharing the primary repository, the physical transfer generation binds
+the entire source group, while the card's primary bundle and loader root retain
+their original meaning. Explicit bundle members remain selected even under
+legacy `original/` or `metal/` repository prefixes; unrelated files stay excluded.
+
+Repository-supplied Python is excluded from these file sets, and
+`trust_remote_code` must be false: the separately pinned engine package owns
+its reviewed implementation. No language-model planner checkpoint is implied
+by this profile. Existing GGUF card serialization omits `music.native`
+entirely, preserving installed identities. `/v1/models` projects the native
+variant, geometry, editing modes and part classes separately from readiness.
+
+### `[separation]`
+
+Native source separation uses `tasks = ["AudioSeparation"]` and a typed
+`[separation]` section. The initial `htdemucs` profile declares only this task,
+with no speech `[audio]` or generation `[music]` section. Its ordered stems are
+`drums`, `bass`, `other`, and `vocals`, each natively stereo at 44,100 Hz.
+The registry derives `audio.separate` only from this explicit task; a generic
+upstream audio pipeline tag does not establish source separation.
+
+| Field | Model truth |
+| --- | --- |
+| `family` | `htdemucs` |
+| `stems` | The exact ordered native four-role list above |
+| `sample_rate`, `audio_channels` | 44,100 Hz and two channels per stem |
+| `weights_file` | Canonical relative `.safetensors` path beneath the artifact loader root |
+| `encoder_depth` | Actual hybrid encoder depth |
+| `transformer_layers_per_branch`, `transformer_channels` | Actual per-branch transformer depth and width; top-level `n_layers` and `hidden_size` must match |
+| `trained_segment_seconds` | Positive finite training window, independent of source duration and requested split size |
+
+The inspected HTDemucs artifact has encoder depth four, five transformer layers
+per branch at width 512, and a 7.8-second trained window. Its exact artifact
+bundle contains only the selected safetensors object with its SHA-256 identity;
+`storage_size.in_bytes` equals the bundle's complete download size. Weights are
+a separate download from the engine runtime. The section does not choose a
+device, precision policy, split size, overlap, shifts or export encoding, and
+does not declare a ready model. These remain serving/admission contracts.
+`/v1/models` exposes this typed metadata as `separation`.
 
 ### `[video]`
 

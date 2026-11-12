@@ -350,6 +350,11 @@ class BoundInstance(CamelCaseModel):
         return ModelTask.TextToMusic in self.bound_shard.model_card.tasks
 
     @property
+    def is_separation_model(self) -> bool:
+        """Whether this single-host instance loads a native source separator."""
+        return ModelTask.AudioSeparation in self.bound_shard.model_card.tasks
+
+    @property
     def is_embedding_model(self) -> bool:
         return ModelTask.TextEmbedding in self.bound_shard.model_card.tasks
 

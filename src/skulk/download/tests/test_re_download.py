@@ -939,3 +939,72 @@ async def _wait_for_download_completed(
                     return event.download_progress
     except TimeoutError:
         return None
+
+
+@pytest.mark.parametrize("relative_file", ["model.gguf", "nested/model.gguf"])
+async def test_file_valued_default_cache_download_can_be_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative_file: str,
+) -> None:
+    """Flat and nested GGUF results remain writable node caches after completion.
+
+    Transfer is injected. The coordinator completion, real file-valued return,
+    command dispatch and default-cache deletion execute their actual paths.
+    """
+    import skulk.download.download_utils as download_utils
+
+    cache = tmp_path / "downloads"
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", cache)
+    monkeypatch.setattr(coordinator_module, "SKULK_MODELS_DIR", cache)
+    output = cache / MODEL_ID.normalize() / relative_file
+
+    class FileDownloader(FakeShardDownloader):
+        """Return the same file geometry as a direct GGUF download."""
+
+        async def ensure_shard(
+            self, shard: ShardMetadata, config_only: bool = False,
+        ) -> Path:
+            """Write the injected complete file before emitting real progress."""
+            output.parent.mkdir(parents=True)
+            output.write_bytes(b"GGUF cached transfer fixture")
+            await super().ensure_shard(shard, config_only)
+            return output
+
+    async def catalog() -> list[ModelCard]:
+        return []
+
+    monkeypatch.setattr(coordinator_module, "get_model_cards", catalog)
+    commands, receiver = channel[ForwarderDownloadCommand]()
+    events, received = channel[Event]()
+    telemetry, _ = channel[NodeTelemetry]()
+    coordinator = DownloadCoordinator(
+        node_id=NODE_ID, shard_downloader=FileDownloader(),
+        download_command_receiver=receiver, event_sender=events,
+        telemetry_sender=telemetry,
+    )
+    work = asyncio.create_task(coordinator.run())
+    try:
+        await commands.send(ForwarderDownloadCommand(
+            origin=SystemId("test"), command=StartDownload(
+                target_node_id=NODE_ID,
+                shard_metadata=_make_shard(gguf_file=relative_file),
+            ),
+        ))
+        completed = await _wait_for_download_completed(received, MODEL_ID)
+        assert completed is not None and not completed.read_only
+        assert Path(completed.model_directory) == output.parent and output.is_file()
+        await commands.send(ForwarderDownloadCommand(
+            origin=SystemId("test"), command=DeleteDownload(
+                target_node_id=NODE_ID, model_id=MODEL_ID,
+            ),
+        ))
+        with anyio.fail_after(2):
+            # Off-thread rmtree unlinks the leaf before removing its parents.
+            # Wait for the complete cache contract before asserting or shutdown.
+            while (cache / MODEL_ID.normalize()).exists():
+                await anyio.sleep(0.01)
+        assert not (cache / MODEL_ID.normalize()).exists()
+    finally:
+        await coordinator.shutdown()
+        work.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await work

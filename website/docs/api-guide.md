@@ -2176,21 +2176,65 @@ weight/runtime overhead: 10 GiB for ACE-Step and 2 GiB for MiniMax. MiniMax Meta
 reserves 5 GiB beyond weight/runtime overhead against its system-RAM ceiling.
 The same estimate governs mounting and worker admission; a matching hardware
 class with insufficient capacity cannot place the model.
-CUDA music preparation requires the package's compiled GPU class in both
-live node facts and the signed support claim: SM 8.9 for Linux amd64 and
-SM 12.1 for Linux arm64. The signed claim must name the platform's exact managed
-build. Managed packages require one observed NVIDIA device with a known matching
+Audio.cpp CUDA music preparation requires the package's compiled GPU class in
+live node facts: SM 8.9 for Linux amd64 and SM 12.1 for Linux arm64.
+Signed qualification records retain their exact tested build and hardware;
+missing qualification does not prohibit an otherwise compatible runtime.
+Managed packages require one observed NVIDIA device with a known matching
 compute class; multiple devices, mixed classes, and unknown classes cannot be
 admitted until execution and memory accounting can select the same physical
 device. Each published native build retains those restrictions when restored
 from cache. A generic NVIDIA claim cannot widen a managed package's compiled
 target, and package availability alone cannot place a model. A qualified
-operator-provided primary CUDA binary can use its own exact signed build claim.
+operator-provided primary CUDA binary uses its own verified build identity.
 When a dedicated CUDA wheel is already cached, configure
 `SKULK_AUDIO_CPP_CUDA_BIN` for that operator binary as well; startup cache
 rehydration otherwise prefers the dedicated build over a primary-only override.
 
 Music generation is an asynchronous job API for a mounted `TextToMusic` card.
+Native ACE base card metadata can also describe intrinsic editing modes in
+`music.native`. Those safetensors components cannot be loaded by the audio.cpp
+runner. This section documents generation; native editing has its separate
+contract below.
+Native-profile Download requests retain all selected primary, text-encoder and
+autoencoder files at their pinned revisions, grouping shared sources into one
+required transfer. Missing components fail the download with an actionable reason;
+the node and its download command processor remain available for other work.
+Offline reuse and preservation require the complete recorded data closure.
+Downloaded native bytes alone do not establish a mounted or ready engine.
+
+Under the Music Studio initiative, `POST /place_instance` and `POST /instance`
+prepare native ACE libraries separately from audio.cpp. The ordinary request
+uses `model_id` and `excluded_nodes`; an exact request uses its single specified
+node and optional explicit `resolved_backend`. Native lanes are `ace_step-cpu`,
+`ace_step-metal`, `ace_step-cuda` and `ace_step-rocm`; native Vulkan is not
+implemented. A bare engine requirement identifies compatibility but never a
+ready device. Native safetensors and GGUF music use distinct loaders.
+
+Preparation selects an advertised fixed package matching the worker's OS/CPU
+and generic device requirements. At most four mount preparations can wait on an
+accepting API node. One thirty-minute budget includes every candidate attempt,
+command queue, verification and device probe; another candidate does not reset
+it. Offline workers may reuse independently verified cached bytes only. The
+worker's ordered completion must match the request, accepting API, worker,
+package digest and device before the API can forward placement. That response
+must include the actual ready build, math policy and a fresh actual device-zero
+memory observation. Installable package metadata alone is insufficient.
+
+Native memory admission accounts for complete model loading and forward phases,
+all existing placements and idle future workspace across host/device/shared
+physical pools. It does not reuse generic already-reserved memory inputs or
+borrow another GPU's capacity. Explicit backend overrides cannot silently fall
+back to another lane. Preparation failures return an actionable `503`; invalid
+explicit native lanes return `400`. Other engines and worker health remain
+available. Insufficient disk reserve returns **503** with `error.message`
+identifying insufficient space on the selected worker and asking the operator
+to free storage and retry. No instance is created or unverified engine advertised
+as ready; the worker and its other engines stay running. Private exception paths
+and command details are kept in worker logs rather than the public error.
+Preparation does not itself load the model or establish qualification;
+installed acceptance and distribution remain separate from this source integration.
+
 The model's `/v1/models` `music` object identifies its family, lyric rule,
 accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses
 the existing API authentication policy. Jobs and WAV content belong to the
@@ -2236,6 +2280,10 @@ its expiration.
 If the ordered task terminates but its final music frame is lost, the API
 fails the job after a 45-second grace and the next 15-second sweep; it does
 not retain an active job indefinitely.
+For native ACE generation, execution-task cleanup after the terminal report
+does not cancel a registered WAV that is still being verified and delivered.
+The job remains in progress until both completion conditions hold; explicit
+cancellation or delivery failure still ends it without partial downloadable audio.
 
 ### Download music
 
@@ -2256,6 +2304,259 @@ whose WAV is still being delivered.
 **DELETE** `/v1/music/{music_id}` cancels a live job, removes its WAV, and
 forgets its record. It returns
 `{ "id": "...", "object": "music.deleted", "deleted": true }`.
+
+## Native music editing
+
+These routes describe the native edit service under the Music Studio initiative.
+Native ACE mounting and execution use the preparation and supervised native
+runner paths above; signed distribution and installed-platform acceptance remain
+separate initiative gates. Downloading a native card or engine package alone
+does not create an executable editing instance. Existing audio.cpp generation
+continues to use the music API above.
+
+Edits are asynchronous and local to the accepting API node. Use that same node
+for polling, cancellation and content. The existing API authentication policy
+applies; operator gateway access requires the inference (`chat:write`) scope.
+Raw source/result audio uses directed media transport and stays outside
+replicated State and event logs.
+After a verified native result is registered, ordinary execution-task cleanup
+does not cancel its pending media delivery. Explicit cancellation, failure and
+the bounded delivery deadline still apply.
+
+### Create an edit
+
+**POST** `/v1/music/edits` accepts `multipart/form-data` with exactly two fields:
+
+- `request`: one closed JSON object, at most 256 KiB.
+- `file`: the original encoded WAV, at most 64 MiB, one to 120 seconds, mono or
+  stereo, finite PCM/float samples, 8–192 kHz. The original is never overwritten.
+
+The response is **202** with a `music.edit` resource. Four edits, including
+unfinished source/return drains, may be active on one API node. One native model
+instance admits one generation or edit at a time. A prepared package alone does
+not satisfy model readiness.
+
+| Common field | Type | Contract |
+| --- | --- | --- |
+| `task` | string, required | `add_part`, `repaint`, or `continue` |
+| `model` | string, required | Selected native card alias |
+| `prompt` | string, required | Original nonblank caption, up to 8,000 characters |
+| `lyrics` | string, optional | Original nonblank lyrics, up to 20,000 characters; obeys the card's lyric rule. Omission resolves to `[Instrumental]` |
+| `source_sample_rate` | integer, required | Clock for all request frame coordinates; must equal the measured WAV sample rate |
+| `seed` | integer, optional | 0–4294967295, including zero. The API selects a missing seed once and durably records it before dispatch |
+
+Operation-specific fields are closed:
+
+| Task | Additional controls |
+| --- | --- |
+| `add_part` | Required `part_class`, limited to the card's declared classes. Optional `region_start_frame` (default 0) and `region_end_frame` (default complete source) |
+| `repaint` | Required `region_end_frame`; optional `region_start_frame` (default 0). The nonempty half-open region must be inside the original |
+| `continue` | Required `target_frames`: total extent including the complete original, strictly larger than it. Only the appended tail is reworked; region/part fields are rejected |
+
+Inputs use the source clock. The API maps starts down and ends up to the native
+48 kHz frame grid using integer arithmetic. The resource explicitly returns
+`frame_sample_rate: 48000`, resolved `target_frames`, `region_start_frame`, and
+`region_end_frame`. In-place edits preserve the original extent after that
+mapping. Continue includes the original and the extension. The selected card's
+duration maximum and the global 120-second ceiling both apply.
+
+Unknown or task-inappropriate fields, caller paths, arbitrary native options,
+blank text, invalid clocks/ranges and disallowed card controls return **422**.
+Malformed multipart requests return **400**, wrong content type **415**, a
+bounded upload exceeding its declared/streamed limit **413**, and an upload
+exceeding 180 seconds **408**. Capacity/storage admission failure returns **503**.
+An interrupted or ambiguous submission is never automatically resubmitted;
+inspect the accepting node's retained jobs before choosing to try again.
+
+```bash
+curl -X POST "$SKULK_URL/v1/music/edits" \
+  -F 'request={"task":"repaint","model":"native-model-id","prompt":"A gentle cello response","source_sample_rate":48000,"region_start_frame":480000,"region_end_frame":960000,"seed":0}' \
+  -F 'file=@context.wav;type=audio/wav'
+```
+
+### List and retrieve edits
+
+**GET** `/v1/music/edits` accepts `limit` (1–63, default 20) and optional `after`
+(the previous page's retained `last_id`). The response has `object: "list"`,
+`data`, `first_id`, `last_id`, and `has_more`, newest first. Invalid/stale cursors
+return **400**. Up to 64 records are retained; completed unexpired results are
+protected from implicit eviction to admit more work.
+
+**GET** `/v1/music/edits/{edit_id}` returns the accepted caption, lyrics, fixed
+seed, measured original, resolved native extent, status and terminal times.
+`output` remains null until native render completion, independently verified and
+synced WAV custody, and drained reverse acceptance all agree. The API
+retains its native task until that return acknowledgement has drained; render
+metadata alone cannot retire the worker's result producer. Completed output
+records exact source lineage, runtime/model identities, observed device/precision,
+conditioning gain/padding, render latency and WAV geometry/size/SHA-256/peak.
+Paths and raw audio bytes are excluded. A missing node-local job returns **404**.
+
+Failed jobs retain the available placement or native error in `error`, bounded
+to 1,024 characters, including when final task status arrives before its DATA
+error frame. When all matching native instances are busy, the job fails
+with the idle-capacity reason and `output: null`. Callers can submit a new request
+after capacity returns. A **202** response confirms the job receipt; it does not
+reserve a busy model or promise queued inference.
+
+Placement waits are bounded to 45 seconds, the full placed edit to two hours, and
+post-render return delivery to five minutes, checked by a one-second sweeper.
+The native cooperative timeout and runner hard deadline use the same two-hour
+render ceiling. This accommodates slower CPU execution; it is not a completion
+time estimate. Earlier cancellation, failure and source-transfer limits still
+apply.
+Restart or cluster-session replacement fails interrupted work without replay or
+seed changes. Previously completed results are reverified before serving.
+
+### Download, cancel and delete edits
+
+**GET** `/v1/music/edits/{edit_id}/content` returns the completed **PCM24 stereo
+48 kHz WAV**, at most 64 MiB, with `Content-Length`, attachment filename and a
+quoted SHA-256 `ETag`. Content is retained for 24 hours. Unsettled/failed/cancelled
+jobs return **409**; absent/expired content returns **404**. Eight downloads are
+admitted per API node; excess readers return **503**. Deleting a job does not
+truncate a download whose descriptor was already leased.
+Native Repaint and Continue candidates blend across a 25 ms join. Headroom
+normalization can also scale the whole candidate, as recorded in its output
+metadata. The retained original asset stays unchanged; candidate samples outside
+the requested interval are not promised to be bit-identical to that asset.
+If removing expired content fails, its storage reservation remains in place and
+later sweeps retry cleanup without interrupting unrelated API work.
+
+**POST** `/v1/music/edits/{edit_id}/cancel` records cancellation, stops native
+work and source/result delivery, and removes partial copies. Terminal jobs are
+unchanged. **POST** `/v1/cancel/{edit_id}` also cancels an active edit. Late native
+frames cannot revive cancelled work.
+Terminal status does not release a cleanup reservation: original copies,
+partial results and their admission slot remain owned until both stores drain.
+Filesystem failures are retried in the background without stopping unrelated
+API work. Completed WAVs remain available while an original-only cleanup drains.
+
+**DELETE** `/v1/music/edits/{edit_id}` cancels active work, removes only API-owned
+content and forgets the record. It returns
+`{"id":"...","object":"music.edit.deleted","deleted":true}`. Missing jobs
+return **404**. Creator originals and Studio project assets remain independently
+owned. WAV output is never silently truncated or transcoded.
+Incomplete physical cleanup returns **503** and retains the job record; retry
+delete after cleanup completes. Startup likewise refuses edit storage readiness
+while an orphan cleanup failure leaves unaccounted content behind.
+If recording a source/result transport failure encounters an uncertain index
+write, the edit service cancels its retained work and returns **503** until its
+index is reopened. Unrelated API serving continues; an unwritten terminal outcome
+is never reported as durably committed.
+
+## Source separation
+
+Source separation creates an asynchronous, **API-node-local** four-stem job for
+an already mounted `AudioSeparation` model. The initial native adapter estimates
+drums, bass, other accompaniment and vocals with HTDemucs. These are model
+estimates; the original is preserved independently and is never overwritten.
+Use the same API node for creation, status, cancellation and downloads. Jobs
+are not forwarded to another API node when it restarts or becomes unavailable.
+These routes use the existing API access policy; the authenticated operator
+gateway requires the existing inference (`chat:write`) scope.
+
+### Create a job
+
+**POST** `/v1/audio/separations` accepts `multipart/form-data` containing exactly:
+
+| Field | Type | Contract |
+| --- | --- | --- |
+| `request` | JSON encoded as a text field, at most 4 KiB | `{"model":"mounted-model-id"}`. Extra fields, native options and server-local paths are rejected. |
+| `file` | One WAV upload | 1–120 seconds, mono or stereo, 8–192 kHz. The complete original is at most 64 MiB and its decoded float32 geometry at most 128 MiB. PCM8/16/24/32 and float32/64 are accepted; samples must be finite and supported WAV structure must be valid. The supplied filename is ignored. |
+
+The body has a streaming limit of 64 MiB plus 32 KiB multipart overhead, even
+without `Content-Length`. At most four upload handlers and four active jobs are
+admitted on an API node. A slot remains reserved while its bounded reverse
+acknowledgements or cancellation terminals drain, including after cancellation.
+A model selection or ordinary mount prepares its engine
+separately; creating a separation does not install or mount a model implicitly.
+
+```bash
+curl -X POST http://localhost:52415/v1/audio/separations \
+  -F 'request={"model":"adefossez/HTDemucs"}' \
+  -F 'file=@original.wav;type=audio/wav'
+```
+
+Success returns **202** with an `audio.separation` object containing `id`,
+`model`, independently measured `source`, `status`, `created_at`, nullable
+`completed_at`, `expires_at`, `error` and `output`. Status is `queued`,
+`in_progress`, `completed`, `failed` or `cancelled`. `source` contains the complete
+encoded SHA-256 and size, sample rate, channels, frames, encoding and bit depth;
+it contains no file path or samples. `output` remains null until successful
+rendering, all four verified local files agree with the complete manifest, and
+their return-path acknowledgements have been admitted. An unavailable return
+transport or acknowledgement deadline fails the job, including when every WAV
+has already verified; it cannot silently report completion.
+Repeated completion packets also require manifest verification; arrival of the
+manifest rechecks settlement after any previously admitted acknowledgements.
+The manifest's JSON `stems` array contains `drums`, `bass`, `other`, and `vocals`
+exactly once in that order. The same complete-set, strict field and WAV geometry
+checks apply when the worker and accepting API run on different nodes.
+The native task remains owned until every stem acknowledgement drains. Render
+metadata alone cannot retire the worker's result producer. Failure or cancellation
+submits task cancellation before finalizing its metadata stream.
+
+Uploads have a three-minute deadline; a stalled body returns 408 and its partial
+spooled files are closed. Requests with invalid metadata or WAV data return 422; malformed multipart
+returns 400, an unsupported request content type 415, and byte-limit violations
+413. Capacity or unavailable storage returns 503. An unavailable model or a
+later placement/execution failure is recorded as an actionable terminal error.
+The available placement or native reason is retained in `error`, bounded to
+1,024 characters. When every matching separator is occupied, the job fails with
+the idle-capacity reason and `output: null`; callers can submit a new request
+after capacity returns. The initial `queued` receipt does not promise an inference
+queue on an occupied model.
+Submission occurs once: after an interrupted response, inspect the retained job
+before retrying. The API never automatically replays an uncertain edit.
+
+### Inspect and retrieve content
+
+**GET** `/v1/audio/separations` lists newest-first jobs. `limit` is 1–63
+(default 20); `after` is a retained last-ID cursor. The response has `object:
+"list"`, `data`, `first_id`, `last_id` and `has_more`. An unknown cursor returns
+400. At most 64 job records are retained; unexpired complete results are not
+silently evicted to admit another job.
+
+**GET** `/v1/audio/separations/{separation_id}` returns committed metadata or
+404 when this API node does not retain that ID. A completed `output` has the
+original `source`, ordered `stems`, shared `common_gain` and `pre_gain_peak`.
+Each stem reports its name, MIME type, size, SHA-256, sample rate, complete frame
+count, channels, bit depth and measured peak. All four stems share the original
+timebase, including any explicit resampling to the model's native 44.1 kHz.
+
+**GET** `/v1/audio/separations/{separation_id}/content/{stem}` downloads
+`drums`, `bass`, `other` or `vocals` as **PCM24 stereo WAV at 44.1 kHz**.
+There is no per-stem automatic normalization: one shared attenuation avoids
+clipping while preserving relationships between the stems. Increasing export
+precision does not recover details absent from the source. Each complete WAV is
+capped at 64 MiB, and the four-file set at 256 MiB. `ETag` is the quoted complete
+WAV SHA-256. Partial sets return 409; absent or expired content returns 404.
+An already opened download holds its file descriptor, so deleting the job cannot
+truncate that download. At most eight downloads run concurrently per API node.
+
+Verified content is retained for 24 hours, under a 2 GiB aggregate API media
+budget. Capacity exhaustion requires deletion or content expiry; results are
+never truncated. Complete retained sets are independently verified on API
+restart. Interrupted jobs become failed, partial files remain unservable, and
+no native generation is replayed automatically.
+
+### Cancel and delete
+
+**POST** `/v1/audio/separations/{separation_id}/cancel` requests native-task and
+media cancellation, removes partial API content and retains terminal metadata.
+An already terminal job is unchanged. The response is the current job object;
+unknown IDs return 404. Native readers and active file senders drain before
+their Worker-owned copies are reclaimed.
+
+**DELETE** `/v1/audio/separations/{separation_id}` cancels active work, removes
+owned content and forgets the record. It returns `id`, `object:
+"audio.separation.deleted"` and `deleted: true`, or 404 for an unknown ID.
+Neither route deletes the creator's original Studio asset. Admission waits at
+most 45 seconds for placement, the full placed job has a 40-minute ceiling, and
+completed-output delivery has a five-minute budget. Source transfer is bounded
+to three minutes. Bytes and local paths never enter replicated State or event
+logs.
 
 ## Benchmark Endpoints
 
@@ -2359,6 +2660,11 @@ cards retain final override precedence.
 
 Each entry also separates discovery truth from runtime truth:
 
+- `separation`, when present, describes an explicit `AudioSeparation` model's
+  `family`, ordered `stems`, `sample_rate`, `audio_channels`, and
+  `trained_segment_seconds`. It is independent of speech's
+  `audio` and text-to-music's `music` metadata. This optional object describes
+  model truth and does not imply a mounted separator or grant execution.
 - `registry_architecture` is the trusted open architecture identifier retained
   from the signed catalog.
 - `capability_claims` reports signed model/artifact capabilities even when no
@@ -3473,6 +3779,16 @@ calling the destructive delete endpoint.
 
 **DELETE** `/download/{node_id}/{model_id}`
 
+Path parameters select the target node and repository-form model ID; there is
+no request body. The response contains a `command_id` acknowledging dispatch,
+not confirmation that deletion has finished. Observe node download progress
+for the result.
+
+This removes the model's ordinary default or staging cache, including flat or
+nested GGUF files. Read-only external search roots and canonical Model Store
+artifacts are protected even if an older download status labels them writable.
+Canonical artifact removal uses the Model Store lifecycle instead.
+
 ## Model Store Endpoints
 
 These endpoints are available when the model store is configured.
@@ -3644,8 +3960,10 @@ The optional JSON body accepts the following fields:
   Omit it only for installed or custom owner cards without a registry identity.
 - `artifact_role`: one of `base`, `vision_weights`, `mtp_sidecar`, `assistant`,
   `served_draft`, `vllm_draft`, `video_companion` (a video card's externally
-  hosted companion, such as guide preprocessor weights), or `image_component`
-  (an image card's external component repository/revision group); defaults to
+  hosted companion, such as guide preprocessor weights), `image_component`
+  (an image card's external component repository/revision group), or
+  `music_component` (a native music card's external encoder/autoencoder source
+  group); defaults to
   `base`.
 
 A complete companion request names the companion repository and immutable
@@ -3697,6 +4015,42 @@ the component transfer; an undeclared source revision returns 409. Missing files
 listing-size conflicts, or failed object verification fail the transaction;
 unrelated quants and projectors are excluded. A cached base GGUF alone does not
 mark the group complete: missing components trigger recovery.
+
+For a native music card, a base Download also acquires every required external
+source before returning a complete transfer state. A `music_component` request
+names its owner and exact source revision, omits `gguf_file`, and selects all
+declared encoder/autoencoder files at that source. The store verifies both the
+role and revision against the owning card; mismatches return 409. Shared sources
+transfer once. Missing files, incorrect sizes or object pins fail the request.
+Completed source groups remain reusable after cancellation of the base request;
+an incomplete base is never reported complete. Offline reuse requires all source
+records and files. This operation downloads model data, not an engine package,
+and does not mount or advertise native music execution capacity.
+
+Native `music_component` path aliases are `skulk-native/<digest>`, derived from
+the exact repository, immutable revision and complete grouped bundle identity;
+`source_repository` still names the upstream repository. A mismatched alias is
+rejected with 409. Existing repository-only aliases remain accepted for legacy
+caches, with the same complete-selection checks. Shared data reuse does not
+replace another owner's installed card or transfer its execution permissions.
+Different selections have independent active transfers and cache generations.
+An already completed native Download rechecks the exact owning card and every
+required source before repeating success; lost files cause repair online or an
+actionable offline failure. A deleted source alias is not resurrected through a
+legacy-cache fallback. Failed or cancelled replacements retain the previously
+registered complete generation.
+Completed native store-cache reuse verifies retained digests and original object
+pins before accepting success. A native source's retained `owner_model_id` is
+historical provenance: deleting that base model preserves other models' shared
+source discovery and preservation. Deleting the source alias itself still
+suppresses automatic recovery and peer import.
+Cache verification waits for the publication fence and hashes outside the short
+download-admission lock, then rechecks the selected status before returning.
+Unrelated admission and active-transfer cancellation remain available. Cancelled
+verification drains its file thread before releasing that fence. Pinned existing
+files are checked against their original object identity during download reuse:
+online retries replace corrupt bytes; offline reuse refuses them.
+Cancellation settles queued downloads even before their transfer coroutine starts.
 
 The response reports `modelId`, nullable `sourceRevision`, `status`, and
 `progress`; transport or store rejection additionally reports `error`. The
@@ -3920,7 +4274,7 @@ Important fields:
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
 | `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or the earlier Skulk release that shipped an installed card, for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
-| `music` | object or null | Text-to-music family, lyric requirement, declared duration bounds, and WAV output format; null for non-music cards |
+| `music` | object or null | Intrinsic music family, lyric requirement, declared duration bounds and WAV output format; native ACE base additionally has `native` variant, `editing_modes`, `part_classes`, `sample_rate`, and `audio_channels`. Metadata does not imply ready execution capacity. Null for non-music cards. |
 | `image` | object or null | Native image family, immutable `components`, optional SDXL `unetStructure`, default canvas/steps/guidance, dimension and area limits, reference-image limit, alpha support and optional fixed sigma schedule; null for legacy or non-image cards |
 | `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, `adapters` (named LoRAs with `modes`, `steps`, `strength`, and the `video_shift`/`audio_shift` a render with the adapter uses when the request sets none, selectable through the video job `lora` field), `styles` (the card's style embeddings with `modes`, selectable through the video job `styles` field), and every engine setting the job accepts with its default: `samplers` and `default_sampler`, `schedulers` and `default_scheduler`, the card's trained `video_shift`/`audio_shift` (null keeps the model's built-in value) with `shift_bounds`, `reference_fidelities` and `default_reference_fidelity` (empty and null unless the card serves `ref2va`), `codecs` and `default_codec`, `guides` (each guide the card derives from a `control` clip: `kind`, the `modes` it applies to, and the preprocessor `weights` it loads with their `repository` and `license`; empty without a ControlNet), `default_guide` (the guide a `control` clip gives when `control_kind` is omitted), and the ControlNet's own settings: `control_strength_bounds`, `default_control_strength` (the card's ControlNet's strength, else 1; null without a ControlNet), and `default_control_window` (the `control_start`/`control_end` a render takes when omitted). The lists are the engine's own, not a recommendation. Null for non-video cards |
 | `license` | object or null | Operator-facing license facts from the card: `name`, `url`, `spdx_id`, `notice`, and `display_name` (a product name the license requires in a UI). Informational; nothing is enforced |
@@ -4917,6 +5271,17 @@ for automation, source rotation and advanced lifecycle operations.
 
 
 ### Stable local manager runtime
+
+Managed capability installation accepts runtime envelopes 2 and 3. The release
+inspection, stage and activation routes retain their existing methods, parameters,
+authentication and explicit consent flow. V3's signed metadata adds
+`application_roots`, one to eight unique canonical distribution names contained
+in the exact wheel inventory. Before installation, the host verifies the complete
+dependency graph from those roots and launcher-provider wheels; it refuses missing,
+incompatible, URL/extra-dependent or undeclared packages without contacting an
+index. Existing v2 releases retain their signed shape and behavior. A host outside
+the declared protocol window returns the authenticated update-or-select-another-
+release diagnostic; a compatible reader must be deployed before publishing v3.
 
 The local setup implementation stages a separate service copy through
 `stage_service_runtime(root)` and selects it through
