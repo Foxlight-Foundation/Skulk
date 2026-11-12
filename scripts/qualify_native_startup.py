@@ -290,6 +290,7 @@ async def qualify(source: Path, trust_file: Path, work: Path, receipt: Path) -> 
         "checks": checks,
         "runtime_digest": runtime.digest,
         "manifest_digest": native.digest,
+        "runtime_protocol": runtime.claims.protocol,
         "host": {
             "platform": host.platform,
             "python_version": host.python_version,

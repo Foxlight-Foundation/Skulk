@@ -17,11 +17,14 @@ def native_contract_data_files() -> list[tuple[str, str]]:
     cohort and distribution identity that Core checks at runtime. Missing inputs
     fail the build instead of producing a frozen reader that fails admission.
     """
-    cohort = Path(__file__).parents[1] / "extensions" / "native-cohort.json"
-    if not cohort.is_file():
+    root = Path(__file__).parents[1] / "extensions"
+    cohorts = (root / "native-cohort.json", root / "native-call-cohort.json")
+    if not all(cohort.is_file() for cohort in cohorts):
         raise FileNotFoundError("native contract cohort resource is missing")
     package = distribution("skulk-capability-kernel")
-    result: list[tuple[str, str]] = [(str(cohort), "skulk/extensions")]
+    result: list[tuple[str, str]] = [
+        (str(cohort), "skulk/extensions") for cohort in cohorts
+    ]
     found_metadata = False
     licenses: set[str] = set()
     for entry in package.files or ():

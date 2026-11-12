@@ -1169,9 +1169,18 @@ domain. The complete public source/profile identity and artifact-family wheel
 hash/length are pinned. Staging retains `native-manifest.json` and checks the
 fresh installed reader's full manifest identity and all four fingerprints before
 completion. Legacy runtime envelope 2 retains its original signing bytes.
-Ordinary selection refuses a change between legacy and native author semantics,
-or between different native author/managed fingerprints. Matching state/schema
-labels do not authorize profile migration of retained settings or grants.
+Runtime envelope 4 independently selects `control_profile: "skulk.calls/1"`,
+public kernel 0.6.0rc1, and all six portable/managed/handshake/transport/composition/
+calls fingerprints. Its signature and generation digest use `skulk.runtime/4\0`.
+The installed reader also round-trips the compiled call codec. The bounded
+migration window accepts envelopes 2, 3 and 4; old envelopes retain their exact
+0.4 binary closure and signing bytes. A compatible host reader cannot replace
+an issued generation's pinned binary. Ordinary selection refuses changes between
+legacy, native transport and native calls interpretations, even when state/schema
+labels match. Such changes require explicit qualified state migration. Call-format
+startup alone does not advertise native invocation or delegation capacity.
+The PyInstaller native hook includes both cohort receipts and the selected
+reader metadata/licenses, refusing a missing receipt during the build.
 
 Generic signed runtime verification and staging use `extensions/runtime_artifacts.py`,
 `runtime_files.py` and `runtime_install.py`. Provider manifest policy stays opaque;

@@ -466,13 +466,13 @@ async def test_cancelled_request_retains_installer_ownership(
     assert installer.operation("3" * 32).state == "staged"
 
 
-def test_the_protocol_window_is_current_and_previous_and_refuses_beyond_by_name(
+def test_the_explicit_migration_window_refuses_beyond_by_name(
     tmp_path: Path,
 ) -> None:
     """Keep legacy signing valid and refuse authenticated future versions by name.
 
-    Native runtime 3/release 2 has its own independently signed fixture in
-    test_native_runtime; envelope versions are paired, never a Cartesian product.
+    Native runtimes 3/4 have independent signed fixtures. The migration window
+    retains old signed closures; envelope pairs are never a Cartesian product.
     """
     from skulk.extensions.runtime_artifacts import (
         ACCEPTED_RELEASE_PROTOCOLS,
@@ -481,7 +481,7 @@ def test_the_protocol_window_is_current_and_previous_and_refuses_beyond_by_name(
     )
 
     assert ACCEPTED_RELEASE_PROTOCOLS == (1, 2)
-    assert ACCEPTED_RUNTIME_PROTOCOLS == (2, 3)
+    assert ACCEPTED_RUNTIME_PROTOCOLS == (2, 3, 4)
     metadata, trust, host = artifacts(tmp_path / "legacy")
     assert verify_runtime(metadata, trust, host, now=int(time.time()))
     beyond = tmp_path / "beyond"

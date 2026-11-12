@@ -157,14 +157,26 @@ def _contract_identity(payload: dict[str, JsonValue]) -> tuple[str, ...]:
     protocol = payload.get("protocol")
     if type(protocol) is int and protocol == 2:
         return ("legacy",)
-    if type(protocol) is int and protocol == 3:
+    if type(protocol) is int and protocol in (3, 4):
         kernel = _JSON_OBJECT.validate_python(payload["kernel"], strict=True)
         digest: TypeAdapter[str] = TypeAdapter(Digest)
-        return (
+        identity = (
             "native",
             digest.validate_python(kernel["portable"], strict=True),
             digest.validate_python(kernel["managed"], strict=True),
         )
+        if protocol == 4:
+            if payload.get("control_profile") != "skulk.calls/1":
+                raise ValueError("selected call interpretation is unavailable")
+            # A control/authority transition requires its own qualified migration;
+            # equal schema labels cannot silently relabel retained application state.
+            return (
+                "native-calls",
+                *identity[1:],
+                digest.validate_python(kernel["composition"], strict=True),
+                digest.validate_python(kernel["calls"], strict=True),
+            )
+        return identity
     raise ValueError("selected contract profile is unavailable")
 
 
@@ -184,7 +196,12 @@ def _retained_contract_identity(
     )
     payload = _JSON_OBJECT.validate_python(metadata["runtime"], strict=True)
     identity = _contract_identity(payload)
-    prefix = b"skulk.runtime/3\0" if identity[0] == "native" else b""
+    if identity[0] == "native-calls":
+        prefix = b"skulk.runtime/4\0"
+    elif identity[0] == "native":
+        prefix = b"skulk.runtime/3\0"
+    else:
+        prefix = b""
     if (
         hashlib.sha256(prefix + canonical_json(payload)).hexdigest()
         != selected.runtime_digest
