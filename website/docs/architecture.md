@@ -2380,6 +2380,16 @@ calls over a protected local socket. Connection loss invalidates pending callbac
 reconnection never replays them. This channel supplies no approval authority.
 Inert proposal preparation has a twenty-second steward deadline; reads retain five.
 
+`api/operator_auth.authenticate_capability_owner` derives a process-local
+`extensions/caller_identity.AuthenticatedOwner` from the actual direct dashboard
+request. The identity names this node's owner realm, rather than an individual
+human or a provider account. Socket, origin, verified Tailscale membership and
+ASGI relay admission decide the result; request headers and payloads cannot
+choose its caller or issuing node. Paired and relay credentials never fall back
+to that owner identity. The value is neither an execution grant nor a bearer
+credential: native dispatch still requires its separate current-policy and exact
+destination admission. It is not placed in replicated State or discovery.
+
 Separately supervised plugin owners connect through `extensions/managed.py`, a
 generic owner-only Unix-socket adapter. Local protected registrations identify
 the installation and service-state root; the API process imports no plugin SDK.

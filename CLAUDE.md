@@ -1142,6 +1142,13 @@ IPC. `managed.py` adapts their steward discovery and inert invocation to the exi
 steward provider facet. Host loss closes callbacks without replay; no approval key
 is supplied. Inert proposal tools have a 20-second deadline, reads retain 5 seconds.
 
+`api/operator_auth.authenticate_capability_owner` produces the process-local
+`extensions/caller_identity.AuthenticatedOwner` only from actual direct request
+authority; caller/issuer headers or payloads cannot choose it. This is one owner
+realm, not human/account identity or an inference/delegation grant. Native calls
+still need separate live policy and exact destination admission; no caller value
+is replicated or advertised as execution capacity.
+
 `extensions/managed.py` connects protected local owner registrations to separately
 supervised runtimes without importing their SDKs. `DynamicCapabilityProvider`
 supplies cached contracts for all four I/O modes for live loader lookup; static IDs retain priority
