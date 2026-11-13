@@ -26,6 +26,7 @@ from pydantic import JsonValue, TypeAdapter
 from starlette.types import ASGIApp
 
 from skulk.api.native_calls import create_native_calls_router
+from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
 from skulk.extensions.native_calls import NativeListing
 from skulk.extensions.native_host_binding import load_core_host_key
 from skulk.extensions.native_host_budget import NativePayloadBudget
@@ -55,6 +56,7 @@ from skulk.extensions.runtime_manager import (
     RuntimeManager,
     SubmitRequest,
 )
+from skulk.extensions.runtime_service import RuntimeServiceStatus
 from skulk.shared.types.common import NodeId
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -151,6 +153,36 @@ async def _observe(work: Path, role: str) -> dict[str, JsonValue]:
 
 
 async def _quiescent(
+    client: httpx.AsyncClient, work: Path
+) -> tuple[NativeListing, ...]:
+    try:
+        return await _wait_quiescent(client, work)
+    except TimeoutError:
+        # Keep a failed installed gate actionable without retaining author
+        # output, request bodies, role keys or protected application state.
+        statuses: dict[str, JsonValue] = {}
+        for role in ("caller", "receiver"):
+            try:
+                status = RuntimeServiceStatus.model_validate_json(
+                    read_private(
+                        work / "installations" / f"managed.native-{role}"
+                        / "service-status.json"
+                    )
+                )
+                statuses[role] = {
+                    "state": status.state,
+                    "error_code": status.error_code,
+                }
+            except (OSError, ValueError):
+                statuses[role] = "unavailable"
+        print(
+            json.dumps({"phase": "quiescence-timeout", "owners": statuses}),
+            flush=True,
+        )
+        raise
+
+
+async def _wait_quiescent(
     client: httpx.AsyncClient, work: Path
 ) -> tuple[NativeListing, ...]:
     async with asyncio.timeout(60):
@@ -263,11 +295,19 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
     server: asyncio.Task[None] | None = None
     checks: list[str] = []
     runtimes: list[dict[str, str]] = []
+    large_metadata_bytes = 0
     try:
         await manager.start()
         for role, source in (("caller", caller), ("receiver", receiver)):
             identifier = f"managed.native-{role}"
             metadata = (source / "release/release.json").read_bytes()
+            if role == "receiver":
+                # Whitespace changes transport bytes, not the signed canonical
+                # claims. The normal installer accepts this valid envelope;
+                # discovery must use the same bound rather than hide the app.
+                assert len(metadata) < 300_000
+                metadata += b" " * (300_000 - len(metadata))
+                large_metadata_bytes = len(metadata)
             trust = RuntimeTrust.model_validate_json(
                 (source / "public-trust.json").read_bytes()
             )
@@ -288,6 +328,10 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
                 metadata, source / "release"
             )
             assert staged.state == "staged"
+            assert read_private(
+                controller.root / "generations" / runtime.digest / "staged.json",
+                MAX_RUNTIME_METADATA_BYTES,
+            ) == metadata
             activation = LifecycleRequest(
                 operation_id=uuid4().hex,
                 action="activate",
@@ -342,8 +386,12 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
                 response.content
             )
             assert len(listings) == 2
+            assert large_metadata_bytes == 300_000
             checks.append(
                 "production-router-actual-http-owner-authentication-and-signed-discovery"
+            )
+            checks.append(
+                "normal-installer-and-discovery-accept-signed-envelope-above-256kib"
             )
             policy = await client.get("/v1/native-capabilities/policy")
             assert (
@@ -720,6 +768,7 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
             json.dumps(
                 {
                     "format": 1,
+                    "large_signed_metadata_bytes": large_metadata_bytes,
                     "passed": True,
                     "platform": host.platform,
                     "checks": checks,

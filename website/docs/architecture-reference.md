@@ -2622,6 +2622,18 @@ recovery remains a separate contract and test obligation.
 - `extensions/native_calls.py`: current service profile, signed installed
   contract matching, exact local read enrollments, host-minted root contexts,
   bounded active scopes and independent compiled delegation recomputation.
+  Discovery uses the shared512KiB envelope bound, per-installation coalesced
+  connections and at most64 concurrent owner probes per host. Each directory
+  has one3second observation deadline, then bounded RPC cancellation cleanup;
+  per-owner probe admission precedes shared slots, preventing duplicate waiters
+  from consuming other owners' capacity. Threaded metadata verification retains
+  one separately owned task per installation, at most64 per host, and its
+  installer fence until actual completion; cancelled observers cannot spawn
+  duplicate workers. Completed results are not cached; shutdown drains workers.
+  Owner startup waits up to30seconds for the installer fence before execution,
+  avoiding crash backoff for brief metadata contention; selection and stop
+  intent are rechecked before launch, without replaying interrupted calls.
+  Completed signed results preserve path order without stale-capacity caching.
 - `extensions/native_host_binding.py`: normal stopped-owner provisioning;
   profile signing key outside author startup, per-installation runtime/transport/
   service-lifetime attachment and fresh server-proof secret. Key creation uses

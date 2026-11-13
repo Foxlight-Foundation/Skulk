@@ -3905,6 +3905,28 @@ call tree. Public compiled composition/schema contracts remain the native
 admission implementation; legacy descriptor revisions and transports keep their
 existing meanings.
 
+Discovery probes independently signed owners concurrently under one three-second
+observation deadline, with at most64 active probes shared by the host. Pending
+RPC cancellation is drained before returning partial results and may add up to
+three seconds. Per-installation connection locks coalesce only that owner's
+handshake; an unresponsive owner cannot serialize other owners' connections.
+Each installation admits one probe at a time before reserving shared capacity,
+so duplicate waiters cannot fill the host-wide slots. Each probe retains its
+scanning caller's cancellation ownership and obtains a fresh signed observation.
+Successfully verified results retain installed-path order, and no directory
+cache substitutes for current policy/runtime checks. Discovery reads signed
+envelopes using the normal installer's512KiB metadata bound.
+
+Threaded metadata verification retains separate ownership after an observer
+times out: at most one in-flight task per installation and64 across the host.
+Repeated scans may join only the same binding and exact metadata bytes. The
+installer fence remains held until the worker finishes; completed observations
+are never cached. Normal or cancelled host shutdown drains this owned work.
+Owner startup waits up to 30 seconds for the installer fence before verifying
+or executing a generation, so transient discovery contention does not count as
+another crashed owner lifetime. Selection and stop intent are rechecked before
+launch; an interrupted provider call is never replayed.
+
 Normal manager startup provisions a profile-owned Core signing key outside
 application startup data and a separate `core-host.json` attachment for each
 owner lifetime. The attachment binds profile, installation, signed generation,

@@ -213,8 +213,11 @@ class RuntimeService:
                 ):
                     success = True
                 else:
+                    # Discovery may still own a metadata measurement after
+                    # its observer times out. Brief installer contention
+                    # before execution must not consume crash backoff.
                     async with self.selector.installer.locked_generation(
-                        self.selection.runtime_digest
+                        self.selection.runtime_digest, wait_for_ownership=True
                     ):
                         if self.selector.current() != self.selection:
                             raise ValueError("runtime selection changed")
