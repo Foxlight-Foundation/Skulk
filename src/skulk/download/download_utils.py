@@ -2019,8 +2019,8 @@ async def _download_file(
         try:
             remote_size, remote_etag = await file_meta(model_id, revision, path)
         except Exception as e:
-            # Original signed pins remain available even when the Hub is not.
-            # An unpinned legacy request keeps its existing offline behavior.
+            # Different metadata algorithms cannot make a same-size local file
+            # authoritative. Signed pins remain enforceable without the Hub.
             if not await _cached_file_matches_pin(
                 target_path, local_size, expected_size, expected_object_id
             ):
@@ -2055,7 +2055,7 @@ async def _download_file(
 
     await aios.makedirs((target_dir / path).parent, exist_ok=True)
     length, etag = await file_meta(model_id, revision, path)
-    _require_expected_remote_identity(
+    check_signed_content = _require_expected_remote_identity(
         path,
         length,
         etag,
@@ -2117,6 +2117,20 @@ async def _download_file(
         raise Exception(
             f"Downloaded file {target_dir / path} has hash {final_hash} but remote hash is {remote_hash}"
         )
+    # A regular Hub file has a Git blob ETag even when the signed manifest
+    # identifies its raw SHA-256. Verify both identities before publication.
+    # Same-algorithm pins already passed the metadata and payload hash checks,
+    # so large LFS weights do not acquire a second full-file hashing pass.
+    if check_signed_content and not await _cached_file_matches_pin(
+        partial_path,
+        (await aios.stat(partial_path)).st_size,
+        expected_size,
+        expected_object_id,
+    ):
+        await aios.remove(partial_path)
+        raise ValueError(
+            f"Downloaded file {path} does not match the signed artifact bundle identity"
+        )
     await aios.rename(partial_path, target_dir / path)
     on_progress(length, length, True)
     return target_dir / path
@@ -2150,8 +2164,15 @@ def _require_expected_remote_identity(
     *,
     expected_size: int | None,
     expected_object_id: str | None,
-) -> None:
-    """Fail closed when immutable Hub metadata differs from signed card truth."""
+) -> bool:
+    """Reject comparable mismatches and report when another content hash is needed.
+
+    Hub ETags identify Git blobs or LFS SHA-256 objects. A signed raw SHA-256
+    and a regular file's Git blob hash are distinct identities of the same
+    bytes, so only matching algorithms can be compared before downloading.
+    The caller must independently check the signed content identity when this
+    returns true, in addition to verifying the Hub payload checksum.
+    """
 
     if expected_size is not None and remote_size != expected_size:
         raise ValueError(
@@ -2159,14 +2180,34 @@ def _require_expected_remote_identity(
             f"expected {expected_size}, Hub reports {remote_size}"
         )
     if expected_object_id is None:
-        return
-    _, _, expected_digest = expected_object_id.partition(":")
+        return False
+    expected_algorithm, separator, expected_digest = expected_object_id.partition(":")
     observed_digest = trim_etag(remote_etag.removesuffix("-gzip"))
-    if observed_digest != expected_digest:
+    observed_algorithm = (
+        "sha256"
+        if len(observed_digest) == 64
+        else "git-sha1"
+        if len(observed_digest) == 40
+        else None
+    )
+    expected_length = 64 if expected_algorithm == "sha256" else 40
+    if (
+        not separator
+        or expected_algorithm not in {"sha256", "git-sha1"}
+        or len(expected_digest) != expected_length
+        or any(character not in "0123456789abcdef" for character in expected_digest)
+        or observed_algorithm is None
+        or any(character not in "0123456789abcdef" for character in observed_digest)
+        or (
+            expected_algorithm == observed_algorithm
+            and observed_digest != expected_digest
+        )
+    ):
         raise ValueError(
             f"Signed artifact bundle object mismatch for {path}: "
             f"expected {expected_object_id}, Hub reports {observed_digest}"
         )
+    return expected_algorithm != observed_algorithm
 
 
 def calculate_repo_progress(
