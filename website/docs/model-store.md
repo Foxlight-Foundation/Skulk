@@ -168,6 +168,14 @@ missing file or immutable size/object-identity mismatch. The engine loads from
 the declared `artifact_root`; an MLX quant in `4-bit/`, for example, remains a
 self-contained directory instead of causing its sibling quants to be fetched.
 
+Bundle `sha256:` identities hash the file's raw bytes; `git-sha1:` identities
+hash the Git blob, including its size-prefixed object header. The Hub may report
+a Git blob ETag for a file whose signed bundle records a SHA-256. Skulk compares
+metadata identities only when their algorithms match, and verifies both the Hub
+checksum and the signed content identity before accepting such a download.
+Cached pinned files must also match their signed size and content identity,
+including offline reuse. A corrupt offline cache is refused without deleting it.
+
 Bundle identity participates in canonical and staged generation matching. A
 metadata-only card refresh reuses existing bytes when the installed manifest
 already satisfies the exact bundle; a different bundle publishes as a distinct
