@@ -45,8 +45,10 @@ from skulk.extensions.native_host_protocol import (
     admit_owner,
 )
 from skulk.extensions.native_host_rpc import Peer, Reply
+from skulk.extensions.runtime_artifacts import VerifiedRuntime
 from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
+from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_selection import RuntimeSelector
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -172,6 +174,16 @@ class _Endpoint:
 
 
 @final
+@dataclass(frozen=True, slots=True, repr=False)
+class _Inspection:
+    """Own in-flight verification until its thread and installer fence finish."""
+
+    binding: HostBinding
+    metadata_sha256: str
+    task: asyncio.Task[VerifiedRuntime]
+
+
+@final
 @dataclass(slots=True)
 class _Active:
     peer: Peer
@@ -200,6 +212,7 @@ class NativeCalls:
         self._connect_locks: dict[str, tuple[asyncio.Lock, int]] = {}
         self._probe_locks: dict[str, tuple[asyncio.Lock, int]] = {}
         self._directory_slots = asyncio.Semaphore(_MAX_INSTALLATIONS)
+        self._inspections: dict[str, _Inspection] = {}
         self.closed = False
 
     def _profile(self) -> None:
@@ -365,7 +378,8 @@ class NativeCalls:
                         group.create_task(inspect(index, path))
         except TimeoutError:
             # TaskGroup drains cancellation before exposing partial discovery;
-            # no background probes or response leases escape this request.
+            # no response leases escape this request. Threaded metadata work
+            # retains separate bounded ownership until its OS fence releases.
             pass
         # Preserve installed-path order regardless of response timing: compiled
         # policy attenuation compares the complete ordered target collection.
@@ -375,6 +389,44 @@ class NativeCalls:
         ) != len(listings):
             raise ValueError("native directory is ambiguous or exceeds bound")
         return listings
+
+    def _inspection_finished(
+        self, plugin_id: str, task: asyncio.Task[VerifiedRuntime]
+    ) -> None:
+        work = self._inspections.get(plugin_id)
+        if work is not None and work.task is task:
+            del self._inspections[plugin_id]
+        # A timed-out observer may leave no waiter. Consume only the terminal
+        # exception here; active observers still receive it through shield.
+        if not task.cancelled():
+            task.exception()
+
+    async def _inspect_metadata(
+        self, binding: HostBinding, selector: RuntimeSelector, metadata: bytes
+    ) -> VerifiedRuntime:
+        self._profile()
+        work = self._inspections.get(binding.plugin_id)
+        if work is not None and work.task.done():
+            self._inspection_finished(binding.plugin_id, work.task)
+            work = None
+        fingerprint = hashlib.sha256(metadata).hexdigest()
+        if work is None:
+            if len(self._inspections) >= _MAX_INSTALLATIONS:
+                raise ValueError("native metadata inspection capacity unavailable")
+            task = asyncio.create_task(selector.installer.inspect_metadata(metadata))
+            work = _Inspection(binding, fingerprint, task)
+            self._inspections[binding.plugin_id] = work
+            task.add_done_callback(
+                lambda done: self._inspection_finished(binding.plugin_id, done)
+            )
+        elif work.binding != binding or work.metadata_sha256 != fingerprint:
+            raise ValueError("native metadata inspection lifetime differs")
+        # Cancelling an observer cannot stop to_thread hashing. Retain the
+        # actual installer task/fence and one slot per owner until completion;
+        # repeated scans may join it but never cache a completed observation.
+        runtime = await asyncio.shield(work.task)
+        self._current(binding)
+        return runtime
 
     async def _discover(self, path: Path) -> tuple[NativeListing, ...]:
         """Verify one signed installation and its actual protected owner reply."""
@@ -386,7 +438,7 @@ class NativeCalls:
                 selector.root / "generations" / binding.runtime_digest / "staged.json",
                 MAX_RUNTIME_METADATA_BYTES,
             )
-            runtime = await selector.installer.inspect_metadata(metadata)
+            runtime = await self._inspect_metadata(binding, selector, metadata)
             manifest = runtime.claims.release.manifest
             if (
                 runtime.claims.protocol != 4
@@ -707,10 +759,18 @@ class NativeCalls:
                 response.release()
 
     async def close(self) -> None:
-        """Fence connections and drain active handlers without replaying any call."""
+        """Fence connections and drain handlers and owned metadata workers."""
         self.closed = True
-        await asyncio.gather(
-            *(value.peer.close() for value in self.endpoints.values()),
-            return_exceptions=True,
-        )
-        self.endpoints.clear()
+
+        async def drain() -> None:
+            await asyncio.gather(
+                *(value.peer.close() for value in self.endpoints.values()),
+                return_exceptions=True,
+            )
+            self.endpoints.clear()
+            await asyncio.gather(
+                *(work.task for work in self._inspections.values()),
+                return_exceptions=True,
+            )
+
+        await finish_runtime_work(asyncio.create_task(drain()))

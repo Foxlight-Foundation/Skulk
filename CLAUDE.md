@@ -2660,8 +2660,11 @@ deadline, followed by bounded RPC cleanup. Connections coalesce per installation
 unresponsive owners do not serialize unrelated handshakes. Partial results retain
 installed-path order and never replace current dispatch policy/runtime checks.
 Per-owner probe admission runs before shared-slot acquisition: duplicate waiters
-cannot consume another owner's probe capacity. Each probe is caller-owned and
-fresh; no shared task or cached observation grants execution.
+cannot consume another owner's probe capacity. RPC probes remain caller-owned.
+Threaded metadata verification retains separate ownership after observer timeout,
+with one in-flight task per installation and64 across the host. Only identical
+bindings/metadata join; installer fences remain held until the worker completes.
+Completed results are not cached. Normal or cancelled shutdown drains workers.
 
 Normal `RuntimeService` startup provisions a Core role key at the manager profile
 and a runtime/transport/lifetime-bound owner sidecar. The mirrored private

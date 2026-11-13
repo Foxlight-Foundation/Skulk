@@ -3917,6 +3917,12 @@ Successfully verified results retain installed-path order, and no directory
 cache substitutes for current policy/runtime checks. Discovery reads signed
 envelopes using the normal installer's512KiB metadata bound.
 
+Threaded metadata verification retains separate ownership after an observer
+times out: at most one in-flight task per installation and64 across the host.
+Repeated scans may join only the same binding and exact metadata bytes. The
+installer fence remains held until the worker finishes; completed observations
+are never cached. Normal or cancelled host shutdown drains this owned work.
+
 Normal manager startup provisions a profile-owned Core signing key outside
 application startup data and a separate `core-host.json` attachment for each
 owner lifetime. The attachment binds profile, installation, signed generation,

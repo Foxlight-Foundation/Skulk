@@ -10,9 +10,10 @@ import hashlib
 import json
 import os
 import secrets
+import threading
 import time
-from collections.abc import AsyncIterator
-from contextlib import AsyncExitStack, asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -20,6 +21,7 @@ from typing import Literal
 import pytest
 from pydantic import JsonValue, TypeAdapter
 
+from skulk.extensions import runtime_install
 from skulk.extensions.caller_identity import AuthenticatedOwner
 from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
 from skulk.extensions.native_calls import (
@@ -41,6 +43,7 @@ from skulk.extensions.native_host_rpc import Peer, Reply
 from skulk.extensions.runtime_artifacts import verify_runtime
 from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
 from skulk.extensions.runtime_files import (
+    RuntimeLock,
     private_directory,
     read_private,
     write_private,
@@ -57,6 +60,70 @@ class Owner:
 
     listing: NativeListing
     events: list[str]
+
+
+@dataclass(frozen=True)
+class Measurement:
+    """A real worker-thread measurement with explicit test-owned completion."""
+
+    started: threading.Event
+    release: threading.Event
+    finished: threading.Event
+    calls: list[None]
+
+
+@contextmanager
+def slow_measurement(monkeypatch: pytest.MonkeyPatch) -> Iterator[Measurement]:
+    """Block only physical hashing, retaining actual installer fences and threads."""
+    host = runtime_install.measure_host()
+    observed = Measurement(threading.Event(), threading.Event(), threading.Event(), [])
+
+    def measure() -> runtime_install.QualifiedHost:
+        observed.calls.append(None)
+        observed.started.set()
+        try:
+            if not observed.release.wait(20):
+                raise TimeoutError("test measurement was not released")
+            return host
+        finally:
+            observed.finished.set()
+
+    monkeypatch.setattr(runtime_install, "measure_host", measure)
+    try:
+        yield observed
+    finally:
+        observed.release.set()
+
+
+def assert_installer_locked(path: Path) -> None:
+    """Observe the real installation fence without retaining an unexpected lock."""
+    try:
+        lock = RuntimeLock(path)
+    except BlockingIOError:
+        return
+    lock.close()
+    pytest.fail("measurement lost its installer fence before completing")
+
+
+async def wait_for_measurement(observed: Measurement) -> None:
+    """Wait without occupying another executor worker or blocking the event loop."""
+    async with asyncio.timeout(2):
+        while not observed.started.is_set():
+            await asyncio.sleep(0.001)
+
+
+async def wait_for_installer(path: Path) -> None:
+    """Observe actual verification completion through its released OS fence."""
+    async with asyncio.timeout(2):
+        while True:
+            try:
+                lock = RuntimeLock(path)
+            except BlockingIOError:
+                await asyncio.sleep(0.001)
+            else:
+                lock.close()
+                await asyncio.sleep(0)
+                return
 
 
 @asynccontextmanager
@@ -316,3 +383,65 @@ async def test_overlapping_scans_cannot_fill_slots_with_duplicate_owner_waiters(
         assert healthy.events.count("connected") == 1
         assert healthy.events.count("describe") == 20
         assert calls.budget.used == 0
+
+
+async def test_cancelled_scan_retains_measurement_fence_without_duplicate_workers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The actual directory deadline cannot orphan hashing or cache its result."""
+    async with (
+        broker(tmp_path) as calls,
+        owner(calls, "managed.measured", monkeypatch) as installed,
+    ):
+        installer = tmp_path / "installations/managed.measured/installer"
+        with slow_measurement(monkeypatch) as observed:
+            started = asyncio.get_running_loop().time()
+            assert await calls.directory() == ()
+            assert asyncio.get_running_loop().time() - started < 4
+            assert observed.started.is_set() and not observed.finished.is_set()
+            assert_installer_locked(installer)
+            for _ in range(3):
+                scan = asyncio.create_task(calls.directory())
+                await asyncio.sleep(0.02)
+                scan.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await scan
+                assert len(observed.calls) == 1
+                assert_installer_locked(installer)
+            observed.release.set()
+            await wait_for_installer(installer)
+            assert await calls.directory() == (installed.listing,)
+            assert len(observed.calls) == 2
+
+
+@pytest.mark.parametrize("cancel_close", [False, True])
+async def test_close_owns_measurement_until_actual_worker_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_close: bool,
+) -> None:
+    """Normal or cancelled shutdown cannot release a running verification fence."""
+    async with broker(tmp_path) as calls, owner(calls, "managed.measured", monkeypatch):
+        installer = tmp_path / "installations/managed.measured/installer"
+        with slow_measurement(monkeypatch) as observed:
+            scan = asyncio.create_task(calls.directory())
+            await wait_for_measurement(observed)
+            scan.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await scan
+            closing = asyncio.create_task(calls.close())
+            await asyncio.sleep(0.02)
+            if cancel_close:
+                closing.cancel()
+                await asyncio.sleep(0.02)
+            assert not closing.done()
+            assert_installer_locked(installer)
+            observed.release.set()
+            if cancel_close:
+                with pytest.raises(asyncio.CancelledError):
+                    await closing
+            else:
+                await closing
+            assert observed.finished.is_set()
+            await wait_for_installer(installer)

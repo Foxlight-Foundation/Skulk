@@ -2626,8 +2626,11 @@ recovery remains a separate contract and test obligation.
   connections and at most64 concurrent owner probes per host. Each directory
   has one3second observation deadline, then bounded RPC cancellation cleanup;
   per-owner probe admission precedes shared slots, preventing duplicate waiters
-  from consuming other owners' capacity without caching observations or tasks.
-  completed signed results preserve path order without stale-capacity caching.
+  from consuming other owners' capacity. Threaded metadata verification retains
+  one separately owned task per installation, at most64 per host, and its
+  installer fence until actual completion; cancelled observers cannot spawn
+  duplicate workers. Completed results are not cached; shutdown drains workers.
+  Completed signed results preserve path order without stale-capacity caching.
 - `extensions/native_host_binding.py`: normal stopped-owner provisioning;
   profile signing key outside author startup, per-installation runtime/transport/
   service-lifetime attachment and fresh server-proof secret. Key creation uses
