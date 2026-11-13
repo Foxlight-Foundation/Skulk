@@ -2613,3 +2613,37 @@ Active/completed starts remain idempotent. Deploy compatible target
 readers before using the new command. This does not reset coordinator state for
 master-generated `DownloadPending` placement recovery; that cross-component
 recovery remains a separate contract and test obligation.
+
+## Installed native read host
+
+- `api/native_calls.py`: production direct-owner `/v1/native-capabilities`
+  directory, GET/PUT revision-fenced policy and raw JSON unary call routes.
+  Authentication uses `authenticate_capability_owner` and the actual API node.
+- `extensions/native_calls.py`: current service profile, signed installed
+  contract matching, exact local read enrollments, host-minted root contexts,
+  bounded active scopes and independent compiled delegation recomputation.
+- `extensions/native_host_binding.py`: normal stopped-owner provisioning;
+  profile signing key outside author startup, per-installation runtime/transport/
+  service-lifetime attachment and fresh server-proof secret. Key creation uses
+  the manager's private `native-host-key.lock` fence.
+- `extensions/native_host_protocol.py` and `native_host_rpc.py`: mirrored private
+  Core/owner protocol; fresh mutual role admission, directional authenticated
+  frames, sequence/correlation fencing, bounded request tasks and cancellation.
+  Role authentication does not authenticate the original caller.
+- `extensions/native_host_budget.py`: event-loop-owned raw byte/frame leases;
+  reservations survive delivery/backpressure and are released on terminal cleanup.
+- `native-read-policy.json`: disabled by default; exact installation, runtime,
+  capability/version and full descriptor revision grants with explicit local
+  processing enrollment. `native-policy.lock` excludes updates during the final
+  owner policy read/native write, and is released before transport drain.
+- Compatible installed owners preserve imported native context root/parent/
+  caller/issuer/ancestry and exact raw body hashes, then bind calls to an actual
+  hello-admitted child incarnation. One reader handles health/results/delegates;
+  one unary root is admitted per child. Early parent completion is uncertain.
+- No raw body or completed-call ledger is replicated into State/events. Unknown
+  outcomes are never replayed. Controlled caller retirement preserves genuine
+  crash recovery; malformed protocol/output remains a failure.
+- Scope: trusted same-account, local unary reads under one direct-owner realm.
+  Separate gates remain for remote Fabric, paired-client native grants,
+  streaming, governed effects and inference/router composition. No OS sandbox is
+  claimed. Issued native/legacy profile and signature meanings remain unchanged.

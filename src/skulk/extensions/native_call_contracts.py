@@ -45,8 +45,55 @@ class CallProfiles(BaseModel):
     ] = Field(description="Complete skulk.calls/1 normative fingerprint.")
 
 
+class CompositionRecord(Protocol):
+    """Immutable compiled composition metadata, never caller authority."""
+
+    def canonical(self) -> bytes:
+        """Export only already admitted public metadata."""
+        ...
+
+    def admit(
+        self,
+        request: "CompositionRecord",
+        policy: "CompositionRecord",
+        executor: str,
+        request_bytes: bytes,
+        now_unix_ms: int,
+        scope_id: str,
+    ) -> "CompositionRecord":
+        """Apply the public compiled attenuation and ancestry rules."""
+        ...
+
+
+class CompositionFactory(Protocol):
+    """Actual public native composition factory; no Python fallback."""
+
+    def from_json(self, name: str, source: str) -> CompositionRecord:
+        """Admit one closed record using the qualified public kernel."""
+        ...
+
+
+class Schema(Protocol):
+    """Compiled portable JSON schema, owned by the public SDK."""
+
+    def matches(self, source: str) -> bool:
+        """Check complete bounded JSON through the public compiled validator."""
+        ...
+
+
+class SchemaFactory(Protocol):
+    """Public compiled schema constructor."""
+
+    def __call__(self, source: str) -> Schema:
+        """Compile the supplied native author schema."""
+        ...
+
+
 class CallKernel(NativeKernel, Protocol):
     """Compatible public binary with the explicit composed-call semantics."""
+
+    CompositionContract: CompositionFactory
+    PortableSchema: SchemaFactory
 
     def composition_profile_digest(self) -> str:
         """Identify the pure public caller-composition profile."""

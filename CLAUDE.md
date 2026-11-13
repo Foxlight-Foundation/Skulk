@@ -2643,3 +2643,25 @@ Active/completed starts remain idempotent. Deploy compatible target
 readers before using the new command. This does not reset coordinator state for
 master-generated `DownloadPending` placement recovery; that cross-component
 recovery remains a separate contract and test obligation.
+
+### Protected installed native read host
+
+The serving API registers `/v1/native-capabilities` through
+`api/native_calls.py`. Only actual direct owner authentication can mint a root.
+`extensions/native_calls.py` verifies live declarations against signed installed
+contracts and recomputes delegated contexts through the public compiled native
+kernel. Core supplies generic host authority; application/provider behavior stays
+in installed capabilities. The initial enrollment policy is disabled and permits
+only exact trusted local unary reads.
+
+Normal `RuntimeService` startup provisions a Core role key at the manager profile
+and a runtime/transport/lifetime-bound owner sidecar. The mirrored private
+`native_host_protocol.py` / `native_host_rpc.py` authenticate roles and sequence
+frames; contexts alone confer no authority. Compatible owners bind execution to
+an actual protected child channel/incarnation. A shared `native-policy.lock`
+spans the final synchronous policy check and native write, then releases before
+drain. Raw body leases last through delivery/cleanup; payloads never enter State
+or events. Cancellation and unknown outcomes never authorize automatic replay.
+Controlled retirement preserves the genuine failure budget. Same-account code is
+trusted, not OS-sandboxed. This gate does not qualify remote Fabric, individual
+clients, native streaming, governed effects or inference routing.

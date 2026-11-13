@@ -3893,3 +3893,45 @@ Active/completed starts remain idempotent. Deploy compatible target
 readers before using the new command. This does not reset coordinator state for
 master-generated `DownloadPending` placement recovery; that cross-component
 recovery remains a separate contract and test obligation.
+
+### Protected installed native reads
+
+The native read host connects the serving API to independently installed owners
+without moving application/provider logic into Core. `api/native_calls.py`
+registers direct-owner discovery, revision-fenced enrollment and unary read
+invocation. `extensions/native_calls.py` matches discovery to current signed
+installed manifests, mints the original caller context and owns a bounded active
+call tree. Public compiled composition/schema contracts remain the native
+admission implementation; legacy descriptor revisions and transports keep their
+existing meanings.
+
+Normal manager startup provisions a profile-owned Core signing key outside
+application startup data and a separate `core-host.json` attachment for each
+owner lifetime. The attachment binds profile, installation, signed generation,
+transport identity and lifetime. Mutual role admission combines a fresh server
+proof with a Core signature; subsequent frames use connection-specific,
+directional authentication and sequence fencing. This host role is separate
+from the original caller identity. Neither a parsed context nor an author node
+ID establishes caller authority.
+
+Compatible owners give each actual child channel an incarnation after its
+protected native hello. Their single reader multiplexes health, results and
+ordered delegation. The owner imports only Core-admitted contexts, preserving
+original caller, issuer, root, parent, ancestry and exact body hash while binding
+execution to its own live child socket. Core independently recomputes delegated
+contexts from its active parent and current policy. An installation/runtime/
+descriptor enrollment and a shared policy lock protect the final synchronous
+policy read and actual native write; the lock is released before backpressure.
+
+Raw bodies remain ephemeral and retain aggregate byte/frame reservations through
+delivery and cleanup. They never enter replicated State or the master event log.
+Cancellation, stale processes, lost channels and premature parent completion
+withdraw affected scopes without replay. Controlled cancellation retires the
+actual process without consuming genuine crash recovery. Valid application
+refusal replies are distinct from malformed control frames or invalid output.
+
+The current host admits explicitly enrolled trusted local unary reads under the
+node's direct owner realm. Same-account installed code remains trusted code;
+this mechanism is not an OS sandbox. It establishes neither remote Fabric
+admission, individual-client identity, inference/model routing nor governed
+execution. Existing managed inference remains capability-owned.
