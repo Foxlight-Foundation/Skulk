@@ -127,7 +127,21 @@ def public_native_kernel() -> NativeKernel:
 
     try:
         version = importlib.metadata.version("skulk-capability-kernel")
-        if version not in (KERNEL_VERSION, CALL_KERNEL_VERSION):
+        from .native_inference_contracts import (
+            INFERENCE_KERNEL_VERSION,
+            public_inference_kernel,
+        )
+
+        if version == INFERENCE_KERNEL_VERSION:
+            try:
+                public_inference_kernel()
+            except ValueError:
+                raise ValueError("native kernel inference cohort refused") from None
+        if version not in (
+            KERNEL_VERSION,
+            CALL_KERNEL_VERSION,
+            INFERENCE_KERNEL_VERSION,
+        ):
             raise ValueError("native kernel version refused")
         kernel = cast(
             NativeKernel,
@@ -139,7 +153,7 @@ def public_native_kernel() -> NativeKernel:
             kernel.handshake_profile_digest(),
             kernel.transport_profile_digest(),
         )
-        if version == CALL_KERNEL_VERSION:
+        if version in (CALL_KERNEL_VERSION, INFERENCE_KERNEL_VERSION):
             selected = cast(CallKernel, kernel)
             actual += (
                 selected.composition_profile_digest(),

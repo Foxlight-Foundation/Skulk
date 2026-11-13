@@ -10,7 +10,7 @@ import json
 import os
 import secrets
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,7 +44,7 @@ from skulk.extensions.native_host_protocol import (
     ResponseFrame,
     admit_owner,
 )
-from skulk.extensions.native_host_rpc import Peer, Reply
+from skulk.extensions.native_host_rpc import Handler, Peer, Reply
 from skulk.extensions.runtime_artifacts import VerifiedRuntime
 from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
@@ -201,9 +201,16 @@ class _Active:
 class NativeCalls:
     """Own authenticated host connections and a bounded active call tree."""
 
-    def __init__(self, connection: ServiceConnection, issuer_node_id: str) -> None:
+    def __init__(
+        self,
+        connection: ServiceConnection,
+        issuer_node_id: str,
+        *,
+        inference_handler: Handler | None = None,
+    ) -> None:
         """Bind only host-configured profile state, never a request-supplied path."""
         self.connection, self.issuer_node_id = connection, issuer_node_id
+        self.inference_handler = inference_handler
         self.root = Path(connection.manager_root)
         self.kernel = public_call_kernel()
         self.budget = NativePayloadBudget()
@@ -332,8 +339,10 @@ class NativeCalls:
                 self._current(binding)
                 peer = Peer(
                     AuthenticatedStream(reader, writer, keys, self.budget),
-                    self._delegate,
-                    frozenset({"delegate"}),
+                    self._handle,
+                    frozenset({"delegate", "delegate_inference"})
+                    if self.inference_handler is not None
+                    else frozenset({"delegate"}),
                     lambda: self._current(binding),
                 )
                 endpoint = _Endpoint(binding, peer)
@@ -343,6 +352,48 @@ class NativeCalls:
                 writer.close()
                 raise
 
+    async def _handle(self, peer: Peer, request: RequestFrame, payload: bytes) -> Reply:
+        if request.operation == "delegate":
+            return await self._delegate(peer, request, payload)
+        if (
+            request.operation == "delegate_inference"
+            and self.inference_handler is not None
+        ):
+            return await self.inference_handler(peer, request, payload)
+        return Reply("pre_dispatch", {})
+
+    async def observed_owner(
+        self, plugin_id: str
+    ) -> tuple[HostBinding, VerifiedRuntime, Peer]:
+        """Verify selected signed metadata and its actual protected owner connection.
+
+        The caller must hold scan admission. This observation supplies no caller
+        permission; every dispatch separately rechecks its selected lifetime.
+        """
+        binding = self._binding(plugin_id)
+        selector = RuntimeSelector(self.root / "installations" / binding.plugin_id)
+        metadata = read_private(
+            selector.root / "generations" / binding.runtime_digest / "staged.json",
+            MAX_RUNTIME_METADATA_BYTES,
+        )
+        runtime = await self._inspect_metadata(binding, selector, metadata)
+        endpoint = await self._endpoint(binding)
+        self._current(binding)
+        return binding, runtime, endpoint.peer
+
+    def check_owner(self, plugin_id: str, runtime_digest: str, peer: Peer) -> None:
+        """Fence one actual signed/selected owner lifetime without granting an effect."""
+        binding = self._binding(plugin_id)
+        endpoint = self.endpoints.get(plugin_id)
+        if (
+            binding.runtime_digest != runtime_digest
+            or endpoint is None
+            or endpoint.binding != binding
+            or endpoint.peer is not peer
+        ):
+            raise ValueError("native selected owner changed")
+        peer.check()
+
     async def directory(self) -> tuple[NativeListing, ...]:
         """Return signed live reads found within one bounded concurrent discovery.
 
@@ -351,11 +402,21 @@ class NativeCalls:
         cleanup has its own bounded drain before this method returns. No stale
         directory result is cached or substituted for dispatch-time validation.
         """
+        return await self.scan_signed_owners(
+            self._discover, lambda listing: listing.target.model_dump_json()
+        )
+
+    async def scan_signed_owners[Listing](
+        self,
+        discover: Callable[[Path], Awaitable[tuple[Listing, ...]]],
+        identity: Callable[[Listing], str],
+    ) -> tuple[Listing, ...]:
+        """Share bounded signed discovery admission without selecting call semantics."""
         self._profile()
         paths = sorted((self.root / "native-host-bindings").glob("*.json"))
         if len(paths) > _MAX_INSTALLATIONS:
             raise ValueError("native installation capacity exceeded")
-        results: list[tuple[NativeListing, ...]] = [()] * len(paths)
+        results: list[tuple[Listing, ...]] = [()] * len(paths)
 
         async def inspect(index: int, path: Path) -> None:
             try:
@@ -365,7 +426,7 @@ class NativeCalls:
                     self._owner_lock(self._probe_locks, path.stem),
                     self._directory_slots,
                 ):
-                    results[index] = await self._discover(path)
+                    results[index] = await discover(path)
             except (OSError, ValueError, TimeoutError):
                 # A failing owner contributes no executable capacity. Other
                 # owners retain their independently verified observations.
@@ -385,7 +446,7 @@ class NativeCalls:
         # policy attenuation compares the complete ordered target collection.
         listings = tuple(value for result in results for value in result)
         if len(listings) > 64 or len(
-            {listing.target.model_dump_json() for listing in listings}
+            {identity(listing) for listing in listings}
         ) != len(listings):
             raise ValueError("native directory is ambiguous or exceeds bound")
         return listings

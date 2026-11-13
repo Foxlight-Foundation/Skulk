@@ -35,6 +35,14 @@ Installation = Annotated[str, Field(pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9._:@-]{1,128}$")]
 MAXIMUM_METADATA = 262144
 MAXIMUM_PAYLOAD = 16777216
+type Operation = Literal[
+    "describe",
+    "invoke",
+    "delegate",
+    "describe_inference",
+    "infer",
+    "delegate_inference",
+]
 
 
 class _Contract(BaseModel):
@@ -254,9 +262,7 @@ class RequestFrame(_Contract):
     request_id: int = Field(
         ge=1, le=2**53 - 1, description="Increasing peer-local request sequence."
     )
-    operation: Literal["describe", "invoke", "delegate"] = Field(
-        description="Closed host operation."
-    )
+    operation: Operation = Field(description="Closed host operation.")
     parameters: dict[str, JsonValue] = Field(
         description="Operation-specific admitted host metadata."
     )

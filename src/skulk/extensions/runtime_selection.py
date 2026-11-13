@@ -152,12 +152,12 @@ def _manifest(runtime: VerifiedRuntime) -> dict[str, JsonValue]:
     return _JSON_OBJECT.validate_python(release["manifest"], strict=True)
 
 
-def _contract_identity(payload: dict[str, JsonValue]) -> tuple[str, ...]:
+def runtime_contract_identity(payload: dict[str, JsonValue]) -> tuple[str, ...]:
     """Identify interpretation semantics independently of release sequence/version."""
     protocol = payload.get("protocol")
     if type(protocol) is int and protocol == 2:
         return ("legacy",)
-    if type(protocol) is int and protocol in (3, 4):
+    if type(protocol) is int and protocol in (3, 4, 5):
         kernel = _JSON_OBJECT.validate_python(payload["kernel"], strict=True)
         digest: TypeAdapter[str] = TypeAdapter(Digest)
         identity = (
@@ -165,6 +165,17 @@ def _contract_identity(payload: dict[str, JsonValue]) -> tuple[str, ...]:
             digest.validate_python(kernel["portable"], strict=True),
             digest.validate_python(kernel["managed"], strict=True),
         )
+        if protocol == 5:
+            if payload.get("control_profile") != "skulk.calls/2":
+                raise ValueError("selected inference interpretation is unavailable")
+            return (
+                "native-inference",
+                *identity[1:],
+                digest.validate_python(kernel["handshake"], strict=True),
+                digest.validate_python(kernel["transport"], strict=True),
+                digest.validate_python(kernel["composition"], strict=True),
+                digest.validate_python(kernel["calls"], strict=True),
+            )
         if protocol == 4:
             if payload.get("control_profile") != "skulk.calls/1":
                 raise ValueError("selected call interpretation is unavailable")
@@ -195,8 +206,10 @@ def _retained_contract_identity(
         )
     )
     payload = _JSON_OBJECT.validate_python(metadata["runtime"], strict=True)
-    identity = _contract_identity(payload)
-    if identity[0] == "native-calls":
+    identity = runtime_contract_identity(payload)
+    if identity[0] == "native-inference":
+        prefix = b"skulk.runtime/5\0"
+    elif identity[0] == "native-calls":
         prefix = b"skulk.runtime/4\0"
     elif identity[0] == "native":
         prefix = b"skulk.runtime/3\0"
@@ -526,7 +539,7 @@ class RuntimeSelector:
         if current is not None:
             if current.bundle_id != release.manifest.bundle_id:
                 raise ValueError("installation bundle identity differs")
-            if _retained_contract_identity(self.root, current) != _contract_identity(
+            if _retained_contract_identity(self.root, current) != runtime_contract_identity(
                 _JSON_OBJECT.validate_json(runtime.payload)
             ):
                 # State/schema labels cannot silently move settings or grants

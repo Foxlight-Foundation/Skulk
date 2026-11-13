@@ -34,6 +34,10 @@ from skulk.extensions.managed_limits import (
     MAX_RUNTIME_METADATA_BYTES,
 )
 from skulk.extensions.native_contracts import NativeDescriptor, NativeManifest
+from skulk.extensions.native_inference_contracts import (
+    InferenceDescriptor,
+    InferenceManifest,
+)
 from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
     QualifiedHost,
@@ -183,11 +187,14 @@ def installed_release(staged: Path) -> InstalledRelease | None:
     manifest = release.get("manifest") if isinstance(release, dict) else None
     if not isinstance(release, dict) or not isinstance(manifest, dict):
         return None
-    native = isinstance(runtime, dict) and runtime.get("protocol") in (3, 4)
+    runtime_protocol = runtime.get("protocol") if isinstance(runtime, dict) else None
+    native = runtime_protocol in (3, 4, 5)
     if native:
         try:
-            manifest = NativeManifest.model_validate_json(
-                canonical_json(manifest)
+            manifest = (
+                InferenceManifest.model_validate_json(canonical_json(manifest))
+                if runtime_protocol == 5
+                else NativeManifest.model_validate_json(canonical_json(manifest))
             ).value()
         except ValueError:
             return None
@@ -196,8 +203,14 @@ def installed_release(staged: Path) -> InstalledRelease | None:
     try:
         if native:
             contracts = _OBJECT.validate_python(manifest["contracts"], strict=True)
-            descriptors = TypeAdapter(tuple[NativeDescriptor, ...]).validate_json(
-                json.dumps(contracts["descriptors"])
+            descriptors = (
+                TypeAdapter(tuple[InferenceDescriptor, ...]).validate_json(
+                    json.dumps(contracts["descriptors"])
+                )
+                if runtime_protocol == 5
+                else TypeAdapter(tuple[NativeDescriptor, ...]).validate_json(
+                    json.dumps(contracts["descriptors"])
+                )
             )
             configuration = contracts.get("configuration_schema")
         else:
@@ -633,11 +646,15 @@ def _listing_matches(
     runtime = _OBJECT.validate_python(signed["runtime"])
     release = _OBJECT.validate_python(runtime["release"])
     manifest = _OBJECT.validate_python(release["manifest"])
-    if runtime.get("protocol") in (3, 4):
+    if runtime.get("protocol") in (3, 4, 5):
         # This metadata was authenticated during review. Read its exact native
         # manifest for consent comparison instead of treating the byte wrapper
         # as the legacy declaration.
-        manifest = NativeManifest.model_validate_json(canonical_json(manifest)).value()
+        manifest = (
+            InferenceManifest.model_validate_json(canonical_json(manifest))
+            if runtime.get("protocol") == 5
+            else NativeManifest.model_validate_json(canonical_json(manifest))
+        ).value()
     platforms = TypeAdapter(list[str]).validate_python(release["platforms"])
     return (
         review.runtime_digest == listing.release_digest
@@ -1292,13 +1309,21 @@ class RuntimeManager:
             manifest = release.get("manifest") if isinstance(release, dict) else None
             if not isinstance(manifest, dict):
                 raise ValueError("installed contract metadata unavailable")
-            if isinstance(runtime, dict) and runtime.get("protocol") in (3, 4):
-                manifest = NativeManifest.model_validate_json(
-                    canonical_json(manifest)
+            if isinstance(runtime, dict) and runtime.get("protocol") in (3, 4, 5):
+                manifest = (
+                    InferenceManifest.model_validate_json(canonical_json(manifest))
+                    if runtime.get("protocol") == 5
+                    else NativeManifest.model_validate_json(canonical_json(manifest))
                 ).value()
                 contracts = _OBJECT.validate_python(manifest["contracts"], strict=True)
-                descriptors = TypeAdapter(tuple[NativeDescriptor, ...]).validate_json(
-                    json.dumps(contracts["descriptors"])
+                descriptors = (
+                    TypeAdapter(tuple[InferenceDescriptor, ...]).validate_json(
+                        json.dumps(contracts["descriptors"])
+                    )
+                    if runtime.get("protocol") == 5
+                    else TypeAdapter(tuple[NativeDescriptor, ...]).validate_json(
+                        json.dumps(contracts["descriptors"])
+                    )
                 )
             else:
                 descriptors = TypeAdapter(

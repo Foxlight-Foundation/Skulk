@@ -43,6 +43,12 @@ from skulk.extensions.native_contracts import (
     NativeProfiles,
     native_wheel,
 )
+from skulk.extensions.native_inference_contracts import (
+    InferenceManifest,
+    InferenceProfiles,
+    inference_native_wheel,
+    public_inference_kernel,
+)
 from skulk.extensions.runtime_files import is_desktop_metadata, read_private
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -153,12 +159,12 @@ class RuntimeWheel(_Contract):
         return str(name), str(version)
 
 
-ACCEPTED_RELEASE_PROTOCOLS: tuple[int, ...] = (1, 2)
+ACCEPTED_RELEASE_PROTOCOLS: tuple[int, ...] = (1, 2, 3)
 """Release record protocols this host installs: the current and, once there is
 one, the previous. A capability published against the previous protocol keeps
 installing for one release cycle; anything else is refused by name."""
 
-ACCEPTED_RUNTIME_PROTOCOLS: tuple[int, ...] = (2, 3, 4)
+ACCEPTED_RUNTIME_PROTOCOLS: tuple[int, ...] = (2, 3, 4, 5)
 """Explicit migration window: retain issued legacy/native envelopes and add calls.
 
 Existing installations keep their exact closure during controlled application
@@ -254,6 +260,19 @@ class _NativeReleaseClaims(_ReleaseFields):
         return value
 
 
+class _InferenceReleaseClaims(_ReleaseFields):
+    protocol: Literal[3]
+    manifest: InferenceManifest
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def exact_protocol(cls, value: object) -> object:
+        """Refuse numeric-kind coercion before Pydantic admits the literal."""
+        if type(value) is not int or value != 3:
+            raise ValueError("native release protocol must be integer 3")
+        return value
+
+
 class _RuntimeClaims(_Contract):
     protocol: Annotated[int, AfterValidator(_accepted("runtime", (2,)))]
     implementation: Literal["cpython"]
@@ -309,6 +328,36 @@ class _CallRuntimeClaims(_Contract):
         return value
 
 
+class _InferenceRuntimeClaims(_Contract):
+    """A separately signed envelope selecting the complete composed-call cohort."""
+
+    protocol: Literal[5] = Field(
+        description="Separately signed call-runtime envelope version."
+    )
+    implementation: Literal["cpython"] = Field(
+        description="Interpreter implementation selected by the signed closure."
+    )
+    platform: RuntimePlatform = Field(description="Exact published artifact family.")
+    release: _InferenceReleaseClaims = Field(
+        description="Native author and bundle identity, without legacy projection."
+    )
+    kernel: InferenceProfiles = Field(
+        description="All six explicit inference-cohort fingerprints and source identity."
+    )
+    control_profile: Literal["skulk.calls/2"] = Field(
+        description="Active call control; never inferred from available methods."
+    )
+    wheels: tuple[RuntimeWheel, ...] = Field(min_length=1, max_length=64)
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def exact_protocol(cls, value: object) -> object:
+        """Refuse numeric coercion before selecting the call envelope."""
+        if type(value) is not int or value != 5:
+            raise ValueError("native call runtime protocol must be integer 5")
+        return value
+
+
 class _Signed(_Contract):
     runtime: dict[str, JsonValue]
     signature: str = Field(pattern=r"^[a-f0-9]{128}$")
@@ -332,7 +381,12 @@ class VerifiedRuntime:
 
     metadata: bytes
     payload: bytes
-    claims: _RuntimeClaims | _NativeRuntimeClaims | _CallRuntimeClaims
+    claims: (
+        _RuntimeClaims
+        | _NativeRuntimeClaims
+        | _CallRuntimeClaims
+        | _InferenceRuntimeClaims
+    )
 
     @property
     def digest(self) -> str:
@@ -349,13 +403,22 @@ class VerifiedRuntime:
         """Bind the full bundle release under its original or native domain."""
         payload = _OBJECT.validate_json(self.payload)
         release = _OBJECT.validate_python(payload["release"], strict=True)
-        prefix = b"skulk.release/2\0" if self.native_manifest is not None else b""
+        prefix = (
+            b"skulk.release/3\0"
+            if isinstance(self.claims, _InferenceRuntimeClaims)
+            else b"skulk.release/2\0"
+            if self.native_manifest is not None
+            else b""
+        )
         return hashlib.sha256(prefix + canonical_json(release)).hexdigest()
 
     @property
-    def native_manifest(self) -> NativeManifest | None:
+    def native_manifest(self) -> NativeManifest | InferenceManifest | None:
         """Return the admitted native record only for its explicit envelope."""
-        if isinstance(self.claims, (_NativeRuntimeClaims, _CallRuntimeClaims)):
+        if isinstance(
+            self.claims,
+            (_NativeRuntimeClaims, _CallRuntimeClaims, _InferenceRuntimeClaims),
+        ):
             return self.claims.release.manifest
         return None
 
@@ -377,7 +440,7 @@ class VerifiedRuntime:
 
 def _runtime_signature_prefix(protocol: JsonValue) -> bytes:
     """Keep issued signing bytes intact and separate the explicit call domain."""
-    if type(protocol) is int and protocol in (3, 4):
+    if type(protocol) is int and protocol in (3, 4, 5):
         return f"skulk.runtime/{protocol}\0".encode("ascii")
     return b""
 
@@ -532,8 +595,15 @@ def verify_runtime(
     except (InvalidSignature, ValueError):
         raise ValueError("runtime signature refused") from None
     _check_protocol_window(signed.runtime)
-    claims: _RuntimeClaims | _NativeRuntimeClaims | _CallRuntimeClaims
-    if type(protocol) is int and protocol == 4:
+    claims: (
+        _RuntimeClaims
+        | _NativeRuntimeClaims
+        | _CallRuntimeClaims
+        | _InferenceRuntimeClaims
+    )
+    if type(protocol) is int and protocol == 5:
+        claims = _InferenceRuntimeClaims.model_validate_json(payload)
+    elif type(protocol) is int and protocol == 4:
         claims = _CallRuntimeClaims.model_validate_json(payload)
     elif type(protocol) is int and protocol == 3:
         claims = _NativeRuntimeClaims.model_validate_json(payload)
@@ -541,8 +611,15 @@ def verify_runtime(
         claims = _RuntimeClaims.model_validate_json(payload)
     release = claims.release
     runtime = VerifiedRuntime(metadata, payload, claims)
-    if isinstance(claims, (_NativeRuntimeClaims, _CallRuntimeClaims)):
-        if isinstance(claims, _CallRuntimeClaims):
+    if isinstance(
+        claims, (_NativeRuntimeClaims, _CallRuntimeClaims, _InferenceRuntimeClaims)
+    ):
+        if isinstance(claims, _InferenceRuntimeClaims):
+            public_inference_kernel()
+            filename, digest, size = inference_native_wheel(
+                canonical_platform(claims.platform)
+            )
+        elif isinstance(claims, _CallRuntimeClaims):
             public_call_kernel()
             filename, digest, size = call_native_wheel(
                 canonical_platform(claims.platform)

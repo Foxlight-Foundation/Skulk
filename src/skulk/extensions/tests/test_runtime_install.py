@@ -471,7 +471,7 @@ def test_the_explicit_migration_window_refuses_beyond_by_name(
 ) -> None:
     """Keep legacy signing valid and refuse authenticated future versions by name.
 
-    Native runtimes 3/4 have independent signed fixtures. The migration window
+    Native runtimes 3/4/5 have independent signed fixtures. The migration window
     retains old signed closures; envelope pairs are never a Cartesian product.
     """
     from skulk.extensions.runtime_artifacts import (
@@ -480,8 +480,8 @@ def test_the_explicit_migration_window_refuses_beyond_by_name(
         ProtocolUnsupportedError,
     )
 
-    assert ACCEPTED_RELEASE_PROTOCOLS == (1, 2)
-    assert ACCEPTED_RUNTIME_PROTOCOLS == (2, 3, 4)
+    assert ACCEPTED_RELEASE_PROTOCOLS == (1, 2, 3)
+    assert ACCEPTED_RUNTIME_PROTOCOLS == (2, 3, 4, 5)
     metadata, trust, host = artifacts(tmp_path / "legacy")
     assert verify_runtime(metadata, trust, host, now=int(time.time()))
     beyond = tmp_path / "beyond"

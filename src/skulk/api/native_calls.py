@@ -20,7 +20,9 @@ from skulk.shared.types.common import NodeId
 
 
 @final
-class _OwnedResponse(Response):
+class OwnedNativeResponse(Response):
+    """Retain native output capacity until HTTP delivery or cancellation finishes."""
+
     def __init__(self, received: Received) -> None:
         super().__init__(received.payload, media_type="application/json")
         self.received = received
@@ -184,7 +186,7 @@ def create_native_calls_router(
                     await finish_runtime_work(asyncio.create_task(_drain(call, watch)))
                 # No await follows custody transfer. Cancellation during watcher
                 # cleanup must release a completed result that was never delivered.
-                response = _OwnedResponse(result)
+                response = OwnedNativeResponse(result)
                 transferred = True
                 return response
             finally:

@@ -114,6 +114,7 @@ from skulk.api.field_telemetry import (
     prepare_telemetry_config_update,
     tap_generation_stream,
 )
+from skulk.api.inference_access import create_inference_access_router
 from skulk.api.inference_continuation import (
     CONTINUATION_CONTRACT,
     ContinuationTarget,
@@ -149,6 +150,7 @@ from skulk.api.music_jobs import (
     MusicJobRegistry,
 )
 from skulk.api.native_calls import create_native_calls_router
+from skulk.api.native_inference import create_native_inference_router
 from skulk.api.node_health import (
     compute_node_health,
     live_data_transports,
@@ -2233,6 +2235,8 @@ class API:
             )
         )
         self.app.include_router(create_native_calls_router(self.node_id))
+        self.app.include_router(create_inference_access_router(self.node_id))
+        self.app.include_router(create_native_inference_router(self.node_id))
         if operator_pairing_service is not None:
             self.app.include_router(
                 create_operator_auth_router(
