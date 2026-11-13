@@ -183,6 +183,10 @@ remain separate truths.
   - optional signed v2 manifest for one exact executable artifact: `root`,
     `files` (repository-relative `path`, `size_bytes`, and optional immutable
     `object_id`), content-derived `bundle_id`, and `download_size`
+  - `sha256:<digest>` identifies raw file bytes; `git-sha1:<digest>` identifies
+    a Git blob with its size-prefixed header. They are different hashes of the
+    same content, not interchangeable digest strings. Skulk verifies the signed
+    identity even when Hub metadata uses the other supported algorithm
   - signed v2 cards require this manifest to be internally consistent. Paths
     are canonical POSIX-relative paths and cannot escape the repository or the
     declared artifact root
