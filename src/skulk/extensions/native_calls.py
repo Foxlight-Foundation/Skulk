@@ -10,6 +10,8 @@ import json
 import os
 import secrets
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, final
@@ -24,6 +26,7 @@ from pydantic import (
 )
 
 from skulk.extensions.caller_identity import AuthenticatedOwner
+from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
 from skulk.extensions.native_call_contracts import CompositionRecord, public_call_kernel
 from skulk.extensions.native_contracts import NativeDescriptor, NativeManifest
 from skulk.extensions.native_host_binding import load_core_host_key
@@ -48,6 +51,8 @@ from skulk.extensions.runtime_selection import RuntimeSelector
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 _TEXT = TypeAdapter(str)
+_DIRECTORY_SECONDS = 3.0
+_MAX_INSTALLATIONS = 64
 
 
 class _Contract(BaseModel):
@@ -94,6 +99,30 @@ class NativeListing(_Contract):
             descriptor_revision=self.target.descriptor_revision,
             processing_domain="local",
         )
+
+
+@final
+class _ChildDescription(_Contract):
+    """Untrusted owner metadata, validated before signed contract comparison."""
+
+    node_id: Identifier = Field(description="Owner-observed child identity.")
+    incarnation: Profile = Field(description="Actual child channel lifetime.")
+    manifest_digest: Digest = Field(description="Claimed signed manifest identity.")
+    descriptors: tuple[NativeDescriptor, ...] = Field(
+        max_length=64, description="Declarations to compare with the signed manifest."
+    )
+
+
+@final
+class _OwnerDescription(_Contract):
+    """Closed discovery wrapper; parsing this record never admits execution."""
+
+    children: tuple[_ChildDescription, ...] = Field(
+        max_length=64, description="Bounded owner-observed native children."
+    )
+    diagnostics: dict[str, JsonValue] | None = Field(
+        default=None, description="Inert owner diagnostics, unused for admission."
+    )
 
 
 @final
@@ -168,7 +197,8 @@ class NativeCalls:
         self.budget = NativePayloadBudget()
         self.endpoints: dict[str, _Endpoint] = {}
         self.active: dict[tuple[Peer, str], _Active] = {}
-        self._connect_lock = asyncio.Lock()
+        self._connect_locks: dict[str, tuple[asyncio.Lock, int]] = {}
+        self._directory_slots = asyncio.Semaphore(_MAX_INSTALLATIONS)
         self.closed = False
 
     def _profile(self) -> None:
@@ -241,15 +271,32 @@ class NativeCalls:
         if self._binding(binding.plugin_id) != binding:
             raise ValueError("native host lifetime changed")
 
+    @asynccontextmanager
+    async def _connection_lock(self, plugin_id: str) -> AsyncIterator[None]:
+        """Serialize one owner's connection attempts without blocking other owners."""
+        lock, users = self._connect_locks.get(plugin_id, (asyncio.Lock(), 0))
+        if not users and len(self._connect_locks) >= _MAX_INSTALLATIONS:
+            raise ValueError("native connection capacity unavailable")
+        self._connect_locks[plugin_id] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            _, users = self._connect_locks[plugin_id]
+            if users == 1:
+                del self._connect_locks[plugin_id]
+            else:
+                self._connect_locks[plugin_id] = (lock, users - 1)
+
     async def _endpoint(self, binding: HostBinding) -> _Endpoint:
-        async with self._connect_lock:
+        async with self._connection_lock(binding.plugin_id):
             existing = self.endpoints.get(binding.plugin_id)
             if existing is not None:
                 if existing.binding == binding and not existing.peer.stream.closed:
                     existing.peer.check()
                     return existing
                 await existing.peer.close()
-                del self.endpoints[binding.plugin_id]
+                self.endpoints.pop(binding.plugin_id, None)
             self._current(binding)
             key = load_core_host_key(self.root, self.connection.profile_id).key()
             installation = self.root / "installations" / binding.plugin_id
@@ -266,6 +313,7 @@ class NativeCalls:
                 keys = await admit_owner(
                     reader, writer, binding, key, lambda: self._current(binding)
                 )
+                self._current(binding)
                 peer = Peer(
                     AuthenticatedStream(reader, writer, keys, self.budget),
                     self._delegate,
@@ -280,100 +328,114 @@ class NativeCalls:
                 raise
 
     async def directory(self) -> tuple[NativeListing, ...]:
-        """Match actual owner discovery against exact signed installed declarations."""
+        """Return signed live reads found within one bounded concurrent discovery.
+
+        Unavailable, invalid and unfinished owners contribute no capacity. The
+        three-second discovery budget is shared across owners; interrupted RPC
+        cleanup has its own bounded drain before this method returns. No stale
+        directory result is cached or substituted for dispatch-time validation.
+        """
         self._profile()
         paths = sorted((self.root / "native-host-bindings").glob("*.json"))
-        if len(paths) > 64:
+        if len(paths) > _MAX_INSTALLATIONS:
             raise ValueError("native installation capacity exceeded")
-        listings: list[NativeListing] = []
-        for path in paths:
+        results: list[tuple[NativeListing, ...]] = [()] * len(paths)
+
+        async def inspect(index: int, path: Path) -> None:
             try:
-                binding = self._binding(path.stem)
-                selector = RuntimeSelector(
-                    self.root / "installations" / binding.plugin_id
-                )
-                metadata = read_private(
-                    selector.root
-                    / "generations"
-                    / binding.runtime_digest
-                    / "staged.json",
-                    262144,
-                )
-                runtime = await selector.installer.inspect_metadata(metadata)
-                manifest = runtime.claims.release.manifest
-                if (
-                    runtime.claims.protocol != 4
-                    or not isinstance(manifest, NativeManifest)
-                    or runtime.digest != binding.runtime_digest
-                ):
-                    continue
-                contracts = _OBJECT.validate_python(
-                    manifest.value()["contracts"], strict=True
-                )
-                signed = TypeAdapter(tuple[NativeDescriptor, ...]).validate_json(
-                    json.dumps(contracts["descriptors"])
-                )
-                endpoint = await self._endpoint(binding)
-                async with asyncio.timeout(3):
-                    response = await endpoint.peer.request("describe", {})
-                try:
-                    if (
-                        not isinstance(response.frame, ResponseFrame)
-                        or response.frame.outcome != "complete"
-                        or response.payload
-                    ):
-                        raise ValueError("native directory reply refused")
-                    children = TypeAdapter(list[dict[str, JsonValue]]).validate_python(
-                        response.frame.parameters["children"], strict=True
-                    )
-                    if len(children) > 64:
-                        raise ValueError("native directory exceeds bound")
-                    for child in children:
-                        if child["manifest_digest"] != manifest.digest:
-                            raise ValueError("native child manifest differs")
-                        descriptors = TypeAdapter(
-                            tuple[NativeDescriptor, ...]
-                        ).validate_json(json.dumps(child["descriptors"]))
-                        if descriptors != signed:
-                            raise ValueError(
-                                "native owner declaration differs from signed contract"
-                            )
-                        for descriptor in descriptors:
-                            if (
-                                descriptor.behavior != "read"
-                                or descriptor.io_mode != "unary"
-                            ):
-                                continue
-                            listings.append(
-                                NativeListing(
-                                    plugin_id=binding.plugin_id,
-                                    runtime_digest=binding.runtime_digest,
-                                    incarnation=TypeAdapter[str](
-                                        Profile
-                                    ).validate_python(
-                                        child["incarnation"], strict=True
-                                    ),
-                                    target=Target(
-                                        node_id=_TEXT.validate_python(
-                                            child["node_id"], strict=True
-                                        ),
-                                        capability_id=descriptor.id,
-                                        version=descriptor.version,
-                                        descriptor_revision=descriptor.revision,
-                                    ),
-                                    descriptor=descriptor,
-                                )
-                            )
-                finally:
-                    response.release()
+                async with self._directory_slots:
+                    results[index] = await self._discover(path)
             except (OSError, ValueError, TimeoutError):
-                # Offline/old/changed owners advertise no native executable
-                # capacity; their installed metadata remains on the normal API.
-                continue
+                # A failing owner contributes no executable capacity. Other
+                # owners retain their independently verified observations.
+                pass
+
+        try:
+            async with asyncio.timeout(_DIRECTORY_SECONDS):
+                async with asyncio.TaskGroup() as group:
+                    for index, path in enumerate(paths):
+                        group.create_task(inspect(index, path))
+        except TimeoutError:
+            # TaskGroup drains cancellation before exposing partial discovery;
+            # no background probes or response leases escape this request.
+            pass
+        # Preserve installed-path order regardless of response timing: compiled
+        # policy attenuation compares the complete ordered target collection.
+        listings = tuple(value for result in results for value in result)
         if len(listings) > 64 or len(
             {listing.target.model_dump_json() for listing in listings}
         ) != len(listings):
             raise ValueError("native directory is ambiguous or exceeds bound")
+        return listings
+
+    async def _discover(self, path: Path) -> tuple[NativeListing, ...]:
+        """Verify one signed installation and its actual protected owner reply."""
+        listings: list[NativeListing] = []
+        try:
+            binding = self._binding(path.stem)
+            selector = RuntimeSelector(self.root / "installations" / binding.plugin_id)
+            metadata = read_private(
+                selector.root / "generations" / binding.runtime_digest / "staged.json",
+                MAX_RUNTIME_METADATA_BYTES,
+            )
+            runtime = await selector.installer.inspect_metadata(metadata)
+            manifest = runtime.claims.release.manifest
+            if (
+                runtime.claims.protocol != 4
+                or not isinstance(manifest, NativeManifest)
+                or runtime.digest != binding.runtime_digest
+            ):
+                return ()
+            contracts = _OBJECT.validate_python(
+                manifest.value()["contracts"], strict=True
+            )
+            signed = TypeAdapter(tuple[NativeDescriptor, ...]).validate_json(
+                json.dumps(contracts["descriptors"])
+            )
+            endpoint = await self._endpoint(binding)
+            response = await endpoint.peer.request("describe", {})
+            try:
+                if (
+                    not isinstance(response.frame, ResponseFrame)
+                    or response.frame.outcome != "complete"
+                    or response.payload
+                ):
+                    raise ValueError("native directory reply refused")
+                description = _OwnerDescription.model_validate_json(
+                    json.dumps(response.frame.parameters)
+                )
+                for child in description.children:
+                    if child.manifest_digest != manifest.digest:
+                        raise ValueError("native child manifest differs")
+                    descriptors = child.descriptors
+                    if descriptors != signed:
+                        raise ValueError(
+                            "native owner declaration differs from signed contract"
+                        )
+                    for descriptor in descriptors:
+                        if (
+                            descriptor.behavior != "read"
+                            or descriptor.io_mode != "unary"
+                        ):
+                            continue
+                        listings.append(
+                            NativeListing(
+                                plugin_id=binding.plugin_id,
+                                runtime_digest=binding.runtime_digest,
+                                incarnation=child.incarnation,
+                                target=Target(
+                                    node_id=child.node_id,
+                                    capability_id=descriptor.id,
+                                    version=descriptor.version,
+                                    descriptor_revision=descriptor.revision,
+                                ),
+                                descriptor=descriptor,
+                            )
+                        )
+            finally:
+                response.release()
+        except (OSError, ValueError, TimeoutError):
+            return ()
         return tuple(listings)
 
     def _permitted(self, listing: NativeListing, revision: str) -> None:

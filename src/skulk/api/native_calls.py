@@ -206,7 +206,7 @@ def create_native_calls_router(
     router.get(
         "",
         summary="List live installed native reads",
-        description="Direct owner access. Match ready native child channels against signed installed contracts. Discovery grants no execution authority.",
+        description="Direct owner access. Match ready native child channels against signed installed contracts. Independent owners share a three-second discovery deadline and bounded concurrency; invalid, unavailable or unfinished owners are omitted. Cancellation cleanup may add up to three seconds. Discovery grants no execution authority and caches no stale capacity.",
     )(directory)
     router.get(
         "/policy",

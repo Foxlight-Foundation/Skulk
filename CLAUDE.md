@@ -2654,6 +2654,12 @@ kernel. Core supplies generic host authority; application/provider behavior stay
 in installed capabilities. The initial enrollment policy is disabled and permits
 only exact trusted local unary reads.
 
+Signed discovery shares the installer's512KiB envelope bound. At most64 owner
+probes run concurrently across the host under a3second directory observation
+deadline, followed by bounded RPC cleanup. Connections coalesce per installation;
+unresponsive owners do not serialize unrelated handshakes. Partial results retain
+installed-path order and never replace current dispatch policy/runtime checks.
+
 Normal `RuntimeService` startup provisions a Core role key at the manager profile
 and a runtime/transport/lifetime-bound owner sidecar. The mirrored private
 `native_host_protocol.py` / `native_host_rpc.py` authenticate roles and sequence

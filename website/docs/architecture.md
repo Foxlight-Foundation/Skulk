@@ -3905,6 +3905,15 @@ call tree. Public compiled composition/schema contracts remain the native
 admission implementation; legacy descriptor revisions and transports keep their
 existing meanings.
 
+Discovery probes independently signed owners concurrently under one three-second
+observation deadline, with at most64 active probes shared by the host. Pending
+RPC cancellation is drained before returning partial results and may add up to
+three seconds. Per-installation connection locks coalesce only that owner's
+handshake; an unresponsive owner cannot serialize other owners' connections.
+Successfully verified results retain installed-path order, and no directory
+cache substitutes for current policy/runtime checks. Discovery reads signed
+envelopes using the normal installer's512KiB metadata bound.
+
 Normal manager startup provisions a profile-owned Core signing key outside
 application startup data and a separate `core-host.json` attachment for each
 owner lifetime. The attachment binds profile, installation, signed generation,

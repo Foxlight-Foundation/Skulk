@@ -26,6 +26,7 @@ from pydantic import JsonValue, TypeAdapter
 from starlette.types import ASGIApp
 
 from skulk.api.native_calls import create_native_calls_router
+from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
 from skulk.extensions.native_calls import NativeListing
 from skulk.extensions.native_host_binding import load_core_host_key
 from skulk.extensions.native_host_budget import NativePayloadBudget
@@ -263,11 +264,19 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
     server: asyncio.Task[None] | None = None
     checks: list[str] = []
     runtimes: list[dict[str, str]] = []
+    large_metadata_bytes = 0
     try:
         await manager.start()
         for role, source in (("caller", caller), ("receiver", receiver)):
             identifier = f"managed.native-{role}"
             metadata = (source / "release/release.json").read_bytes()
+            if role == "receiver":
+                # Whitespace changes transport bytes, not the signed canonical
+                # claims. The normal installer accepts this valid envelope;
+                # discovery must use the same bound rather than hide the app.
+                assert len(metadata) < 300_000
+                metadata += b" " * (300_000 - len(metadata))
+                large_metadata_bytes = len(metadata)
             trust = RuntimeTrust.model_validate_json(
                 (source / "public-trust.json").read_bytes()
             )
@@ -288,6 +297,10 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
                 metadata, source / "release"
             )
             assert staged.state == "staged"
+            assert read_private(
+                controller.root / "generations" / runtime.digest / "staged.json",
+                MAX_RUNTIME_METADATA_BYTES,
+            ) == metadata
             activation = LifecycleRequest(
                 operation_id=uuid4().hex,
                 action="activate",
@@ -342,8 +355,12 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
                 response.content
             )
             assert len(listings) == 2
+            assert large_metadata_bytes == 300_000
             checks.append(
                 "production-router-actual-http-owner-authentication-and-signed-discovery"
+            )
+            checks.append(
+                "normal-installer-and-discovery-accept-signed-envelope-above-256kib"
             )
             policy = await client.get("/v1/native-capabilities/policy")
             assert (
@@ -720,6 +737,7 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
             json.dumps(
                 {
                     "format": 1,
+                    "large_signed_metadata_bytes": large_metadata_bytes,
                     "passed": True,
                     "platform": host.platform,
                     "checks": checks,
