@@ -1,0 +1,114 @@
+{
+  "format": 1,
+  "version": "0.6.0rc1",
+  "node_version": "0.6.0-rc.1",
+  "repository": "Foxlight-Foundation/skulk-capability-sdk",
+  "tag": "native-v0.6.0-rc.1",
+  "source_commit": "cca3dcea5ecce5e282e0afc2d205fbd586ba0add",
+  "source_tree": "d39a5a4d7e618aaef576539610aaaa9490a7af5c",
+  "scope": "Native ABI prerelease candidate; not SDK 1.0 or installed owner/Core acceptance",
+  "runtime_adoption": false,
+  "profiles": [
+    {
+      "profile": "skulk.portable/1",
+      "profile_digest": "ada52fb17016f873140aa4d6cd7ae2f8c9a0895eed997a92201ed5f45a60e3d3",
+      "cases": 1959,
+      "input_sha256": "0987da67717894e31bacd3a85305bda1ac031e9f9efdd9ba0e46c137f5491dbb"
+    },
+    {
+      "profile": "skulk.managed/1",
+      "profile_digest": "a70a5fdf56aa24775bdce26dc4ccecc4fc50bd2d3acbd78b5b8b47f4599fe4a1",
+      "cases": 78,
+      "input_sha256": "d48ab30f65a6ba48c431c1ed6cc70f64ab8b69160c62fee5edd4d4bcc12db3ad"
+    },
+    {
+      "profile": "skulk.handshake/1",
+      "profile_digest": "57413947cae8d31de25b3283dc1ffa87d9c9c28f0d98b5e8eb593c9dd64e07a0",
+      "cases": 74,
+      "input_sha256": "6fc0b7de5852b4e5621e41ca406a2395bb42873b07f04d4ca58450a6525e4149"
+    },
+    {
+      "profile": "skulk.transport/1",
+      "profile_digest": "18e4096b5802dc4ff9c251b1819a0c5062d42713edd4e8fc30fa94224044b435",
+      "cases": 58,
+      "input_sha256": "1520d3b88eb7fb0bc580acc1a7e66ebb3cb7b0e9c9cef5b2e31a1013c7ad3325"
+    },
+    {
+      "profile": "skulk.composition/1",
+      "profile_digest": "6b3b7ce596b414b40d7f74d8fe7351cb3ad93a2ecdc5c0e7623ece86b2c252d3",
+      "cases": 50,
+      "input_sha256": "97e94779f8f36d45564e456317dbce72a31d247c6914c9c4d7ce8c67a1dbda06"
+    },
+    {
+      "profile": "skulk.calls/1",
+      "profile_digest": "8a2cfb90e8c986bdeb8fdc7b4dcc223740ad5b8e3c710e8e334a0a7e31e7e002",
+      "cases": 89,
+      "input_sha256": "6633e7b28bbb067c7a36fd5b8febff4d5449fcb9a9bcb7d38d4bc487dd8067ea"
+    }
+  ],
+  "platforms": [
+    {
+      "platform": "linux-glibc-aarch64",
+      "wheel": {
+        "name": "skulk_capability_kernel-0.6.0rc1-cp313-abi3-manylinux_2_34_aarch64.whl",
+        "sha256": "fb2a848d33e4563247aba487c1c78c52c16c1224642398ebe28cda4171f1b627",
+        "size": 4279124,
+        "url": "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.6.0-rc.1/skulk_capability_kernel-0.6.0rc1-cp313-abi3-manylinux_2_34_aarch64.whl"
+      },
+      "npm": {
+        "name": "skulk-capability-kernel-0.6.0rc1-linux-glibc-aarch64.tgz",
+        "sha256": "ebfa9e5a2e5a7805979522aff8aea510aefb959a007a47057df7eae9ed113ebb",
+        "size": 4164206,
+        "url": "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.6.0-rc.1/skulk-capability-kernel-0.6.0rc1-linux-glibc-aarch64.tgz"
+      },
+      "evidence": {
+        "name": "qualification-linux-glibc-aarch64.zip",
+        "sha256": "782cb711fc4dd5866bb955a6785e2d03279f28ef03c728e4d3a70c75b8d49917",
+        "size": 8509625,
+        "url": "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.6.0-rc.1/qualification-linux-glibc-aarch64.zip"
+      }
+    },
+    {
+      "platform": "linux-glibc-x86_64",
+      "wheel": {
+        "name": "skulk_capability_kernel-0.6.0rc1-cp313-abi3-manylinux_2_34_x86_64.whl",
+        "sha256": "a3c2be69d041e3a40d30dd984c522146774962d1619f26f4051b578f118f7e0e",
+        "size": 4464936,
+        "url": "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.6.0-rc.1/skulk_capability_kernel-0.6.0rc1-cp313-abi3-manylinux_2_34_x86_64.whl"
+      },
+      "npm": {
+        "name": "skulk-capability-kernel-0.6.0rc1-linux-glibc-x86_64.tgz",
+        "sha256": "3fd086a7d830b16f381dbfe2dfe36409d40d3fe795a0baf7975398ff4b702824",
+        "size": 4337856,
+        "url": "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.6.0-rc.1/skulk-capability-kernel-0.6.0rc1-linux-glibc-x86_64.tgz"
+      },
+      "evidence": {
+        "name": "qualification-linux-glibc-x86_64.zip",
+        "sha256": "a567f092cfb5e635908134909a4977855d2cbd2796b725ac26a027cfd9d2de88",
+        "size": 8877036,
+        "url": "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.6.0-rc.1/qualification-linux-glibc-x86_64.zip"
+      }
+    },
+    {
+      "platform": "macos-arm64",
+      "wheel": {
+        "name": "skulk_capability_kernel-0.6.0rc1-cp313-abi3-macosx_11_0_arm64.whl",
+        "sha256": "c4c343a7fdcef99d30fb78ae4d8e857bf71f4003c193b198629becbf1fa4cc55",
+        "size": 4018214,
+        "url": "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.6.0-rc.1/skulk_capability_kernel-0.6.0rc1-cp313-abi3-macosx_11_0_arm64.whl"
+      },
+      "npm": {
+        "name": "skulk-capability-kernel-0.6.0rc1-macos-arm64.tgz",
+        "sha256": "6395021d63e1ff1435ff9f23c63a09133d8b0671eff0e23c66e902aace524975",
+        "size": 3907016,
+        "url": "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.6.0-rc.1/skulk-capability-kernel-0.6.0rc1-macos-arm64.tgz"
+      },
+      "evidence": {
+        "name": "qualification-macos-arm64.zip",
+        "sha256": "e092939ae133791460859ce22aba0453b41f45f0963af479e380bf39549149c9",
+        "size": 8009407,
+        "url": "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.6.0-rc.1/qualification-macos-arm64.zip"
+      }
+    }
+  ]
+}

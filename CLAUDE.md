@@ -2,6 +2,9 @@
 
 This file provides guidance to AI coding agents when working with code in this repository.
 
+Dashboard browser CI uses Ubuntu 24.04 because the locked Playwright release
+does not support Chromium installation on Ubuntu 26.04.
+
 ## Project Overview
 
 Experimental delegated capability chat lives in `api/inference_gateway.py`.
@@ -178,6 +181,9 @@ uv run pytest
 
 # Run all tests including slow tests
 uv run pytest -m ""
+
+# Normal signed native owner/child startup qualification (disposable fixture)
+uv run python scripts/qualify_native_startup.py --help
 
 # Run a specific test file
 uv run pytest src/skulk/shared/tests/test_election.py
@@ -1136,6 +1142,13 @@ IPC. `managed.py` adapts their steward discovery and inert invocation to the exi
 steward provider facet. Host loss closes callbacks without replay; no approval key
 is supplied. Inert proposal tools have a 20-second deadline, reads retain 5 seconds.
 
+`api/operator_auth.authenticate_capability_owner` produces the process-local
+`extensions/caller_identity.AuthenticatedOwner` only from actual direct request
+authority; caller/issuer headers or payloads cannot choose it. This is one owner
+realm, not human/account identity or an inference/delegation grant. Native calls
+still need separate live policy and exact destination admission; no caller value
+is replicated or advertised as execution capacity.
+
 `extensions/managed.py` connects protected local owner registrations to separately
 supervised runtimes without importing their SDKs. `DynamicCapabilityProvider`
 supplies cached contracts for all four I/O modes for live loader lookup; static IDs retain priority
@@ -1154,6 +1167,27 @@ terminal publication preserve Fabric lifecycle. Cancellation or bad output
 invalidates/reaps that child through normal owner supervision; siblings and
 unary calls retain their contracts. Old unary owners remain supported; streaming
 requires protocol 4. No media enters State/event logs or imports a private SDK.
+
+Native runtime envelope 3 carries release envelope 2 and exact canonical
+protocol-five manifest bytes. `native_contracts.py` delegates their admission to
+the qualified public compiled kernel; Core does not emulate its author/schema
+rules. Native signatures and generation identities use the `skulk.runtime/3\0`
+domain. The complete public source/profile identity and artifact-family wheel
+hash/length are pinned. Staging retains `native-manifest.json` and checks the
+fresh installed reader's full manifest identity and all four fingerprints before
+completion. Legacy runtime envelope 2 retains its original signing bytes.
+Runtime envelope 4 independently selects `control_profile: "skulk.calls/1"`,
+public kernel 0.6.0rc1, and all six portable/managed/handshake/transport/composition/
+calls fingerprints. Its signature and generation digest use `skulk.runtime/4\0`.
+The installed reader also round-trips the compiled call codec. The bounded
+migration window accepts envelopes 2, 3 and 4; old envelopes retain their exact
+0.4 binary closure and signing bytes. A compatible host reader cannot replace
+an issued generation's pinned binary. Ordinary selection refuses changes between
+legacy, native transport and native calls interpretations, even when state/schema
+labels match. Such changes require explicit qualified state migration. Call-format
+startup alone does not advertise native invocation or delegation capacity.
+The PyInstaller native hook includes both cohort receipts and the selected
+reader metadata/licenses, refusing a missing receipt during the build.
 
 Generic signed runtime verification and staging use `extensions/runtime_artifacts.py`,
 `runtime_files.py` and `runtime_install.py`. Provider manifest policy stays opaque;

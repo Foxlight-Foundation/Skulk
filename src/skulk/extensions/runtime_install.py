@@ -46,6 +46,52 @@ print(json.dumps({name(d):d.version for d in importlib.metadata.distributions()
 if name(d) != 'pip'},sort_keys=True))
 """
 
+# The new interpreter imports only its signed binary closure. Manifest admission
+# is repeated there so the host reader cannot stand in for a missing runtime ABI.
+_NATIVE_READER = """import importlib.metadata,json
+from pathlib import Path
+import _skulk_capability_kernel as kernel
+source=Path('native-manifest.json').read_bytes()
+record=kernel.ManagedContract.from_json('Manifest',source.decode())
+if record.canonical() != source: raise ValueError('noncanonical native manifest')
+print(json.dumps({'version':importlib.metadata.version('skulk-capability-kernel'),
+'manifest_digest':record.digest,
+'portable':kernel.portable_profile_digest(),
+'managed':kernel.managed_profile_digest(),
+'handshake':kernel.handshake_profile_digest(),
+'transport':kernel.transport_profile_digest()},sort_keys=True))
+"""
+
+
+_CALL_READER = """import importlib.metadata,json
+from pathlib import Path
+import _skulk_capability_kernel as kernel
+source=Path('native-manifest.json').read_bytes()
+record=kernel.ManagedContract.from_json('Manifest',source.decode())
+if record.canonical() != source: raise ValueError('noncanonical native manifest')
+health={'protocol':1,'contract_profile':'skulk.calls/1',
+'profile_digest':kernel.calls_profile_digest(),'kind':'health','payload_size':0,
+'nonce':'installed-qualification','ready':False,'surfaces':[]}
+metadata,body=kernel.decode_call_frame(kernel.encode_call_frame(json.dumps(health),b''))
+if json.loads(metadata) != health or body: raise ValueError('installed call codec refused')
+print(json.dumps({'version':importlib.metadata.version('skulk-capability-kernel'),
+'manifest_digest':record.digest,
+'portable':kernel.portable_profile_digest(),
+'managed':kernel.managed_profile_digest(),
+'handshake':kernel.handshake_profile_digest(),
+'transport':kernel.transport_profile_digest(),
+'composition':kernel.composition_profile_digest(),
+'calls':kernel.calls_profile_digest()},sort_keys=True))
+"""
+
+
+def _check_native_manifest(generation: Path, runtime: VerifiedRuntime) -> None:
+    """Refuse changed retained native bytes before launching any generation code."""
+    if (native := runtime.native_manifest) is not None and read_private(
+        generation / "native-manifest.json", 262144
+    ) != native.canonical_json.encode():
+        raise ValueError("installed native manifest differs")
+
 
 def _without_shared_write(directory: Path) -> None:
     """Remove group and other write permission from a freshly built runtime.
@@ -322,6 +368,7 @@ class RuntimeInstaller:
                 )
                 if runtime.digest != digest:
                     raise ValueError("staged runtime identity differs")
+                _check_native_manifest(generation, runtime)
                 await asyncio.to_thread(
                     verified_artifacts, runtime, generation / "artifacts"
                 )
@@ -452,6 +499,7 @@ class RuntimeInstaller:
                         != runtime.metadata
                     ):
                         raise ValueError("runtime completion record differs")
+                    _check_native_manifest(generation, runtime)
                     await asyncio.to_thread(
                         verified_artifacts, runtime, generation / "artifacts"
                     )
@@ -468,6 +516,11 @@ class RuntimeInstaller:
                     private_directory(artifact_directory)
                     for name, content in supplied.items():
                         write_private(artifact_directory / name, content)
+                    if (native := runtime.native_manifest) is not None:
+                        write_private(
+                            generation / "native-manifest.json",
+                            native.canonical_json.encode(),
+                        )
                     write_private(
                         generation / "requirements.txt",
                         "".join(
@@ -527,6 +580,30 @@ class RuntimeInstaller:
                 )
                 if json.loads(inventory) != runtime.inventory:
                     raise ValueError("installed runtime inventory differs")
+                if (native := runtime.native_manifest) is not None:
+                    reader = (
+                        _CALL_READER if runtime.claims.protocol == 4 else _NATIVE_READER
+                    )
+                    observed = await _execute(
+                        (python, "-I", "-B", "-c", reader), generation, lock, 30
+                    )
+                    payload = TypeAdapter(dict[str, JsonValue]).validate_json(
+                        runtime.payload
+                    )
+                    profiles = TypeAdapter(dict[str, JsonValue]).validate_python(
+                        payload["kernel"], strict=True
+                    )
+                    expected = {
+                        name: value
+                        for name, value in profiles.items()
+                        if name != "source_commit"
+                    }
+                    expected["manifest_digest"] = native.digest
+                    if (
+                        TypeAdapter(dict[str, JsonValue]).validate_json(observed)
+                        != expected
+                    ):
+                        raise ValueError("installed native reader identity differs")
                 self._verify(metadata, await asyncio.to_thread(measure_host))
                 if not (generation / "staged.json").exists():
                     await asyncio.to_thread(seal_runtime, generation, runtime.digest)

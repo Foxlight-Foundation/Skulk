@@ -2380,6 +2380,16 @@ calls over a protected local socket. Connection loss invalidates pending callbac
 reconnection never replays them. This channel supplies no approval authority.
 Inert proposal preparation has a twenty-second steward deadline; reads retain five.
 
+`api/operator_auth.authenticate_capability_owner` derives a process-local
+`extensions/caller_identity.AuthenticatedOwner` from the actual direct dashboard
+request. The identity names this node's owner realm, rather than an individual
+human or a provider account. Socket, origin, verified Tailscale membership and
+ASGI relay admission decide the result; request headers and payloads cannot
+choose its caller or issuing node. Paired and relay credentials never fall back
+to that owner identity. The value is neither an execution grant nor a bearer
+credential: native dispatch still requires its separate current-policy and exact
+destination admission. It is not placed in replicated State or discovery.
+
 Separately supervised plugin owners connect through `extensions/managed.py`, a
 generic owner-only Unix-socket adapter. Local protected registrations identify
 the installation and service-state root; the API process imports no plugin SDK.
@@ -2398,6 +2408,26 @@ journal retains operation IDs, monotonic trust and interrupted generations.
 Cancellation of a waiting interface does not abandon owned installation work;
 only the fsynced completion marker publishes a staged generation. Staging never
 switches the active owner or changes cleanup state.
+Native runtime envelope 3 carries release envelope 2 and exact canonical
+protocol-five manifest bytes. `native_contracts.py` delegates their admission to
+the qualified public compiled kernel; Core does not emulate its author/schema
+rules. Native signatures and generation identities use the `skulk.runtime/3\0`
+domain. The complete public source/profile identity and artifact-family wheel
+hash/length are pinned. Staging retains `native-manifest.json` and checks the
+fresh installed reader's full manifest identity and all four fingerprints before
+completion. Legacy runtime envelope 2 retains its original signing bytes.
+Runtime envelope 4 independently selects `control_profile: "skulk.calls/1"`,
+public kernel 0.6.0rc1, and all six portable/managed/handshake/transport/composition/
+calls fingerprints. Its signature and generation digest use `skulk.runtime/4\0`.
+The installed reader also round-trips the compiled call codec. The bounded
+migration window accepts envelopes 2, 3 and 4; old envelopes retain their exact
+0.4 binary closure and signing bytes. A compatible host reader cannot replace
+an issued generation's pinned binary. Ordinary selection refuses changes between
+legacy, native transport and native calls interpretations, even when state/schema
+labels match. Such changes require explicit qualified state migration. Call-format
+startup alone does not advertise native invocation or delegation capacity.
+The PyInstaller native hook includes both cohort receipts and the selected
+reader metadata/licenses, refusing a missing receipt during the build.
 `runtime_integrity.py` seals installed files, permissions and interpreter identity.
 Cached verification refuses a missing or changed seal before private Python can
 execute startup code; runtime commands disable bytecode writes. The interpreter

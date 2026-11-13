@@ -1,5 +1,6 @@
 """Journaled stopped-owner runtime selection with retained logical plugin state."""
 
+import hashlib
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +16,7 @@ from pydantic import (
     model_validator,
 )
 
+from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
 from skulk.extensions.runtime_artifacts import (
     Digest,
     Identifier,
@@ -143,9 +145,69 @@ def _remove_private(path: Path) -> None:
 
 
 def _manifest(runtime: VerifiedRuntime) -> dict[str, JsonValue]:
+    if (manifest := runtime.native_manifest) is not None:
+        return manifest.value()
     payload = _JSON_OBJECT.validate_json(runtime.payload)
     release = _JSON_OBJECT.validate_python(payload["release"], strict=True)
     return _JSON_OBJECT.validate_python(release["manifest"], strict=True)
+
+
+def _contract_identity(payload: dict[str, JsonValue]) -> tuple[str, ...]:
+    """Identify interpretation semantics independently of release sequence/version."""
+    protocol = payload.get("protocol")
+    if type(protocol) is int and protocol == 2:
+        return ("legacy",)
+    if type(protocol) is int and protocol in (3, 4):
+        kernel = _JSON_OBJECT.validate_python(payload["kernel"], strict=True)
+        digest: TypeAdapter[str] = TypeAdapter(Digest)
+        identity = (
+            "native",
+            digest.validate_python(kernel["portable"], strict=True),
+            digest.validate_python(kernel["managed"], strict=True),
+        )
+        if protocol == 4:
+            if payload.get("control_profile") != "skulk.calls/1":
+                raise ValueError("selected call interpretation is unavailable")
+            # A control/authority transition requires its own qualified migration;
+            # equal schema labels cannot silently relabel retained application state.
+            return (
+                "native-calls",
+                *identity[1:],
+                digest.validate_python(kernel["composition"], strict=True),
+                digest.validate_python(kernel["calls"], strict=True),
+            )
+        return identity
+    raise ValueError("selected contract profile is unavailable")
+
+
+def _retained_contract_identity(
+    root: Path, selected: RuntimeSelection
+) -> tuple[str, ...]:
+    """Read retained interpretation without reviving an old publisher's authority.
+
+    An upgrade away from revoked code must stay possible. The protected selection
+    binds the old bytes by digest; this read executes nothing and grants nothing.
+    """
+    metadata = _JSON_OBJECT.validate_json(
+        read_private(
+            root / "generations" / selected.runtime_digest / "staged.json",
+            MAX_RUNTIME_METADATA_BYTES,
+        )
+    )
+    payload = _JSON_OBJECT.validate_python(metadata["runtime"], strict=True)
+    identity = _contract_identity(payload)
+    if identity[0] == "native-calls":
+        prefix = b"skulk.runtime/4\0"
+    elif identity[0] == "native":
+        prefix = b"skulk.runtime/3\0"
+    else:
+        prefix = b""
+    if (
+        hashlib.sha256(prefix + canonical_json(payload)).hexdigest()
+        != selected.runtime_digest
+    ):
+        raise ValueError("selected contract metadata differs")
+    return identity
 
 
 CARRYING_PROTOCOL = 3
@@ -414,7 +476,11 @@ class RuntimeSelector:
             raise
 
     def _start(
-        self, selection: RuntimeSelection, expected_revision: int, *, verify_runtime: bool = False
+        self,
+        selection: RuntimeSelection,
+        expected_revision: int,
+        *,
+        verify_runtime: bool = False,
     ) -> SelectionOperation:
         if self.pending.exists():
             raise ValueError("pending selection requires recovery")
@@ -456,10 +522,17 @@ class RuntimeSelector:
         current = self.current()
         release = runtime.claims.release
         manifest = _manifest(runtime)
-        schema = manifest.get("configuration_schema")
+        schema = runtime.configuration_schema
         if current is not None:
             if current.bundle_id != release.manifest.bundle_id:
                 raise ValueError("installation bundle identity differs")
+            if _retained_contract_identity(self.root, current) != _contract_identity(
+                _JSON_OBJECT.validate_json(runtime.payload)
+            ):
+                # State/schema labels cannot silently move settings or grants
+                # between different author-validation semantics. A separately
+                # qualified profile migration must own that transition.
+                raise ValueError("contract profile change requires explicit migration")
             if release.sequence < current.highest_sequence and not rollback:
                 raise ValueError("rollback requires explicit selection")
             if (
@@ -565,7 +638,9 @@ class RuntimeSelector:
                 )
                 # Stopped selection still introduces a verified runtime. Its
                 # recovery must not use disable's invalid-trust escape path.
-                return self._start(selection, expected_revision, verify_runtime=not enabled)
+                return self._start(
+                    selection, expected_revision, verify_runtime=not enabled
+                )
             finally:
                 owner.close()
 
@@ -591,8 +666,10 @@ class RuntimeSelector:
         revision = current.revision if current is not None else 0
         if revision != expected_revision:
             raise ValueError("selection revision conflict")
-        if pending is not None and current != pending.selection and (
-            revision != pending.expected_revision
+        if (
+            pending is not None
+            and current != pending.selection
+            and (revision != pending.expected_revision)
         ):
             raise ValueError("pending selection revision differs")
         if (
@@ -631,7 +708,9 @@ class RuntimeSelector:
         An uninstall uses this same retained-state withdrawal in v1.
         """
         identifier = operation_id or uuid4().hex
-        if len(identifier) != 32 or any(c not in "0123456789abcdef" for c in identifier):
+        if len(identifier) != 32 or any(
+            c not in "0123456789abcdef" for c in identifier
+        ):
             raise ValueError("invalid selection operation ID")
         installer = RuntimeLock(self.installer.installer)
         try:

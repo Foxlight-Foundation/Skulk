@@ -13,6 +13,7 @@ from skulk.extensions.managed_services import (
     ManagedInventory,
     ManagedServices,
 )
+from skulk.extensions.native_contracts import NativeDescriptor
 from skulk.extensions.runtime_manager import InstalledContractRequest, InventoryRequest
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -60,11 +61,12 @@ class InstalledContract(FrozenModel):
         pattern=r"^[a-f0-9]{64}$",
         description="Selected staged generation at read time.",
     )
-    descriptor: CapabilityDescriptor = Field(
+    descriptor: CapabilityDescriptor | NativeDescriptor = Field(
         description="Full declared purpose, version, operation schemas and media contract."
     )
     revision: str = Field(
-        pattern=r"^[a-f0-9]{16}$", description="Exact observed descriptor digest."
+        pattern=r"^(?:[a-f0-9]{16}|[a-f0-9]{64})$",
+        description="Exact legacy or full native descriptor digest.",
     )
 
 
