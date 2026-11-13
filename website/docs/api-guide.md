@@ -6911,3 +6911,71 @@ process boundary is not an OS sandbox against malicious installed code. It does
 not admit governed/write operations, inference routing, native streaming,
 remote Fabric calls or paired-client native grants. Native context parsing alone
 never authenticates a caller or authorizes a delegation.
+
+### Native inference caller access
+
+The native inference adapter explicitly selects signed runtime envelope 5,
+release envelope 3, `skulk.calls/2` and `skulk.composition/3`. It keeps original
+caller authentication separate from publisher trust, application readiness and
+provider accounts. Existing read, operator and chat endpoints retain their own
+authentication and invocation contracts.
+
+Owners manage access using the direct dashboard authority described above.
+Management bodies are authenticated before parsing, limited to 128 KiB and have
+a ten-second upload deadline. Responses use `Cache-Control: no-store`.
+
+| Method and path | Parameters and behavior |
+| --- | --- |
+| `GET /v1/inference-access/clients` | Return `revision` and enrolled client metadata: server-issued `identifier`, owner `label` and optional `expires_unix_ms`. No bearer, bearer digest or digest seed is returned. Unavailable custody returns 503. |
+| `POST /v1/inference-access/clients` | JSON containing `expected_revision`, `label` (1–128 characters), and optional future `expires_unix_ms` (integer Unix milliseconds; omission/null adds no scheduled expiry). Return 201 with `client`, new `revision` and a standard bearer `token`, disclosed once. The new client has no execution permission. Stale revisions, expired requests or unavailable enrollment return 409. At most 256 active credentials are retained. |
+| `DELETE /v1/inference-access/clients/{identifier}` | JSON body containing `expected_revision`. Remove that exact credential lifetime and return the new inventory. Stale revisions or unknown clients return 409. Revocation shares the owner's physical dispatch fence and cancels active caller work through bounded authority observation. |
+| `GET /v1/inference-access/policy` | Return `protocol: 1`, `revision`, `enabled` and `callers`. An absent policy is disabled with no callers and a zero revision. Provider login and legacy read enrollment do not enable it. |
+| `PUT /v1/inference-access/policy` | JSON containing `expected_revision`, `enabled`, and up to 64 `callers`. Each entry contains `principal: {identifier, kind, issuer_node_id}`, exact `grants`, and optional positive `maximum_seconds`; null adds no owner duration ceiling. A grant contains `plugin_id`, signed `runtime_digest`, persisted child `node_id`, `capability_id`, `version`, full `descriptor_revision`, `behavior` (`read` or `inference`), `processing_domain` (`local`, `private_site`, `external`) and signed `io_mode`. At most 64 grants are retained across the policy. Enabling verifies current credentials and exact selected signed declarations, including persisted child identity, independently of readiness. Disabling may retain stale entries for inspection. Stale, mismatched or unavailable enrollment returns 409. |
+
+The direct owner's principal is `{identifier: "direct-owner", kind: "operator",
+issuer_node_id: <serving Core identity>}`. An enrolled client's identifier is
+`client:<server-issued identifier>` with kind `client` and that same authenticating
+Core issuer. Neither is read from prompts, custom caller headers or provider
+account claims. Client creation and permission enrollment are separate changes.
+Changing a signed runtime or descriptor requires an explicit new enrollment.
+
+### Exact native inference invocation
+
+Invocation accepts an authenticated direct owner or an enrolled
+`Authorization: Bearer <token>` client. Bearers require a direct HTTPS connection,
+an actual loopback socket, or a verified Tailscale peer. Forwarding headers,
+duplicated/invalid credentials and operator-relay ingress are refused. Invalid
+credentials never fall back to direct owner authority. A client cannot administer
+enrollment, and owner access does not inherit another client's permissions.
+
+| Method and path | Parameters and behavior |
+| --- | --- |
+| `GET /v1/native-inference` | Observe exact signed, selected, ready unary inference/read destinations and their current child incarnations. Owners may inspect all declarations for enrollment; clients see only their permitted destinations. A listing includes the full descriptor, target, signed runtime and optional signed `inference_seconds` ceiling. Discovery uses shared bounded host admission; unavailable owners supply no executable capacity and discovery grants no permission. |
+| `POST /v1/native-inference/{plugin_id}/{capability_id}/{version}/call` | Send the exact JSON object as raw `application/json`. The path selects an exact implementation. Optional positive finite `timeout_seconds` adds a request duration ceiling; omission adds none. Intersect request, current credential, per-caller owner and signed application ceilings. Return the application's JSON object. Both Core and owner verify original caller, effect, domain, runtime, descriptor, mode, request bytes and active parent bindings. This adapter admits unary `read`/`inference`, including authorized delegation between installed applications. It does not select a model or implement a router. |
+
+Input and output retain the 16 MiB per-frame resource bound. Uploads have an
+independent ten-second deadline. Resource, health and partial-I/O bounds do not
+become generation timeouts or request allowances. Unsupported modes and governed
+effects are not advertised by this adapter. Streaming declarations remain inert
+until their own serving path is admitted.
+
+The owner rechecks current permission and credential lifetime under the shared
+policy lock immediately before writing to the application. Active work observes
+authority changes every 250 milliseconds and is cancelled on withdrawal. Child
+incarnations and selected destinations are revalidated independently of the
+permission snapshot: an unrelated offline application cannot remove a lawful
+permission or redirect work. A read executor cannot delegate inference even if
+its original caller has broader rights.
+
+Content-type refusal returns 415; oversized input or management bodies return
+413; upload expiry returns 408; malformed typed parameters return 422. Invalid
+client credentials return 401, and unsafe transport or owner-only access returns
+403. Unavailable/uncertain execution returns 503 with an explicit no-replay
+message. HTTP disconnect cancels and drains active work. No host retry is made;
+revocation or a lost reply cannot prove that earlier execution never occurred.
+
+Credential and permission files belong to the Core manager, outside capability
+backups. Restoring application state cannot recreate a revoked client. Native
+profile changes also require a separate qualified state migration even when
+application schema labels match. This same-account process boundary does not
+claim an OS sandbox against malicious installed code.

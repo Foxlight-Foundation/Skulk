@@ -1180,14 +1180,40 @@ Runtime envelope 4 independently selects `control_profile: "skulk.calls/1"`,
 public kernel 0.6.0rc1, and all six portable/managed/handshake/transport/composition/
 calls fingerprints. Its signature and generation digest use `skulk.runtime/4\0`.
 The installed reader also round-trips the compiled call codec. The bounded
-migration window accepts envelopes 2, 3 and 4; old envelopes retain their exact
+migration window accepts envelopes 2, 3, 4 and 5; old envelopes retain their exact
 0.4 binary closure and signing bytes. A compatible host reader cannot replace
 an issued generation's pinned binary. Ordinary selection refuses changes between
 legacy, native transport and native calls interpretations, even when state/schema
 labels match. Such changes require explicit qualified state migration. Call-format
 startup alone does not advertise native invocation or delegation capacity.
-The PyInstaller native hook includes both cohort receipts and the selected
+The PyInstaller native hook includes all three cohort receipts and the selected
 reader metadata/licenses, refusing a missing receipt during the build.
+
+Runtime envelope 5 and release envelope 3 independently select the published
+0.7.0rc3 inference cohort: portable2/managed2/handshake2/transport2/composition3/
+calls2. Their signature/digest domains are `skulk.runtime/5\0` and
+`skulk.release/3\0`. Staging validates the installed binary's complete thirteen
+profile inventory, exact manifest identity and calls2 framing. Native inference
+registration retains full descriptor identities; it does not imply readiness.
+Old issued runtime closures and signing bytes remain unchanged. Selection also
+fences transitions into this interpretation, regardless of equal state labels.
+The frozen reader carries all three cohort receipts.
+
+`inference_callers.py` owns original client authentication and credential custody;
+`inference_enrollment.py` verifies exact signed, persisted destinations without
+requiring readiness. `/v1/inference-access` supplies direct-owner revision-fenced
+client/policy management. Credentials alone grant no effects, and provider login
+never grants host permission. `native_inference_calls.py` and
+`native_inference_hosts.py` serve `/v1/native-inference`: exact unary read/inference
+calls and delegated calls over the existing role-authenticated owner channel.
+The owner independently checks current original-caller/effect/domain/runtime/mode
+permission under the shared policy lock at the physical write; bounded authority
+observation cancels active withdrawn work. Permission snapshots do not depend on
+unrelated readiness. Native nullable caller, request and owner ceilings intersect
+without a hidden generation deadline. Cancellation/uncertainty never permits
+host replay. Governed effects, native streaming and remote Fabric execution are
+not admitted by this adapter. Core holds no provider account/session or router
+policy, and restoring capability state cannot restore Core client credentials.
 
 Generic signed runtime verification and staging use `extensions/runtime_artifacts.py`,
 `runtime_files.py` and `runtime_install.py`. Provider manifest policy stays opaque;

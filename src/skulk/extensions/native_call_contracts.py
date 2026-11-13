@@ -144,6 +144,8 @@ def public_call_kernel() -> CallKernel:
         version = importlib.metadata.version("skulk-capability-kernel")
     except importlib.metadata.PackageNotFoundError:
         raise ValueError("qualified native call reader is unavailable") from None
-    if version != CALL_KERNEL_VERSION:
+    from .native_inference_contracts import INFERENCE_KERNEL_VERSION
+
+    if version not in (CALL_KERNEL_VERSION, INFERENCE_KERNEL_VERSION):
         raise ValueError("qualified native call reader is unavailable")
     return cast(CallKernel, public_native_kernel())

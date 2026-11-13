@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from skulk.extensions.managed_limits import MAX_MANAGED_DESCRIPTORS
 from skulk.extensions.native_contracts import NativeDescriptor
+from skulk.extensions.native_inference_contracts import InferenceDescriptor
 
 CapabilityIoMode = Literal[
     "unary", "server_streaming", "client_streaming", "bidirectional"
@@ -179,7 +180,9 @@ class CapabilityDescriptor(BaseModel):
         return f"{self.id}@{self.version}"
 
 
-def descriptor_revision(descriptor: CapabilityDescriptor | NativeDescriptor) -> str:
+def descriptor_revision(
+    descriptor: CapabilityDescriptor | NativeDescriptor | InferenceDescriptor,
+) -> str:
     """Content digest of a descriptor, detecting any drift in its shape.
 
     Calls carry this revision alongside ``id@version`` so discovery and
@@ -195,7 +198,7 @@ def descriptor_revision(descriptor: CapabilityDescriptor | NativeDescriptor) -> 
         The legacy sixteen-character canonical SHA-256 digest, or the full
         domain-separated native descriptor identity for an explicit native view.
     """
-    if isinstance(descriptor, NativeDescriptor):
+    if isinstance(descriptor, (NativeDescriptor, InferenceDescriptor)):
         return descriptor.revision
     canonical = json.dumps(
         descriptor.model_dump(mode="json"),

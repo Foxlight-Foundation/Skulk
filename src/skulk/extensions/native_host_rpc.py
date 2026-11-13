@@ -15,6 +15,7 @@ from pydantic import JsonValue
 from .native_host_protocol import (
     AuthenticatedStream,
     CancelFrame,
+    Operation,
     Received,
     RequestFrame,
     ResponseFrame,
@@ -63,7 +64,7 @@ class Peer:
 
     async def request(
         self,
-        operation: Literal["describe", "invoke", "delegate"],
+        operation: Operation,
         parameters: dict[str, JsonValue],
         payload: bytes = b"",
         *,

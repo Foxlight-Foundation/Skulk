@@ -107,6 +107,15 @@ prepared Core test sources do not qualify this path. The receipt covers the
 measured platform and exact build, not full node bootstrap, live invocation,
 real application-state migration or a packaged application.
 
+`scripts/qualify_native_inference.py --help` exercises two independently signed
+runtime5 applications through the real Core TCP routers and normal manager,
+installer, owner and author processes. It covers original enrolled-client
+identity, exact effect/domain permissions, delegation, active revocation,
+uncapped generation with independent health, and complete resource cleanup.
+Use fresh disposable fixture/manager paths and the full frozen environment.
+This gate does not qualify provider accounts, streaming, distributed execution
+or a real application's protected-state migration.
+
 ## Project Structure
 
 Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard), and the codebase is actively evolving.

@@ -18,7 +18,11 @@ def native_contract_data_files() -> list[tuple[str, str]]:
     fail the build instead of producing a frozen reader that fails admission.
     """
     root = Path(__file__).parents[1] / "extensions"
-    cohorts = (root / "native-cohort.json", root / "native-call-cohort.json")
+    cohorts = (
+        root / "native-cohort.json",
+        root / "native-call-cohort.json",
+        root / "native-inference-cohort.json",
+    )
     if not all(cohort.is_file() for cohort in cohorts):
         raise FileNotFoundError("native contract cohort resource is missing")
     package = distribution("skulk-capability-kernel")
