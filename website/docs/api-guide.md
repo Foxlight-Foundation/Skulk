@@ -6979,3 +6979,10 @@ backups. Restoring application state cannot recreate a revoked client. Native
 profile changes also require a separate qualified state migration even when
 application schema labels match. This same-account process boundary does not
 claim an OS sandbox against malicious installed code.
+
+Inference `principal.issuer_node_id` names the durable authenticating manager as
+`core-profile:<profile_id>`, independently of the current Core transport ID.
+Normal same-profile Core restart/reattachment preserves existing enrollments
+and revocations. The current serving transport is checked separately before
+credential access and dispatch; a stale attachment or foreign profile refuses.
+Credential and policy records use their explicit 128 KiB storage bound.

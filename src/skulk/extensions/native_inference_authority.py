@@ -7,6 +7,7 @@ owner transport proof nor discovery supplies an entry in this policy.
 
 import hashlib
 import json
+import re
 from typing import Annotated, Literal, Self, final
 
 from pydantic import (
@@ -20,6 +21,18 @@ from pydantic import (
 
 Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9._:@-]{1,128}$")]
+MAXIMUM_AUTHORITY_BYTES = 131072
+
+
+def inference_issuer(profile_id: str) -> str:
+    """Identify the durable authenticating manager independently of transport lifetimes.
+
+    This namespace is not a credential. The actual current Core/owner role
+    connection still binds the serving transport, runtime and process lifetime.
+    """
+    if re.fullmatch(r"[a-f0-9]{32}", profile_id) is None:
+        raise ValueError("inference authority profile differs")
+    return "core-profile:" + profile_id
 
 
 class _Contract(BaseModel):
@@ -37,14 +50,15 @@ class InferencePrincipal(_Contract):
         description="Authenticated caller category."
     )
     issuer_node_id: Identifier = Field(
-        description="Actual authenticating Core identity."
+        description=(
+            "Stable authenticating manager-profile namespace; "
+            "independent of transport lifetimes."
+        )
     )
 
     @model_validator(mode="after")
     def supported_identity(self) -> Self:
         """Keep the direct owner and enrolled clients in disjoint namespaces."""
-        import re
-
         if self.kind == "operator":
             if self.identifier != "direct-owner":
                 raise ValueError("unqualified inference operator identity")
@@ -145,7 +159,7 @@ class InferenceAccessPolicy(_Contract):
             raise ValueError("duplicate inference caller")
         if (
             sum(len(c.grants) for c in self.callers) > 64
-            or len(self.model_dump_json().encode()) > 131072
+            or len(self.model_dump_json().encode()) > MAXIMUM_AUTHORITY_BYTES
         ):
             raise ValueError("inference policy exceeds bound")
         return self
@@ -203,7 +217,7 @@ class InferenceCredentialState(_Contract):
         """Refuse ambiguous identity or an unreadable protected record."""
         if len({c.identifier for c in self.clients}) != len(self.clients):
             raise ValueError("duplicate inference client")
-        if len(self.model_dump_json().encode()) > 131072:
+        if len(self.model_dump_json().encode()) > MAXIMUM_AUTHORITY_BYTES:
             raise ValueError("inference credential store exceeds bound")
         return self
 

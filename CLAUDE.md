@@ -2706,3 +2706,10 @@ or events. Cancellation and unknown outcomes never authorize automatic replay.
 Controlled retirement preserves the genuine failure budget. Same-account code is
 trusted, not OS-sandboxed. This gate does not qualify remote Fabric, individual
 clients, native streaming, governed effects or inference routing.
+
+Inference caller authority uses the stable `core-profile:<profile_id>` issuer
+namespace. The current transport and owner-process lifetime are authenticated
+separately. Normal journaled Core reattachment preserves enrolled bearers,
+credential lifetimes, revocations and exact grants; stale transport attachments
+still refuse. Authority records share an explicit 128 KiB protected-storage
+bound, independent of author wire-frame limits.

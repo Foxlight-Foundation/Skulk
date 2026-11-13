@@ -39,14 +39,21 @@ from skulk.extensions.native_host_protocol import (
     admit_owner,
 )
 from skulk.extensions.native_host_rpc import Peer, Reply
-from skulk.extensions.native_inference_authority import InferenceAccessPolicy
+from skulk.extensions.native_inference_authority import (
+    InferenceAccessPolicy,
+    inference_issuer,
+)
 from skulk.extensions.native_inference_hosts import InferenceListing
 from skulk.extensions.runtime_artifacts import (
     RuntimeTrust,
     measure_host,
     verify_runtime,
 )
-from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
+from skulk.extensions.runtime_attachment import (
+    AttachmentRequest,
+    HostSettings,
+    ServiceConnection,
+)
 from skulk.extensions.runtime_controller import LifecycleRequest
 from skulk.extensions.runtime_files import (
     RuntimeLock,
@@ -462,7 +469,9 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
                                 "principal": {
                                     "identifier": identifier,
                                     "kind": "client",
-                                    "issuer_node_id": binding.transport_node_id,
+                                    "issuer_node_id": inference_issuer(
+                                        binding.profile_id
+                                    ),
                                 },
                                 "grants": [
                                     value.grant().model_dump(mode="json")
@@ -533,7 +542,7 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
                     and context["caller_kind"] == "client"
                 )
                 assert (
-                    context["issuer_node_id"] == binding.transport_node_id
+                    context["issuer_node_id"] == inference_issuer(binding.profile_id)
                     and context["deadline_unix_ms"] is None
                 )
                 assert _counter(child_roots["receiver"]) == 1
@@ -741,6 +750,16 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
                     "disabled-native-inference-withdraws-capacity",
                 ]
             )
+            stopped.set()
+            await server
+            server = None
+            await _reattach_http(manager, work, replacement, credential.token)
+            checks.extend(
+                [
+                    "normal-transport-renewal-retains-enrolled-http-client-and-policy",
+                    "http-client-management-and-revocation-survive-core-api-restart",
+                ]
+            )
     finally:
         stopped.set()
         try:
@@ -782,6 +801,113 @@ def _counter(root: Path) -> int:
         return int(read_private(root / "qualification-effects", 32))
     except FileNotFoundError:
         return 0
+
+
+async def _reattach_http(
+    manager: RuntimeManager, work: Path, kept: ClientCreated, revoked_token: str
+) -> None:
+    """Renew through the normal manager and authenticate over a fresh real HTTP server."""
+    previous = manager.settings
+    assert previous.profile_id is not None
+    credentials = read_private(work / "inference-clients.json")
+    policy = read_private(work / "native-inference-policy.json")
+    transport = "native-inference-restarted"
+    fence = RuntimeLock(work, "attachment.lock")
+    try:
+        await manager.dispatch(
+            AttachmentRequest(
+                profile_id=previous.profile_id,
+                transport_node_id=transport,
+                skulk_build_sha256=measure_host().skulk_build_sha256,
+            )
+        )
+    finally:
+        fence.close()
+    assert manager.settings.transport_node_id == transport
+    assert read_private(work / "inference-clients.json") == credentials
+    assert read_private(work / "native-inference-policy.json") == policy
+    app = FastAPI()
+    app.include_router(
+        create_inference_access_router(
+            NodeId(transport), connection_path=work / "connection.json"
+        )
+    )
+    app.include_router(
+        create_native_inference_router(
+            NodeId(transport), connection_path=work / "connection.json"
+        )
+    )
+    network = socket.socket()
+    network.bind(("127.0.0.1", 0))
+    port = TypeAdapter(tuple[str, int]).validate_python(
+        cast(object, network.getsockname()), strict=True
+    )[1]
+    config = Config()
+    config.bind = [f"fd://{network.fileno()}"]
+    config.accesslog = None
+    config.errorlog = None
+    network.detach()
+    stopped = asyncio.Event()
+    server = asyncio.create_task(_serve_http(app, config, stopped))
+    try:
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{port}",
+            timeout=10,
+            headers={
+                "x-skulk-dashboard": "pairing-v1",
+                "origin": f"http://127.0.0.1:{port}",
+            },
+        ) as client:
+            async with asyncio.timeout(30):
+                while True:
+                    try:
+                        inventory = await client.get("/v1/inference-access/clients")
+                        if inventory.status_code == 200:
+                            break
+                    except httpx.ConnectError:
+                        pass
+                    await asyncio.sleep(0.01)
+            current = ClientInventory.model_validate_json(inventory.content)
+            assert kept.client.identifier in {
+                item.identifier for item in current.clients
+            }
+            headers = {"authorization": "Bearer " + kept.token}
+            assert (
+                await client.get("/v1/native-inference", headers=headers)
+            ).status_code == 200
+            assert (
+                await client.get(
+                    "/v1/native-inference",
+                    headers={"authorization": "Bearer " + revoked_token},
+                )
+            ).status_code == 401
+            response = await client.post(
+                "/v1/inference-access/clients",
+                json={
+                    "expected_revision": current.revision,
+                    "label": "After transport renewal",
+                },
+            )
+            assert response.status_code == 201
+            added = ClientCreated.model_validate_json(response.content)
+            response = await client.request(
+                "DELETE",
+                "/v1/inference-access/clients/" + added.client.identifier,
+                json={"expected_revision": added.revision},
+            )
+            assert response.status_code == 200
+            assert (
+                await client.get(
+                    "/v1/native-inference",
+                    headers={"authorization": "Bearer " + added.token},
+                )
+            ).status_code == 401
+            assert (
+                await client.get("/v1/native-inference", headers=headers)
+            ).status_code == 200
+    finally:
+        stopped.set()
+        await server
 
 
 def main() -> None:

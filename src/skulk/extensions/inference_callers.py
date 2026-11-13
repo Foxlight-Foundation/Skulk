@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.extensions.caller_identity import AuthenticatedOwner
 from skulk.extensions.native_inference_authority import (
+    MAXIMUM_AUTHORITY_BYTES,
     InferenceAccessPolicy,
     InferenceCredential,
     InferenceCredentialState,
@@ -25,6 +26,7 @@ from skulk.extensions.native_inference_authority import (
     InferencePrincipal,
     PrincipalAccess,
     inference_access,
+    inference_issuer,
     inference_revision,
 )
 from skulk.extensions.runtime_attachment import HostSettings
@@ -87,7 +89,7 @@ class InferenceCallers:
         self,
         root: Path,
         profile_id: str,
-        issuer_node_id: str,
+        transport_node_id: str,
         *,
         unix_ms: Callable[[], int] = lambda: time.time_ns() // 1_000_000,
     ) -> None:
@@ -96,11 +98,12 @@ class InferenceCallers:
         No request may select this directory, issuer or profile. The Core
         manager owns it; capability backup/restore never replaces these files.
         """
-        self.root, self.profile_id, self.issuer_node_id = (
+        self.root, self.profile_id, self.transport_node_id = (
             root,
             profile_id,
-            issuer_node_id,
+            transport_node_id,
         )
+        self.issuer_node_id = inference_issuer(profile_id)
         self.unix_ms = unix_ms
 
     def check(self) -> None:
@@ -108,7 +111,7 @@ class InferenceCallers:
         actual = HostSettings.model_validate_json(read_private(self.root / "host.json"))
         if (
             actual.profile_id != self.profile_id
-            or actual.transport_node_id != self.issuer_node_id
+            or actual.transport_node_id != self.transport_node_id
         ):
             raise ValueError("inference authority attachment differs")
 
@@ -117,7 +120,9 @@ class InferenceCallers:
         self.check()
         try:
             state = InferenceCredentialState.model_validate_json(
-                read_private(self.root / "inference-clients.json")
+                read_private(
+                    self.root / "inference-clients.json", MAXIMUM_AUTHORITY_BYTES
+                )
             )
         except FileNotFoundError:
             return None
@@ -256,7 +261,7 @@ class InferenceCallers:
     def owner(self, owner: AuthenticatedOwner) -> AuthenticatedInferenceCaller:
         """Project an already authenticated direct owner without adding permission."""
         self.check()
-        if str(owner.issuer_node_id) != self.issuer_node_id:
+        if str(owner.issuer_node_id) != self.transport_node_id:
             raise ValueError("inference owner issuer differs")
         return AuthenticatedInferenceCaller(
             InferencePrincipal(
@@ -300,7 +305,9 @@ class InferenceCallers:
         self.check()
         try:
             return InferenceAccessPolicy.model_validate_json(
-                read_private(self.root / "native-inference-policy.json")
+                read_private(
+                    self.root / "native-inference-policy.json", MAXIMUM_AUTHORITY_BYTES
+                )
             )
         except FileNotFoundError:
             return InferenceAccessPolicy(revision=_ZERO, enabled=False, callers=())

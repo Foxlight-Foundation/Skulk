@@ -3983,3 +3983,10 @@ node's direct owner realm. Same-account installed code remains trusted code;
 this mechanism is not an OS sandbox. It establishes neither remote Fabric
 admission, individual-client identity, inference/model routing nor governed
 execution. Existing managed inference remains capability-owned.
+
+Inference caller authority uses the stable `core-profile:<profile_id>` issuer
+namespace. The current transport and owner-process lifetime are authenticated
+separately. Normal journaled Core reattachment preserves enrolled bearers,
+credential lifetimes, revocations and exact grants; stale transport attachments
+still refuse. Authority records share an explicit 128 KiB protected-storage
+bound, independent of author wire-frame limits.

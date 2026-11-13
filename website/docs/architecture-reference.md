@@ -2661,3 +2661,10 @@ recovery remains a separate contract and test obligation.
   Separate gates remain for remote Fabric, paired-client native grants,
   streaming, governed effects and inference/router composition. No OS sandbox is
   claimed. Issued native/legacy profile and signature meanings remain unchanged.
+
+Inference caller authority uses the stable `core-profile:<profile_id>` issuer
+namespace. The current transport and owner-process lifetime are authenticated
+separately. Normal journaled Core reattachment preserves enrolled bearers,
+credential lifetimes, revocations and exact grants; stale transport attachments
+still refuse. Authority records share an explicit 128 KiB protected-storage
+bound, independent of author wire-frame limits.

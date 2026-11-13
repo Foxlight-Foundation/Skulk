@@ -12,7 +12,11 @@ from skulk.extensions.native_inference_authority import (
     InferenceGrant,
     PrincipalAccess,
 )
-from skulk.extensions.runtime_attachment import HostSettings
+from skulk.extensions.runtime_attachment import (
+    AttachmentJournal,
+    HostSettings,
+    finish_attachment,
+)
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
 from skulk.shared.types.common import NodeId
 
@@ -57,7 +61,7 @@ def test_new_credential_identifies_but_does_not_authorize(
     caller = callers.authenticate(token)
     assert caller.principal.identifier == f"client:{client.identifier}"
     assert caller.principal.kind == "client"
-    assert caller.principal.issuer_node_id == "inference-core"
+    assert caller.principal.issuer_node_id == "core-profile:" + callers.profile_id
     assert callers.current(caller) is None
     assert not callers.policy().enabled
     with pytest.raises(ValueError, match="not enrolled"):
@@ -117,7 +121,10 @@ def test_client_expiry_is_optional_and_checked_after_queueing(
     caller = callers.authenticate(token)
     assert callers.current(caller) == 1100
     future = InferenceCallers(
-        callers.root, callers.profile_id, callers.issuer_node_id, unix_ms=lambda: 1100
+        callers.root,
+        callers.profile_id,
+        callers.transport_node_id,
+        unix_ms=lambda: 1100,
     )
     with pytest.raises(ValueError, match="expired"):
         future.current(caller)
@@ -162,7 +169,7 @@ def test_custody_substitution_is_refused(
             profile_id="d" * 32 if fault == "profile" else callers.profile_id,
             transport_node_id="another-core"
             if fault == "issuer"
-            else callers.issuer_node_id,
+            else callers.transport_node_id,
         )
         write_private(callers.root / "host.json", host.model_dump_json().encode())
     elif fault == "symlink":
@@ -203,7 +210,7 @@ def test_permissions_bind_caller_effect_domain_runtime_mode_and_policy_revision(
     ):
         with pytest.raises(ValueError):
             callers.authorize(caller, changed)
-    owner = callers.owner(AuthenticatedOwner(NodeId(callers.issuer_node_id)))
+    owner = callers.owner(AuthenticatedOwner(NodeId(callers.transport_node_id)))
     with pytest.raises(ValueError):
         callers.authorize(owner, destination)
     changed_policy = InferenceAccessPolicy(
@@ -247,3 +254,66 @@ def test_credential_capacity_refuses_without_mutating_custody(
         callers.authenticate(token).principal.identifier
         == f"client:{client.identifier}"
     )
+
+
+def test_normal_transport_renewal_preserves_credentials_grants_and_revocation(
+    callers: InferenceCallers,
+) -> None:
+    """A journaled restart changes the live role binding, not the durable caller realm."""
+    kept, token = callers.create(callers.inventory().revision, "Kept", None)
+    revoked, old_token = callers.create(callers.inventory().revision, "Revoked", None)
+    callers.revoke(callers.inventory().revision, revoked.identifier)
+    original = callers.authenticate(token)
+    destination = grant()
+    policy = InferenceAccessPolicy(
+        revision="c" * 64,
+        enabled=True,
+        callers=(PrincipalAccess(principal=original.principal, grants=(destination,)),),
+    )
+    write_private(
+        callers.root / "native-inference-policy.json", policy.model_dump_json().encode()
+    )
+    authorization = callers.authorize(original, destination)
+    before = read_private(callers.root / "inference-clients.json")
+    previous = HostSettings.model_validate_json(
+        read_private(callers.root / "host.json")
+    )
+    current = HostSettings(
+        profile_id=callers.profile_id, transport_node_id="restarted-core"
+    )
+    lock = RuntimeLock(callers.root, "manager.lock")
+    try:
+        finish_attachment(
+            callers.root,
+            AttachmentJournal(
+                previous=previous, current=current, installations=(), state="pending"
+            ),
+        )
+    finally:
+        lock.close()
+    with pytest.raises(ValueError, match="attachment differs"):
+        callers.inventory()
+    restarted = InferenceCallers(
+        callers.root,
+        callers.profile_id,
+        current.transport_node_id,
+        unix_ms=lambda: 1000,
+    )
+    authenticated = restarted.authenticate(token)
+    assert authenticated == original
+    assert restarted.authorize(authenticated, destination) == authorization
+    assert read_private(callers.root / "inference-clients.json") == before
+    assert restarted.inventory().clients[0].identifier == kept.identifier
+    with pytest.raises(ValueError):
+        restarted.authenticate(old_token)
+    with pytest.raises(ValueError, match="owner issuer differs"):
+        restarted.owner(AuthenticatedOwner(NodeId(previous.transport_node_id)))
+    assert (
+        restarted.owner(
+            AuthenticatedOwner(NodeId(current.transport_node_id))
+        ).principal.issuer_node_id
+        == original.principal.issuer_node_id
+    )
+    added, _ = restarted.create(restarted.inventory().revision, "After restart", None)
+    restarted.revoke(restarted.inventory().revision, added.identifier)
+    assert restarted.authenticate(token) == original
