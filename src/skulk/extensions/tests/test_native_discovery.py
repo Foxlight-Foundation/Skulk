@@ -291,3 +291,28 @@ async def test_malformed_owner_reply_cannot_withdraw_a_healthy_owner(
     ):
         assert await calls.directory() == (healthy.listing,)
         assert "describe" in broken.events
+
+
+@pytest.mark.parametrize("stall", ["handshake", "describe"])
+async def test_overlapping_scans_cannot_fill_slots_with_duplicate_owner_waiters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stall: Literal["handshake", "describe"],
+) -> None:
+    """Twenty scans preserve a healthy owner under the real 64-slot probe bound."""
+    async with broker(tmp_path) as calls, AsyncExitStack() as stack:
+        unavailable = [
+            await stack.enter_async_context(
+                owner(calls, f"managed.aaa-{n}", monkeypatch, stall=stall)
+            )
+            for n in range(4)
+        ]
+        healthy = await stack.enter_async_context(
+            owner(calls, "managed.zzz-healthy", monkeypatch)
+        )
+        results = await asyncio.gather(*(calls.directory() for _ in range(20)))
+        assert all(result == (healthy.listing,) for result in results)
+        assert all("connected" in value.events for value in unavailable)
+        assert healthy.events.count("connected") == 1
+        assert healthy.events.count("describe") == 20
+        assert calls.budget.used == 0

@@ -2659,6 +2659,9 @@ probes run concurrently across the host under a3second directory observation
 deadline, followed by bounded RPC cleanup. Connections coalesce per installation;
 unresponsive owners do not serialize unrelated handshakes. Partial results retain
 installed-path order and never replace current dispatch policy/runtime checks.
+Per-owner probe admission runs before shared-slot acquisition: duplicate waiters
+cannot consume another owner's probe capacity. Each probe is caller-owned and
+fresh; no shared task or cached observation grants execution.
 
 Normal `RuntimeService` startup provisions a Core role key at the manager profile
 and a runtime/transport/lifetime-bound owner sidecar. The mirrored private

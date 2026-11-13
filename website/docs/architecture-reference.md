@@ -2625,6 +2625,8 @@ recovery remains a separate contract and test obligation.
   Discovery uses the shared512KiB envelope bound, per-installation coalesced
   connections and at most64 concurrent owner probes per host. Each directory
   has one3second observation deadline, then bounded RPC cancellation cleanup;
+  per-owner probe admission precedes shared slots, preventing duplicate waiters
+  from consuming other owners' capacity without caching observations or tasks.
   completed signed results preserve path order without stale-capacity caching.
 - `extensions/native_host_binding.py`: normal stopped-owner provisioning;
   profile signing key outside author startup, per-installation runtime/transport/

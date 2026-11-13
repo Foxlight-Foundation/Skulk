@@ -198,6 +198,7 @@ class NativeCalls:
         self.endpoints: dict[str, _Endpoint] = {}
         self.active: dict[tuple[Peer, str], _Active] = {}
         self._connect_locks: dict[str, tuple[asyncio.Lock, int]] = {}
+        self._probe_locks: dict[str, tuple[asyncio.Lock, int]] = {}
         self._directory_slots = asyncio.Semaphore(_MAX_INSTALLATIONS)
         self.closed = False
 
@@ -272,24 +273,26 @@ class NativeCalls:
             raise ValueError("native host lifetime changed")
 
     @asynccontextmanager
-    async def _connection_lock(self, plugin_id: str) -> AsyncIterator[None]:
-        """Serialize one owner's connection attempts without blocking other owners."""
-        lock, users = self._connect_locks.get(plugin_id, (asyncio.Lock(), 0))
-        if not users and len(self._connect_locks) >= _MAX_INSTALLATIONS:
-            raise ValueError("native connection capacity unavailable")
-        self._connect_locks[plugin_id] = (lock, users + 1)
+    async def _owner_lock(
+        self, locks: dict[str, tuple[asyncio.Lock, int]], plugin_id: str
+    ) -> AsyncIterator[None]:
+        """Serialize one owner's work without reserving another owner's capacity."""
+        lock, users = locks.get(plugin_id, (asyncio.Lock(), 0))
+        if not users and len(locks) >= _MAX_INSTALLATIONS:
+            raise ValueError("native owner lock capacity unavailable")
+        locks[plugin_id] = (lock, users + 1)
         try:
             async with lock:
                 yield
         finally:
-            _, users = self._connect_locks[plugin_id]
+            _, users = locks[plugin_id]
             if users == 1:
-                del self._connect_locks[plugin_id]
+                del locks[plugin_id]
             else:
-                self._connect_locks[plugin_id] = (lock, users - 1)
+                locks[plugin_id] = (lock, users - 1)
 
     async def _endpoint(self, binding: HostBinding) -> _Endpoint:
-        async with self._connection_lock(binding.plugin_id):
+        async with self._owner_lock(self._connect_locks, binding.plugin_id):
             existing = self.endpoints.get(binding.plugin_id)
             if existing is not None:
                 if existing.binding == binding and not existing.peer.stream.closed:
@@ -343,7 +346,12 @@ class NativeCalls:
 
         async def inspect(index: int, path: Path) -> None:
             try:
-                async with self._directory_slots:
+                # Duplicate scans wait before shared admission. Otherwise many
+                # waiters for stalled owners can occupy every host-wide slot.
+                async with (
+                    self._owner_lock(self._probe_locks, path.stem),
+                    self._directory_slots,
+                ):
                     results[index] = await self._discover(path)
             except (OSError, ValueError, TimeoutError):
                 # A failing owner contributes no executable capacity. Other

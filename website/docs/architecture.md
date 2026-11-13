@@ -3910,6 +3910,9 @@ observation deadline, with at most64 active probes shared by the host. Pending
 RPC cancellation is drained before returning partial results and may add up to
 three seconds. Per-installation connection locks coalesce only that owner's
 handshake; an unresponsive owner cannot serialize other owners' connections.
+Each installation admits one probe at a time before reserving shared capacity,
+so duplicate waiters cannot fill the host-wide slots. Each probe retains its
+scanning caller's cancellation ownership and obtains a fresh signed observation.
 Successfully verified results retain installed-path order, and no directory
 cache substitutes for current policy/runtime checks. Discovery reads signed
 envelopes using the normal installer's512KiB metadata bound.
