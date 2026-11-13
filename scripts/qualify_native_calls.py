@@ -56,6 +56,7 @@ from skulk.extensions.runtime_manager import (
     RuntimeManager,
     SubmitRequest,
 )
+from skulk.extensions.runtime_service import RuntimeServiceStatus
 from skulk.shared.types.common import NodeId
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -152,6 +153,36 @@ async def _observe(work: Path, role: str) -> dict[str, JsonValue]:
 
 
 async def _quiescent(
+    client: httpx.AsyncClient, work: Path
+) -> tuple[NativeListing, ...]:
+    try:
+        return await _wait_quiescent(client, work)
+    except TimeoutError:
+        # Keep a failed installed gate actionable without retaining author
+        # output, request bodies, role keys or protected application state.
+        statuses: dict[str, JsonValue] = {}
+        for role in ("caller", "receiver"):
+            try:
+                status = RuntimeServiceStatus.model_validate_json(
+                    read_private(
+                        work / "installations" / f"managed.native-{role}"
+                        / "service-status.json"
+                    )
+                )
+                statuses[role] = {
+                    "state": status.state,
+                    "error_code": status.error_code,
+                }
+            except (OSError, ValueError):
+                statuses[role] = "unavailable"
+        print(
+            json.dumps({"phase": "quiescence-timeout", "owners": statuses}),
+            flush=True,
+        )
+        raise
+
+
+async def _wait_quiescent(
     client: httpx.AsyncClient, work: Path
 ) -> tuple[NativeListing, ...]:
     async with asyncio.timeout(60):

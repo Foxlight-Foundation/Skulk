@@ -3922,6 +3922,10 @@ times out: at most one in-flight task per installation and64 across the host.
 Repeated scans may join only the same binding and exact metadata bytes. The
 installer fence remains held until the worker finishes; completed observations
 are never cached. Normal or cancelled host shutdown drains this owned work.
+Owner startup waits up to 30 seconds for the installer fence before verifying
+or executing a generation, so transient discovery contention does not count as
+another crashed owner lifetime. Selection and stop intent are rechecked before
+launch; an interrupted provider call is never replayed.
 
 Normal manager startup provisions a profile-owned Core signing key outside
 application startup data and a separate `core-host.json` attachment for each

@@ -2630,6 +2630,9 @@ recovery remains a separate contract and test obligation.
   one separately owned task per installation, at most64 per host, and its
   installer fence until actual completion; cancelled observers cannot spawn
   duplicate workers. Completed results are not cached; shutdown drains workers.
+  Owner startup waits up to30seconds for the installer fence before execution,
+  avoiding crash backoff for brief metadata contention; selection and stop
+  intent are rechecked before launch, without replaying interrupted calls.
   Completed signed results preserve path order without stale-capacity caching.
 - `extensions/native_host_binding.py`: normal stopped-owner provisioning;
   profile signing key outside author startup, per-installation runtime/transport/

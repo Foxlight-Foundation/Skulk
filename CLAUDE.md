@@ -2665,6 +2665,9 @@ Threaded metadata verification retains separate ownership after observer timeout
 with one in-flight task per installation and64 across the host. Only identical
 bindings/metadata join; installer fences remain held until the worker completes.
 Completed results are not cached. Normal or cancelled shutdown drains workers.
+Owner startup waits up to30seconds for installer ownership before verification
+or execution, so brief discovery contention does not consume crash backoff.
+Selection and stop intent are rechecked before launch; calls are never replayed.
 
 Normal `RuntimeService` startup provisions a Core role key at the manager profile
 and a runtime/transport/lifetime-bound owner sidecar. The mirrored private
