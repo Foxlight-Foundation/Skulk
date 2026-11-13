@@ -6875,3 +6875,39 @@ instance-constrained, Responses or Claude adapters.
 Rejected provider events or invalid function-call deltas abort the dashboard's
 active HTTP request so the provider cancellation path runs without waiting for
 further output.
+
+## Installed native capability reads
+
+These routes admit installed applications that explicitly select the public
+`skulk.calls/1` profile and have a compatible owner host bridge. They currently
+serve local unary reads. Discovery does not enroll an application or grant it
+execution authority. Existing managed inference and legacy plugin routes retain
+their separate contracts.
+
+Every route requires direct owner dashboard authentication: an actual loopback
+or verified Tailscale socket peer, `X-Skulk-Dashboard: pairing-v1`, and an `Origin`
+or `Referer` matching the request URL's scheme, hostname and port. Paired bearer
+credentials, relay ingress and forwarding headers are refused with 403. The
+original principal is this node's direct owner realm, rather than an individual
+human or an identity supplied in the request body.
+
+| Method and path | Parameters and behavior |
+| --- | --- |
+| `GET /v1/native-capabilities` | Return ready installed native unary read descriptors, their full descriptor revisions, signed runtime digests, actual child node IDs and current process incarnations. Each declaration must match its signed installed manifest and current publisher trust. Offline, disabled, old or changed owners offer no native executable capacity. An unavailable service returns 503. |
+| `GET /v1/native-capabilities/policy` | Return `protocol`, `revision`, `enabled` and `grants`. The initial policy is disabled, has no grants and uses a zero revision. An unavailable service returns 503. |
+| `PUT /v1/native-capabilities/policy` | JSON object containing `expected_revision`, `enabled` and a `grants` array of at most 64 exact enrollments. Each grant contains `plugin_id`, `runtime_digest`, `capability_id`, `version`, `descriptor_revision` and `processing_domain: "local"`. Enabling requires each grant to match a live signed unary read. Every successful update creates a new revision, fences queued contexts and cancels active work. A stale revision, conflicting update or unavailable enrollment returns 409. Disabling remains possible while applications are offline. |
+| `POST /v1/native-capabilities/{plugin_id}/{capability_id}/{version}/call` | Send an exact raw JSON object with `Content-Type: application/json`. Path parameters select one enrolled live implementation. Optional `timeout_seconds` defaults to 10 and must be greater than zero and at most 30; it covers admission, discovery and execution. Return the application's JSON object. Caller, policy, root and parent fields in user data or custom headers confer no authority. |
+
+Call input and output use the native profile's 16 MiB raw body bound. Concurrent
+byte/frame admission is a host resource bound, separate from request allowances
+or inference output settings. Content-type refusal returns 415, an oversized
+input returns 413 and invalid path/query/model parameters return 422. An
+unavailable or uncertain execution returns 503 with a no-replay message. Calls
+are never automatically retried. A lost reply cannot establish that execution
+never happened. HTTP disconnection cancels and drains the active call tree.
+
+The operator enrolls trusted signed code as a local read. This same-account
+process boundary is not an OS sandbox against malicious installed code. It does
+not admit governed/write operations, inference routing, native streaming,
+remote Fabric calls or paired-client native grants. Native context parsing alone
+never authenticates a caller or authorizes a delegation.

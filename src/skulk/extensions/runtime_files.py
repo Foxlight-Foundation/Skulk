@@ -147,6 +147,8 @@ class RuntimeLock:
             "attachment.lock",
             "setup.lock",
             "catalog.lock",
+            "native-policy.lock",
+            "native-host-key.lock",
         }:
             raise ValueError("unknown runtime lock")
         private_directory(root)

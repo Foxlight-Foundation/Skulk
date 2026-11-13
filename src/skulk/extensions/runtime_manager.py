@@ -81,6 +81,7 @@ from skulk.extensions.runtime_files import (
     is_desktop_metadata,
     private_directory,
     read_private,
+    remove_private,
     write_private,
 )
 from skulk.extensions.runtime_install import finish_runtime_work
@@ -1403,6 +1404,11 @@ class RuntimeManager:
                 # The directory goes before the manager forgets the installation:
                 # a removal that fails on disk leaves a closed, still-listed
                 # installation that the same purge can be asked for again.
+                # A purged installation must not retain an old host role seed
+                # or consume the native directory's bounded binding inventory.
+                binding = self.root / "native-host-bindings" / (identifier + ".json")
+                if binding.parent.exists():
+                    remove_private(binding)
                 await asyncio.to_thread(shutil.rmtree, root)
                 descriptor = os.open(self.installations, os.O_RDONLY | os.O_DIRECTORY)
                 try:

@@ -148,6 +148,7 @@ from skulk.api.music_jobs import (
     MusicJob,
     MusicJobRegistry,
 )
+from skulk.api.native_calls import create_native_calls_router
 from skulk.api.node_health import (
     compute_node_health,
     live_data_transports,
@@ -2231,6 +2232,7 @@ class API:
                 host_network=host_network_provider,
             )
         )
+        self.app.include_router(create_native_calls_router(self.node_id))
         if operator_pairing_service is not None:
             self.app.include_router(
                 create_operator_auth_router(

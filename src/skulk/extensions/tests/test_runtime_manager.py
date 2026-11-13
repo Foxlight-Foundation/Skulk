@@ -138,11 +138,14 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
         # Purge ends the retention of an uninstall and nothing else: a disabled
         # installation is refused unchanged, an uninstalled one leaves with its
         # directory, and a second purge finds nothing.
+        native_binding = tmp_path / "native-host-bindings" / (identifier + ".json")
+        write_private(native_binding, b"synthetic retired host attachment")
         purge = InstallationRequest(action="purge", plugin_id=identifier)
         reply = await manager_request(tmp_path, purge)
         if action == "uninstall":
             assert reply == {"result": {"plugin_id": identifier, "purged": True}}
             assert not (tmp_path / "installations" / identifier).exists()
+            assert not native_binding.exists()
             assert identifier not in manager.controllers
             assert identifier not in manager.downloads
             assert await manager_request(tmp_path, InventoryRequest()) == {
@@ -151,6 +154,7 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
             assert "error" in await manager_request(tmp_path, purge)
         else:
             assert "error" in reply
+            assert native_binding.exists()
             assert (tmp_path / "installations" / identifier).exists()
             assert manager.controllers[identifier] is controller
     finally:
