@@ -9,6 +9,7 @@ import hashlib
 import json
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import final
 
@@ -35,6 +36,7 @@ from skulk.extensions.native_inference_hosts import (
     InferenceListing,
     InferenceTarget,
 )
+from skulk.extensions.native_inference_streams import NativeInferenceStream
 from skulk.extensions.runtime_attachment import ServiceConnection
 from skulk.extensions.runtime_install import finish_runtime_work
 
@@ -143,6 +145,41 @@ class NativeInferenceCalls:
         payload: bytes,
         seconds: float | None = None,
     ) -> Received:
+        """Invoke one exact unary destination under the authenticated original caller."""
+        return await self._invoke(
+            caller, plugin_id, capability_id, version, payload, seconds
+        )
+
+    async def invoke_stream(
+        self,
+        caller: AuthenticatedInferenceCaller,
+        plugin_id: str,
+        capability_id: str,
+        version: str,
+        payload: bytes,
+        consume: Callable[[NativeInferenceStream], Awaitable[None]],
+        seconds: float | None = None,
+    ) -> None:
+        """Own one exact stream and drain it through a trusted application adapter.
+
+        The adapter must release borrowed output and consume through its terminal.
+        Failure or cancellation drains the same invocation; it never replays work.
+        """
+        result = await self._invoke(
+            caller, plugin_id, capability_id, version, payload, seconds, consume
+        )
+        result.release()
+
+    async def _invoke(
+        self,
+        caller: AuthenticatedInferenceCaller,
+        plugin_id: str,
+        capability_id: str,
+        version: str,
+        payload: bytes,
+        seconds: float | None = None,
+        consume: Callable[[NativeInferenceStream], Awaitable[None]] | None = None,
+    ) -> Received:
         """Dispatch one exact caller-authorized implementation without automatic replay.
 
         Nullable request, credential, signed owner and per-caller ceilings are
@@ -155,7 +192,7 @@ class NativeInferenceCalls:
         ):
             raise ValueError("inference request duration refused")
         async with asyncio.timeout_at(None if seconds is None else started + seconds):
-            directory = await self.directory.directory()
+            directory = await self.directory.directory(streaming=consume is not None)
             matches = [
                 value
                 for value in directory
@@ -217,7 +254,9 @@ class NativeInferenceCalls:
                     allow_nan=False,
                 ),
             )
-            return await self._dispatch(listing, context, caller, payload, expiry)
+            return await self._dispatch(
+                listing, context, caller, payload, expiry, consume
+            )
 
     async def _dispatch(
         self,
@@ -226,11 +265,12 @@ class NativeInferenceCalls:
         caller: AuthenticatedInferenceCaller,
         payload: bytes,
         expiry: float | None,
+        consume: Callable[[NativeInferenceStream], Awaitable[None]] | None = None,
     ) -> Received:
         fields = _OBJECT.validate_json(context.canonical())
         if (
             len(self.active) >= 64
-            or listing.descriptor.io_mode != "unary"
+            or (listing.descriptor.io_mode == "unary") != (consume is None)
             or not self.kernel.PortableSchema(
                 json.dumps(listing.descriptor.input_schema)
             ).matches(payload.decode())
@@ -259,10 +299,12 @@ class NativeInferenceCalls:
             self.watch = asyncio.create_task(self._watch_authority())
         response: Received | None = None
         transferred = False
+        control: asyncio.Task[Received] | None = None
+        stream: NativeInferenceStream | None = None
         try:
             async with asyncio.timeout_at(expiry):
-                response = await peer.request(
-                    "infer",
+                request = peer.request(
+                    "infer" if consume is None else "infer_stream",
                     {
                         "call_id": call_id,
                         "node_id": listing.target.node_id,
@@ -272,7 +314,35 @@ class NativeInferenceCalls:
                     },
                     payload,
                     check=lambda: self._permitted(active),
+                    cleanup_seconds=listing.cleanup_seconds,
                 )
+                if consume is None:
+                    response = await request
+                else:
+                    control = asyncio.create_task(request)
+
+                    def completed() -> None:
+                        self._permitted(active)
+                        if active.children or active.uncertain:
+                            raise ValueError(
+                                "native stream descendant completion unavailable"
+                            )
+
+                    stream = NativeInferenceStream(
+                        peer,
+                        call_id,
+                        listing.descriptor,
+                        control,
+                        lambda: self._permitted(active),
+                        completed,
+                        listing.stream_seconds,
+                    )
+                    await stream.ready(listing.startup_seconds)
+                    await consume(stream)
+                    if not stream.finished:
+                        raise ValueError("native stream consumer omitted terminal")
+                    response = await asyncio.shield(control)
+                assert response is not None
                 if (
                     not isinstance(response.frame, ResponseFrame)
                     or response.frame.outcome != "complete"
@@ -282,23 +352,41 @@ class NativeInferenceCalls:
                     raise ValueError("inference execution outcome unavailable")
                 self._permitted(active)
                 schema = listing.descriptor.output_schema
-                if schema is not None and not self.kernel.PortableSchema(
-                    json.dumps(schema)
-                ).matches(response.payload.decode()):
+                if (
+                    consume is None
+                    and schema is not None
+                    and not self.kernel.PortableSchema(json.dumps(schema)).matches(
+                        response.payload.decode()
+                    )
+                ):
                     raise ValueError("inference output schema refused")
                 transferred = True
                 return response
         finally:
-            self.active.pop((peer, call_id), None)
-            for child in list(active.children):
-                child.cancel()
+            if stream is not None:
+                stream.close()
+
+            async def cleanup() -> None:
+                try:
+                    if control is not None:
+                        if not control.done() and control.cancelling() == 0:
+                            control.cancel()
+                        await asyncio.gather(control, return_exceptions=True)
+                        if (
+                            response is None
+                            and not control.cancelled()
+                            and control.exception() is None
+                        ):
+                            control.result().release()
+                finally:
+                    self.active.pop((peer, call_id), None)
+                    for child in list(active.children):
+                        child.cancel()
+                    await self._drain(active.children)
+
             try:
-                await finish_runtime_work(
-                    asyncio.create_task(self._drain(active.children))
-                )
+                await finish_runtime_work(asyncio.create_task(cleanup()))
             except BaseException:
-                # A cancelled cleanup has not returned its result to the next
-                # owner. Release the undelivered body even after success checks.
                 if response is not None:
                     response.release()
                 raise

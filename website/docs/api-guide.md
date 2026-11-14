@@ -6950,14 +6950,69 @@ enrollment, and owner access does not inherit another client's permissions.
 
 | Method and path | Parameters and behavior |
 | --- | --- |
-| `GET /v1/native-inference` | Observe exact signed, selected, ready unary inference/read destinations and their current child incarnations. Owners may inspect all declarations for enrollment; clients see only their permitted destinations. A listing includes the full descriptor, target, signed runtime and optional signed `inference_seconds` ceiling. Discovery uses shared bounded host admission; unavailable owners supply no executable capacity and discovery grants no permission. |
+| `GET /v1/native-inference` | Observe exact signed, selected, ready inference/read destinations and their current child incarnations. Owners may inspect all declarations for enrollment; clients see only their permitted destinations. A listing includes the full descriptor, target, signed runtime, optional signed `inference_seconds` ceiling and signed-derived `startup_seconds`, `stream_seconds` and `cleanup_seconds` resource bounds. Stream modes appear only when the actual owner and reader support them. Discovery uses shared bounded host admission; unavailable owners supply no executable capacity and discovery grants no permission. |
 | `POST /v1/native-inference/{plugin_id}/{capability_id}/{version}/call` | Send the exact JSON object as raw `application/json`. The path selects an exact implementation. Optional positive finite `timeout_seconds` adds a request duration ceiling; omission adds none. Intersect request, current credential, per-caller owner and signed application ceilings. Return the application's JSON object. Both Core and owner verify original caller, effect, domain, runtime, descriptor, mode, request bytes and active parent bindings. This adapter admits unary `read`/`inference`, including authorized delegation between installed applications. It does not select a model or implement a router. |
 
 Input and output retain the 16 MiB per-frame resource bound. Uploads have an
 independent ten-second deadline. Resource, health and partial-I/O bounds do not
 become generation timeouts or request allowances. Unsupported modes and governed
-effects are not advertised by this adapter. Streaming declarations remain inert
-until their own serving path is admitted.
+effects are not advertised by this adapter. The JSON call endpoint remains unary;
+qualified stream modes use the separate WebSocket contract below.
+
+#### Native inference WebSocket
+
+`WS /v1/native-inference/{plugin_id}/{capability_id}/{version}/stream` invokes
+one exact signed `server_streaming`, `client_streaming` or `bidirectional`
+destination. Optional positive finite `timeout_seconds` has the same intersection
+semantics as the JSON endpoint; omission adds no generation ceiling. The actual
+installed owner and host reader must support the explicit 0.7.0rc4 stream cohort.
+The issued 0.7.0rc3 cohort keeps its original closure and unary behavior.
+
+The handshake requires one `Authorization: Bearer <enrolled token>` header over
+direct WSS, an actual loopback socket, or a verified Tailscale peer. It does not
+inherit ambient dashboard owner authority. Paired/operator credentials, duplicate
+or invalid bearers, forwarded transport and operator-relay ingress are refused
+before acceptance. There are no query-string, cookie or subprotocol credentials.
+Origin alone supplies no authority. Use a WebSocket client that can set the
+authorization header; browser JavaScript cannot set it through the standard
+WebSocket constructor. Authentication/host failures before acceptance result in
+a refused handshake (normally HTTP 403).
+
+After acceptance the client sends exactly one text message containing the raw
+JSON input object, within ten seconds and at most 16 MiB. These exact bytes bind
+the original caller context. Core then sends one text event:
+`{"type":"ready","call_id":"<host-assigned ID>","mode":"<signed mode>"}`.
+This event observes the existing admitted call; polling never creates fresh work.
+
+Subsequent application messages are **binary** packets from the public
+`skulk.transport/2` codec (protocol six), not JSON text or base64 wrappers. Use the
+public native `encode_transport_v2_packet` / `decode_transport_v2_packet` APIs.
+Each packet contains a four-byte big-endian header length, at most 64 KiB of JSON
+metadata and at most 1 MiB of separate inline media. No aggregate output allowance
+is imposed. Blob metadata does not cause Core to fetch URLs or paths.
+
+- In input modes, send the returned `call_id`, direction `caller_to_provider`,
+  consecutive sequences starting at zero, `started`, zero or more `chunk` frames,
+  and one `completed` input half-close. A half-close leaves output open. A
+  server-streaming call accepts no input frames.
+- Provider `chunk` and `completed` / `failed` / `cancelled` frames have direction
+  `provider_to_caller`, the same call ID and consecutive sequences starting at one.
+  Input/output chunks and completed payloads must match the signed portable
+  schemas. Inline bytes remain separate from their media metadata.
+- A terminal is followed by exactly one native `end` packet. Core delivers a
+  terminal only after matching native end, application control completion and
+  owned call-tree cleanup have all been verified. Declared failure/cancellation
+  codes contain an empty sanitized message. Terminal kind alone is no success
+  proof, and an unavailable channel never produces a synthetic successful end.
+
+Normal verified completion closes with 1000. Oversized initial input closes with
+1009; active authority withdrawal closes with 1008; invalid frames, incomplete
+outcomes or unavailable execution close with 1011 and a sanitized no-replay
+reason. A peer disconnect cancels and drains only this call. Signed connect,
+partial-I/O, write and cleanup bounds remain resource fences; quiet generation
+does not acquire an implicit idle-output deadline. Current authority is checked
+again at guarded socket writes. Neither side automatically replays an uncertain
+request. WebSockets are documented here because OpenAPI cannot describe them.
 
 The owner rechecks current permission and credential lifetime under the shared
 policy lock immediately before writing to the application. Active work observes

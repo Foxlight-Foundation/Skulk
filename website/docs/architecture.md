@@ -2426,18 +2426,18 @@ an issued generation's pinned binary. Ordinary selection refuses changes between
 legacy, native transport and native calls interpretations, even when state/schema
 labels match. Such changes require explicit qualified state migration. Call-format
 startup alone does not advertise native invocation or delegation capacity.
-The PyInstaller native hook includes all three cohort receipts and the selected
+The PyInstaller native hook includes all four cohort receipts and the selected
 reader metadata/licenses, refusing a missing receipt during the build.
 
 Runtime envelope 5 and release envelope 3 independently select the published
-0.7.0rc3 inference cohort: portable2/managed2/handshake2/transport2/composition3/
+0.7.0rc3 or 0.7.0rc4 inference cohort: portable2/managed2/handshake2/transport2/composition3/
 calls2. Their signature/digest domains are `skulk.runtime/5\0` and
 `skulk.release/3\0`. Staging validates the installed binary's complete thirteen
 profile inventory, exact manifest identity and calls2 framing. Native inference
 registration retains full descriptor identities; it does not imply readiness.
 Old issued runtime closures and signing bytes remain unchanged. Selection also
 fences transitions into this interpretation, regardless of equal state labels.
-The frozen reader carries all three cohort receipts.
+The frozen reader carries all four cohort receipts, retaining both issued inference closures.
 
 `inference_callers.py` owns original client authentication and credential custody;
 `inference_enrollment.py` verifies exact signed, persisted destinations without
@@ -2446,13 +2446,19 @@ client/policy management. Credentials alone grant no effects, and provider login
 never grants host permission. `native_inference_calls.py` and
 `native_inference_hosts.py` serve `/v1/native-inference`: exact unary read/inference
 calls and delegated calls over the existing role-authenticated owner channel.
+The explicit rc4 cohort also uses `native_inference_streams.py` for all three
+stream modes. Its bearer WebSocket adapter carries exact protocol-six binary
+packets; terminal delivery requires native end, control completion and call-tree
+cleanup. Per-call byte leases, independent directions and current write guards
+keep cancellation scoped to its root. Signed connect/partial-I/O/write/cleanup
+resource bounds do not become generation deadlines. Owner root retirement
+requires actual cleanup acknowledgment or capture/reap of an uncertain process.
 The owner independently checks current original-caller/effect/domain/runtime/mode
 permission under the shared policy lock at the physical write; bounded authority
 observation cancels active withdrawn work. Permission snapshots do not depend on
 unrelated readiness. Native nullable caller, request and owner ceilings intersect
 without a hidden generation deadline. Cancellation/uncertainty never permits
-host replay. Governed effects, native streaming and remote Fabric execution are
-not admitted by this adapter. Core holds no provider account/session or router
+host replay. Governed effects and remote Fabric execution are not admitted by this adapter. Core holds no provider account/session or router
 policy, and restoring capability state cannot restore Core client credentials.
 `runtime_integrity.py` seals installed files, permissions and interpreter identity.
 Cached verification refuses a missing or changed seal before private Python can

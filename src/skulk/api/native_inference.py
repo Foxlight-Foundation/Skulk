@@ -6,13 +6,24 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from starlette.websockets import WebSocketState
 
 from skulk.api.inference_access import authenticate_inference_request
 from skulk.api.native_calls import OwnedNativeResponse
 from skulk.extensions.native_host_protocol import MAXIMUM_PAYLOAD, Received
 from skulk.extensions.native_inference_calls import NativeInferenceCalls
 from skulk.extensions.native_inference_hosts import InferenceListing
+from skulk.extensions.native_inference_streams import NativeInferenceStream
 from skulk.extensions.runtime_attachment import ServiceConnection
 from skulk.extensions.runtime_files import read_private
 from skulk.extensions.runtime_install import finish_runtime_work
@@ -60,7 +71,7 @@ def create_native_inference_router(
         service = await host()
         caller = await authenticate_inference_request(request, service.callers, node_id)
         try:
-            listings = await service.directory.directory()
+            listings = await service.directory.directory(streaming=True)
             if caller.principal.kind == "operator":
                 return listings
             permitted: list[InferenceListing] = []
@@ -178,10 +189,152 @@ def create_native_inference_router(
         finally:
             reservation.release()
 
+    async def stream(
+        socket: WebSocket,
+        plugin_id: str,
+        capability_id: str,
+        version: str,
+        timeout_seconds: Annotated[
+            float | None,
+            Query(
+                gt=0,
+                allow_inf_nan=False,
+                description="Optional generation ceiling; omission adds none.",
+            ),
+        ] = None,
+    ) -> None:
+        """Carry exact protocol-six packets under an enrolled original client identity.
+
+        The first text message is bounded raw JSON input. A ready event binds the
+        server-assigned call ID; binary caller packets follow in input modes.
+        Disconnect cancels this call. There are no query/subprotocol credentials,
+        ambient owner fallback, aggregate output allowance or automatic replay.
+        """
+        call: asyncio.Task[None] | None = None
+        reservation = None
+        try:
+            service = await host()
+            caller = await authenticate_inference_request(
+                socket, service.callers, node_id
+            )
+            reservation = service.hosts.budget.reserve(MAXIMUM_PAYLOAD)
+            await socket.accept(headers=[(b"cache-control", b"no-store")])
+            async with asyncio.timeout(10):
+                payload = (await socket.receive_text()).encode()
+            if len(payload) > MAXIMUM_PAYLOAD:
+                await socket.close(
+                    1009, "Native inference input exceeds its byte bound."
+                )
+                return
+            reservation.shrink(len(payload))
+
+            async def consume(port: NativeInferenceStream) -> None:
+                async with asyncio.timeout(port.write_seconds):
+                    await socket.send_json(
+                        {
+                            "type": "ready",
+                            "call_id": port.call_id,
+                            "mode": port.mode,
+                        }
+                    )
+
+                async def ingress() -> None:
+                    while True:
+                        wire = await socket.receive_bytes()
+                        if len(wire) > 1048576 + 65540:
+                            raise ValueError("native stream frame exceeds bound")
+                        await port.send_input(wire)
+
+                async def egress() -> None:
+                    while (value := await port.next_output()) is not None:
+                        try:
+                            async with asyncio.timeout(port.write_seconds):
+                                await socket.send_bytes(value.packet)
+                        finally:
+                            value.release()
+                    end = service.kernel.encode_transport_v2_packet(
+                        '{"kind":"end","call_id":"' + port.call_id + '"}', b""
+                    )
+                    async with asyncio.timeout(port.write_seconds):
+                        await socket.send_bytes(end)
+
+                input_task, output_task = (
+                    asyncio.create_task(ingress()),
+                    asyncio.create_task(egress()),
+                )
+                try:
+                    done, _ = await asyncio.wait(
+                        (input_task, output_task),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if input_task in done:
+                        input_task.result()
+                        raise ValueError("native stream input ended without disconnect")
+                    output_task.result()
+                finally:
+                    for task in (input_task, output_task):
+                        if not task.done() and task.cancelling() == 0:
+                            task.cancel()
+                    await finish_runtime_work(
+                        asyncio.create_task(
+                            _drain_stream_tasks(input_task, output_task)
+                        )
+                    )
+
+            call = asyncio.create_task(
+                service.invoke_stream(
+                    caller,
+                    plugin_id,
+                    capability_id,
+                    version,
+                    payload,
+                    consume,
+                    timeout_seconds,
+                )
+            )
+            try:
+                await asyncio.shield(call)
+            except asyncio.CancelledError:
+                if call.done() and call.cancelled():
+                    await socket.close(
+                        1008,
+                        "Native inference authority was withdrawn; do not replay.",
+                    )
+                    return
+                raise
+            await socket.close(1000)
+        except WebSocketDisconnect:
+            pass
+        except HTTPException:
+            await socket.close(
+                1008, "Native inference authentication or host unavailable."
+            )
+        except (OSError, ValueError, KeyError, TimeoutError):
+            if socket.application_state != WebSocketState.DISCONNECTED:
+                await socket.close(
+                    1011, "Native inference outcome unavailable; do not replay."
+                )
+        finally:
+
+            async def cleanup() -> None:
+                try:
+                    if call is not None:
+                        if not call.done() and call.cancelling() == 0:
+                            call.cancel()
+                        await _drain_stream_call(call)
+                finally:
+                    if reservation is not None:
+                        reservation.release()
+
+            await finish_runtime_work(asyncio.create_task(cleanup()))
+
+    router.websocket(
+        "/{plugin_id}/{capability_id}/{version}/stream", name="native_inference_stream"
+    )(stream)
     router.get(
         "",
         summary="List signed native inference destinations",
-        description="A direct owner can inspect signed ready destinations for enrollment. Enrolled clients authenticate with a standard bearer and see only exact permitted destinations. Discovery grants no authority. Only the currently admitted native unary adapter is advertised; governed effects, unsupported modes, unqualified and offline owners supply no executable capacity.",
+        description="A direct owner can inspect signed ready destinations for enrollment. Enrolled clients authenticate with a standard bearer and see only exact permitted destinations. Discovery grants no authority. Unary calls use the JSON call route; qualified stream modes use the documented bearer WebSocket. Governed effects, unsupported modes, unqualified and offline owners supply no executable capacity.",
     )(directory)
     router.post(
         "/{plugin_id}/{capability_id}/{version}/call",
@@ -204,3 +357,13 @@ def create_native_inference_router(
 
 async def _drain(call: asyncio.Task[Received], watch: asyncio.Task[None]) -> None:
     await asyncio.gather(call, watch, return_exceptions=True)
+
+
+async def _drain_stream_tasks(
+    first: asyncio.Task[None], second: asyncio.Task[None]
+) -> None:
+    await asyncio.gather(first, second, return_exceptions=True)
+
+
+async def _drain_stream_call(call: asyncio.Task[None]) -> None:
+    await asyncio.gather(call, return_exceptions=True)

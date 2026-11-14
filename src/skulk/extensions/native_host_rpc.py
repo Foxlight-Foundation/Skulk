@@ -5,6 +5,7 @@ frames never enter this dispatcher, and losing a reply never permits a retry.
 """
 
 import asyncio
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
@@ -31,9 +32,14 @@ class Reply:
     parameters: dict[str, JsonValue]
     payload: bytes = b""
     release: Callable[[], None] = lambda: None
+    check: Callable[[], None] = lambda: None
 
 
 type Handler = Callable[["Peer", RequestFrame, bytes], Awaitable[Reply]]
+
+
+class _DeliveryWithdrawnError(Exception):
+    """A per-call delivery guard refused before any authenticated frame write."""
 
 
 @final
@@ -70,9 +76,12 @@ class Peer:
         *,
         check: Callable[[], None] = lambda: None,
         dispatched: Callable[[], None] = lambda: None,
+        cleanup_seconds: float = 3.0,
     ) -> Received:
         """Transfer an owned response; interrupted dispatch is never replayed."""
         self.check()
+        if not math.isfinite(cleanup_seconds) or cleanup_seconds <= 0:
+            raise ValueError("native host cleanup resource bound refused")
         if len(self._pending) >= 32 or self._sequence >= 2**53 - 1:
             raise ValueError("native host request capacity unavailable")
         self._sequence += 1
@@ -111,7 +120,9 @@ class Peer:
                 # A cancelled caller cannot leave a live remote invocation. Keep
                 # its correlation slot until cleanup acknowledges or fence the
                 # whole peer; late results can never match a different request.
-                cleanup = asyncio.create_task(self._cancel(identifier, future))
+                cleanup = asyncio.create_task(
+                    self._cancel(identifier, future, cleanup_seconds)
+                )
                 while not cleanup.done():
                     try:
                         await asyncio.shield(cleanup)
@@ -126,9 +137,11 @@ class Peer:
             elif not future.done():
                 future.cancel()
 
-    async def _cancel(self, identifier: int, future: asyncio.Future[Received]) -> None:
+    async def _cancel(
+        self, identifier: int, future: asyncio.Future[Received], seconds: float
+    ) -> None:
         try:
-            async with asyncio.timeout(3):
+            async with asyncio.timeout(seconds):
                 await self.stream.send(
                     CancelFrame(request_id=identifier), b"", check=self.check
                 )
@@ -160,16 +173,40 @@ class Peer:
             except Exception:
                 # The generic transport cannot prove that a handler never wrote.
                 reply = Reply("unknown", {})
-            await self.stream.send(
-                ResponseFrame(
-                    request_id=frame.request_id,
-                    outcome=reply.outcome,
-                    parameters=reply.parameters,
-                    payload_size=len(reply.payload),
-                ),
-                reply.payload,
-                check=self.check,
-            )
+            result = reply
+
+            def permitted() -> None:
+                self.check()
+                try:
+                    result.check()
+                except Exception:
+                    # AuthenticatedStream calls this guard before advancing its
+                    # sequence or writing. Only this response is withdrawn; the
+                    # actual role/lifetime check above still fences the peer.
+                    raise _DeliveryWithdrawnError from None
+
+            try:
+                await self.stream.send(
+                    ResponseFrame(
+                        request_id=frame.request_id,
+                        outcome=reply.outcome,
+                        parameters=reply.parameters,
+                        payload_size=len(reply.payload),
+                    ),
+                    reply.payload,
+                    check=permitted,
+                )
+            except _DeliveryWithdrawnError:
+                await self.stream.send(
+                    ResponseFrame(
+                        request_id=frame.request_id,
+                        outcome="unknown",
+                        parameters={},
+                        payload_size=0,
+                    ),
+                    b"",
+                    check=self.check,
+                )
         except (Exception, asyncio.CancelledError):
             self._fence()
         finally:

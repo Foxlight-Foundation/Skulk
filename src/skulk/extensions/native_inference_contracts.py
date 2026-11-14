@@ -23,9 +23,14 @@ from pydantic import (
     model_validator,
 )
 
-INFERENCE_KERNEL_VERSION = "0.7.0rc3"
-INFERENCE_KERNEL_SOURCE = "c8f869ba525d6fdcff64e90cd3c14954eaad34da"
+INFERENCE_KERNEL_VERSION = "0.7.0rc4"
+INFERENCE_KERNEL_SOURCE = "3431a3b220f854512d3bb10003e095e00585c443"
+# Reader compatibility never rewrites an issued application's signed closure.
+INFERENCE_READER_VERSIONS = ("0.7.0rc3", INFERENCE_KERNEL_VERSION)
 INFERENCE_COHORT_SHA256 = (
+    "3702b717039632845f68557c87d10551480501505230134d973b04644b14e2d2"
+)
+_ISSUED_INFERENCE_COHORT_SHA256 = (
     "da446b54ddd8996ea21cbd61f1155bc1e840ddfff2e36f435ffc973806c865ae"
 )
 _OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -287,10 +292,57 @@ class InferenceKernel(Protocol):
         ...
 
 
-def inference_cohort() -> dict[str, JsonValue]:
-    """Read the exact anonymously verified public manifest, with no network lookup."""
-    data = Path(__file__).with_name("native-inference-cohort.json").read_bytes()
-    if hashlib.sha256(data).hexdigest() != INFERENCE_COHORT_SHA256:
+class StreamObserver(Protocol):
+    """Native sequencing observation; host authority and control stay separate."""
+
+    def accept_input(self, packet: bytes) -> tuple[str, bytes]:
+        """Admit one exact caller frame and its independent half-close."""
+        ...
+
+    def accept_output(self, packet: bytes) -> tuple[str, bytes]:
+        """Admit one provider frame or its terminal/end acknowledgment."""
+        ...
+
+    @property
+    def finished(self) -> bool:
+        """Report a structural terminal/end pair, never permission to deliver."""
+        ...
+
+
+class ObserverFactory(Protocol):
+    """Explicit additive native observer constructor."""
+
+    def __call__(self, call_id: str, mode: str) -> StreamObserver:
+        """Bind exactly one host-assigned call and signed streaming mode."""
+        ...
+
+
+class InferenceStreamKernel(InferenceKernel, Protocol):
+    """Additive host ABI with unchanged issued profile semantics."""
+
+    TransportV2Observer: ObserverFactory
+
+    def transport_v2_media_size(self, header: bytes) -> int:
+        """Admit a bounded media hint; the full packet still needs validation."""
+        ...
+
+
+def inference_cohort(version: str = INFERENCE_KERNEL_VERSION) -> dict[str, JsonValue]:
+    """Read one exact published cohort without replacing issued profile/asset bytes."""
+    if version == "0.7.0rc3":
+        filename, digest = (
+            "native-inference-cohort.json",
+            _ISSUED_INFERENCE_COHORT_SHA256,
+        )
+    elif version == INFERENCE_KERNEL_VERSION:
+        filename, digest = (
+            "native-inference-stream-cohort.json",
+            INFERENCE_COHORT_SHA256,
+        )
+    else:
+        raise ValueError("native inference cohort is unavailable")
+    data = Path(__file__).with_name(filename).read_bytes()
+    if hashlib.sha256(data).hexdigest() != digest:
         raise ValueError("native inference acquisition receipt differs")
     return _OBJECT.validate_json(data)
 
@@ -305,14 +357,16 @@ def public_inference_kernel() -> InferenceKernel:
     try:
         if (
             importlib.metadata.version("skulk-capability-kernel")
-            != INFERENCE_KERNEL_VERSION
+            not in INFERENCE_READER_VERSIONS
         ):
             raise ValueError("qualified inference reader is unavailable")
         kernel = cast(
             InferenceKernel,
             cast(object, importlib.import_module("_skulk_capability_kernel")),
         )
-        profiles = inference_cohort()["profiles"]
+        profiles = inference_cohort(
+            importlib.metadata.version("skulk-capability-kernel")
+        )["profiles"]
         if not isinstance(profiles, list):
             raise ValueError("native inference profile receipt refused")
         expected: dict[str, JsonValue] = {}
@@ -337,9 +391,28 @@ def public_inference_kernel() -> InferenceKernel:
     return kernel
 
 
-def inference_native_wheel(family: str) -> tuple[str, str, int]:
+def host_stream_kernel() -> InferenceStreamKernel | None:
+    """Select the additive host ABI; older readers retain their unary-only path.
+
+    Independently pinned applications retain their original binaries. The host
+    must still match all thirteen frozen profile identities before using streams.
+    """
+    kernel = public_inference_kernel()
+    if importlib.metadata.version("skulk-capability-kernel") == "0.7.0rc3":
+        return None
+    selected = cast(InferenceStreamKernel, kernel)
+    if not callable(getattr(selected, "TransportV2Observer", None)) or not callable(
+        getattr(selected, "transport_v2_media_size", None)
+    ):
+        raise ValueError("native host stream ABI unavailable")
+    return selected
+
+
+def inference_native_wheel(
+    family: str, *, version: str = INFERENCE_KERNEL_VERSION
+) -> tuple[str, str, int]:
     """Return one exact published wheel; declaration does not authorize installation."""
-    platforms = inference_cohort()["platforms"]
+    platforms = inference_cohort(version)["platforms"]
     if isinstance(platforms, list):
         for entry in platforms:
             if isinstance(entry, dict) and entry.get("platform") == family:
@@ -362,12 +435,13 @@ class _Contract(BaseModel):
 class InferenceProfiles(_Contract):
     """Exact signed execution cohort, separately selected from issued runtimes."""
 
-    version: Literal["0.7.0rc3"] = Field(
+    version: Literal["0.7.0rc3", "0.7.0rc4"] = Field(
         description="Published native ABI package version."
     )
-    source_commit: Literal["c8f869ba525d6fdcff64e90cd3c14954eaad34da"] = Field(
-        description="Immutable public source selected by the closure."
-    )
+    source_commit: Literal[
+        "c8f869ba525d6fdcff64e90cd3c14954eaad34da",
+        "3431a3b220f854512d3bb10003e095e00585c443",
+    ] = Field(description="Immutable public source selected by the closure.")
     portable: Literal[
         "7996ed84e821ddacfb48e00b99a5886948fd20e43bc2c7993c5ed98217834033"
     ] = Field(description="Complete skulk.portable/2 fingerprint.")
@@ -387,11 +461,18 @@ class InferenceProfiles(_Contract):
         "81f72dc3e2a07321480af80bafede3da4a3b14ab80ea620c5c8600b51bc76101"
     ] = Field(description="Complete skulk.calls/2 fingerprint.")
 
+    @model_validator(mode="after")
+    def exact_cohort(self) -> "InferenceProfiles":
+        """Reject crossed source/version pairs instead of guessing compatible assets."""
+        if self.source_commit != inference_cohort(self.version)["source_commit"]:
+            raise ValueError("native inference source/version pair differs")
+        return self
+
     @classmethod
-    @lru_cache(maxsize=1)
-    def qualified(cls) -> "InferenceProfiles":
+    @lru_cache(maxsize=2)
+    def qualified(cls, version: str = INFERENCE_KERNEL_VERSION) -> "InferenceProfiles":
         """Supply publisher defaults; signed parsing requires every field."""
-        receipt = inference_cohort()
+        receipt = inference_cohort(version)
         selected = {
             "portable": "skulk.portable/2",
             "managed": "skulk.managed/2",

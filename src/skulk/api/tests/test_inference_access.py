@@ -4,8 +4,9 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from pydantic import JsonValue, TypeAdapter
+from starlette.types import Message, Scope
 
 from skulk.api.inference_access import (
     ClientCreated,
@@ -179,6 +180,55 @@ async def test_bearer_requires_no_browser_origin_on_https(tmp_path: Path) -> Non
             "/caller", headers={"authorization": f"Bearer {token}"}
         )
     assert result.status_code == 200 and result.json()["kind"] == "client"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["missing", "invalid", "duplicate", "paired", "forwarded", "cleartext", "valid"],
+)
+async def test_websocket_has_explicit_bearer_authority_without_owner_fallback(
+    tmp_path: Path, fault: str
+) -> None:
+    """Actual WebSocket scopes authenticate enrolled clients over protected WSS."""
+    _, service = application(tmp_path)
+    _, token = service.create(service.inventory().revision, "Streaming API", None)
+    credential = ("Bearer " + token).encode()
+    headers = [(b"authorization", credential)]
+    if fault == "missing":
+        headers = [(b"x-skulk-dashboard", b"pairing-v1")]
+    elif fault in {"invalid", "paired"}:
+        headers = [(b"authorization", b"Bearer operator-credential")]
+    elif fault == "duplicate":
+        headers.append((b"authorization", credential))
+    elif fault == "forwarded":
+        headers.append((b"x-forwarded-for", b"127.0.0.1"))
+    scope: Scope = {
+        "type": "websocket",
+        "scheme": "ws" if fault == "cleartext" else "wss",
+        "path": "/caller",
+        "query_string": b"",
+        "headers": headers,
+        "client": ("192.0.2.1", 1),
+        "server": ("localhost", 443),
+    }
+
+    async def receive() -> Message:
+        raise AssertionError("authentication must not read application frames")
+
+    async def send(_message: Message) -> None:
+        raise AssertionError("authentication must precede socket acceptance")
+
+    socket = WebSocket(scope, receive, send)
+    if fault == "valid":
+        caller = await authenticate_inference_request(
+            socket, service, NodeId("access-core")
+        )
+        assert caller.principal.kind == "client"
+        assert caller.principal.identifier != "direct-owner"
+    else:
+        with pytest.raises(HTTPException) as refusal:
+            await authenticate_inference_request(socket, service, NodeId("access-core"))
+        assert refusal.value.status_code in (401, 403)
 
 
 async def test_management_authentication_precedes_body_parsing_and_bounds_it(

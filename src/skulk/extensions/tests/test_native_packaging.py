@@ -37,7 +37,11 @@ def test_native_frozen_resource_closure_preserves_reader_identity(
     inference = TypeAdapter(dict[str, JsonValue]).validate_json(
         (tmp_path / "skulk/extensions/native-inference-cohort.json").read_bytes()
     )
-    assert inference == inference_cohort()
+    assert inference == inference_cohort("0.7.0rc3")
+    streams = TypeAdapter(dict[str, JsonValue]).validate_json(
+        (tmp_path / "skulk/extensions/native-inference-stream-cohort.json").read_bytes()
+    )
+    assert streams == inference_cohort()
     metadata = next(tmp_path.glob("*.dist-info"))
     package = importlib.metadata.Distribution.at(metadata)
     assert package.version == INFERENCE_KERNEL_VERSION
@@ -53,7 +57,12 @@ def test_native_frozen_resource_closure_preserves_reader_identity(
 
 @pytest.mark.parametrize(
     "missing",
-    ["native-cohort.json", "native-call-cohort.json", "native-inference-cohort.json"],
+    [
+        "native-cohort.json",
+        "native-call-cohort.json",
+        "native-inference-cohort.json",
+        "native-inference-stream-cohort.json",
+    ],
 )
 def test_native_build_refuses_either_missing_interpretation_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
@@ -66,6 +75,7 @@ def test_native_build_refuses_either_missing_interpretation_receipt(
         "native-cohort.json",
         "native-call-cohort.json",
         "native-inference-cohort.json",
+        "native-inference-stream-cohort.json",
     ):
         if name != missing:
             (resources / name).write_text("{}")

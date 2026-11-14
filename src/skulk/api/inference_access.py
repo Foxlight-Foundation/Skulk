@@ -6,7 +6,7 @@ from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import cast, final
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.types import Message
@@ -93,7 +93,7 @@ def _no_store(response: Response) -> None:
 
 
 async def authenticate_inference_request(
-    request: Request, callers: InferenceCallers, issuer_node_id: NodeId
+    request: Request | WebSocket, callers: InferenceCallers, issuer_node_id: NodeId
 ) -> AuthenticatedInferenceCaller:
     """Authenticate a direct owner or enrolled bearer over a protected transport.
 
@@ -103,6 +103,10 @@ async def authenticate_inference_request(
     """
     headers = request.headers.getlist("authorization")
     if not headers:
+        if isinstance(request, WebSocket):
+            raise HTTPException(
+                401, "Native inference WebSockets require an enrolled bearer."
+            )
         return callers.owner(
             await authenticate_capability_owner(request, issuer_node_id)
         )
@@ -125,7 +129,7 @@ async def authenticate_inference_request(
         address = None if host is None else ipaddress.ip_address(host)
     except ValueError:
         address = None
-    protected = request.url.scheme == "https" or (
+    protected = request.url.scheme in {"https", "wss"} or (
         address is not None and address.is_loopback
     )
     if (
