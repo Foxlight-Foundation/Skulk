@@ -3294,7 +3294,9 @@ returns HTTP 400 with `X-Skulk-Placement-Failure:
 model_card_identity_mismatch`, and no instance state is created.
 The instance's optional `excludedInstallIds` accepts an array of UUID strings
 and retains these persistent machine exclusions in the placement and subsequent
-repairs. Malformed UUIDs, numeric entries, and a scalar instead of an array
+repairs. Restart recovery retains every original stable exclusion even while
+the machine is connected, so a later rejoin or a fresh recovery recorder does
+not lose the setting. Malformed UUIDs, numeric entries, and a scalar instead of an array
 return HTTP 422 before a placement command is sent.
 For vLLM, exact placement fills a missing shard `resolvedEngineBuild` from the
 node's advertised installed or first-use runtime, just like automatic placement.

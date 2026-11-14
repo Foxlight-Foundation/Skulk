@@ -2732,14 +2732,10 @@ class Master:
                 instance_meta=intent.instance_meta,
                 min_nodes=intent.min_nodes,
                 excluded_nodes=sorted(excluded),
-                # A machine excluded before the restart that has not come
-                # back has no node ID to exclude; keep it by install ID so
-                # the exclusion holds when it returns and stays in the record.
-                excluded_install_ids=sorted(
-                    install_id
-                    for install_id in intent.excluded_install_ids
-                    if install_id not in live
-                ),
+                # Keep every stable exclusion, including connected machines:
+                # a fresh recorder cannot recover an old peer's install ID
+                # after that machine rejoins under a new session identity.
+                excluded_install_ids=sorted(intent.excluded_install_ids),
                 requested_context_tokens=intent.requested_context_tokens,
             )
             try:
