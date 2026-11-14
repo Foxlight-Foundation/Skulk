@@ -166,8 +166,8 @@ def derive_cluster_intent(
             for node_id in instance.shard_assignments.node_to_runner
             if node_id in install_ids
         )
-        # Exclusions of connected machines are node IDs; those of machines
-        # that were absent when the instance was placed are install IDs.
+        # Explicit stable IDs survive a fresh recorder that never saw an old
+        # excluded peer. Known per-session exclusions are included as well.
         excluded = tuple(
             sorted(
                 {

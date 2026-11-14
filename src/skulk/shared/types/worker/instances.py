@@ -178,13 +178,11 @@ class BaseInstance(TaggedModel):
     excluded_install_ids: list[Annotated[UUID, Field(strict=False)]] = Field(
         default_factory=list,
         description=(
-            "Machines the caller excluded that were not connected when this "
-            "placement was made, by stable install ID. A runtime node ID can "
-            "only name a machine while it is running, so an exclusion of an "
-            "absent machine is kept here; placement resolves it to the "
-            "machine's current node ID whenever it is connected, and repair "
-            "re-placements carry it. Sorted; empty when every exclusion was "
-            "connected, and for instances replayed from older event logs."
+            "Caller-supplied stable machine exclusions, retained even while "
+            "those machines are connected. Placement resolves them to current "
+            "node IDs; repairs and restart recovery carry them so a new "
+            "session or a fresh recorder cannot lose an exclusion. Sorted; "
+            "empty when none were supplied and for legacy instances."
         ),
     )
     system_role: Literal["steward"] | None = Field(
