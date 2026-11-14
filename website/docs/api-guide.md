@@ -7032,6 +7032,10 @@ The protected channel reserves a separate 96-request media lane alongside its
 32-request root/metadata lane, so admitted roots retain readiness/input/output
 capacity. The same independent lane bounds apply at sending and receiving peers;
 shared byte/frame budgets still apply to every request and response.
+Cancelling a queued response before any physical write withdraws that call and
+retains its reply resources until a sanitized cancellation acknowledgment is
+delivered. It preserves healthy siblings. Cancellation after a potentially partial
+authenticated write fences the connection because its framing is uncertain.
 
 The owner rechecks current permission and credential lifetime under the shared
 policy lock immediately before writing to the application. Active work observes

@@ -4003,3 +4003,4 @@ Native inference WebSocket ingress has one receive owner throughout discovery, s
 
 Protected stream readiness, input and output RPCs retain the selected signed cleanup grace. Owner authority withdrawal also cancels the captured root during pending terminal/end delivery after its execution scope has finished, releasing retained media without withdrawing sibling roots.
 The protected RPC channel independently admits 32 ordinary roots/metadata requests and 96 stream readiness/input/output requests, reserving progress for every admitted stream under the existing shared byte/frame budgets.
+Pre-write response cancellation withdraws only its call and retains resource ownership through the cancellation acknowledgment; uncertain partial writes still fence the authenticated connection.

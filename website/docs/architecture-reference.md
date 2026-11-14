@@ -2646,6 +2646,9 @@ recovery remains a separate contract and test obligation.
   Independent32 ordinary and96 stream-operation request slots reserve readiness,
   input and output progress while control roots remain pending; both directions
   retain shared byte/frame accounting.
+  Queued response cancellation withdraws application custody and retains leases
+  through an unknown-outcome acknowledgment. Partial-write cancellation fences
+  the peer; no frame sequence is reused or uncertain request replayed.
   Role authentication does not authenticate the original caller.
 - `extensions/native_host_budget.py`: event-loop-owned raw byte/frame leases;
   reservations survive delivery/backpressure and are released on terminal cleanup.

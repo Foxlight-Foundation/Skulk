@@ -154,3 +154,90 @@ async def test_queued_refusal_preserves_correlation_and_the_live_channel(
         assert seen == [2]
     finally:
         await asyncio.gather(core.close(), owner.close())
+
+
+@pytest.mark.parametrize("partial", [False, True])
+async def test_response_cancellation_distinguishes_queued_and_partial_writes(
+    channels: Channels, monkeypatch: pytest.MonkeyPatch, partial: bool
+) -> None:
+    """Queued cancellation withdraws one reply; an uncertain write fences the peer."""
+    entered = {label: asyncio.Event() for label in ("cancel", "keep")}
+    withdrawn = asyncio.Event()
+    released: list[str] = []
+
+    async def reply(_peer: Peer, frame: RequestFrame, _body: bytes) -> Reply:
+        label = frame.parameters["label"]
+        assert isinstance(label, str)
+        entered[label].set()
+        return Reply(
+            "complete",
+            {},
+            label.encode(),
+            lambda: released.append(label),
+            cancelled=withdrawn.set if label == "cancel" else lambda: None,
+        )
+
+    core = Peer(channels.core, reply, frozenset(), lambda: None)
+    owner = Peer(
+        channels.owner, reply, frozenset({"stream_next", "describe"}), lambda: None
+    )
+    if partial:
+        write = channels.owner.writer.write
+        started = False
+
+        def prefix_only(data: bytes) -> None:
+            nonlocal started
+            if not started:
+                started = True
+                write(data)
+
+        async def stalled_drain() -> None:
+            await asyncio.Future[None]()
+
+        # Deliver a real authenticated frame prefix, then stall the remaining
+        # socket write. Cancellation can no longer prove that nothing was sent.
+        monkeypatch.setattr(channels.owner.writer, "write", prefix_only)
+        monkeypatch.setattr(channels.owner.writer, "drain", stalled_drain)
+    else:
+        await channels.owner.write_lock.acquire()
+    first = asyncio.create_task(core.request("stream_next", {"label": "cancel"}))
+    second = None
+    try:
+        async with asyncio.timeout(5):
+            await entered["cancel"].wait()
+            second = asyncio.create_task(core.request("describe", {"label": "keep"}))
+            await entered["keep"].wait()
+            first.cancel()
+            if not partial:
+                await withdrawn.wait()
+                core.check()
+                owner.check()
+                channels.owner.write_lock.release()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            if partial:
+                with pytest.raises(ValueError):
+                    await second
+                assert channels.owner.closed and channels.core.closed
+                assert not withdrawn.is_set()
+            else:
+                result = await second
+                assert result.payload == b"keep"
+                result.release()
+                again = await core.request("describe", {"label": "keep"})
+                again.release()
+                core.check()
+                owner.check()
+                assert sorted(released) == ["cancel", "keep", "keep"]
+    finally:
+        if channels.owner.write_lock.locked() and not partial:
+            channels.owner.write_lock.release()
+        calls = [first] if second is None else [first, second]
+        for call in calls:
+            if not call.done():
+                call.cancel()
+        for value in await asyncio.gather(*calls, return_exceptions=True):
+            if not isinstance(value, BaseException):
+                value.release()
+        await asyncio.gather(core.close(), owner.close())
+        assert channels.owner_budget.used == channels.core_budget.used == 0

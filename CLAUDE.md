@@ -13,6 +13,8 @@ pending terminal/end delivery after execution-scope cleanup; sibling roots retai
 their independent lifetimes.
 Protected RPC admission reserves separate32 ordinary and96 stream-operation slots
 at both peers, preventing long-lived control roots from starving media progress.
+Queued response cancellation retains ownership through its sanitized acknowledgment
+and withdraws only that call; uncertain partial writes still fence the connection.
 
 Experimental delegated capability chat lives in `api/inference_gateway.py`.
 Core owns generic catalog-to-model discovery, direct owner request admission,

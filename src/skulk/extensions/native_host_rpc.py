@@ -26,13 +26,18 @@ from .native_host_protocol import (
 @final
 @dataclass(frozen=True, slots=True)
 class Reply:
-    """Handler-owned result whose body lease survives actual reply delivery."""
+    """Retain reply leases through delivery or a cancellation acknowledgment.
+
+    ``cancelled`` withdraws owning application custody when a queued response is
+    cancelled before writing. Partial writes instead retire the whole peer.
+    """
 
     outcome: Literal["complete", "pre_dispatch", "unknown"]
     parameters: dict[str, JsonValue]
     payload: bytes = b""
     release: Callable[[], None] = lambda: None
     check: Callable[[], None] = lambda: None
+    cancelled: Callable[[], None] = lambda: None
 
 
 type Handler = Callable[["Peer", RequestFrame, bytes], Awaitable[Reply]]
@@ -205,17 +210,35 @@ class Peer:
                     raise _DeliveryWithdrawnError from None
 
             try:
-                await self.stream.send(
-                    ResponseFrame(
-                        request_id=frame.request_id,
-                        outcome=reply.outcome,
-                        parameters=reply.parameters,
-                        payload_size=len(reply.payload),
-                    ),
-                    reply.payload,
-                    check=permitted,
-                )
-            except _DeliveryWithdrawnError:
+                try:
+                    await self.stream.send(
+                        ResponseFrame(
+                            request_id=frame.request_id,
+                            outcome=reply.outcome,
+                            parameters=reply.parameters,
+                            payload_size=len(reply.payload),
+                        ),
+                        reply.payload,
+                        check=permitted,
+                    )
+                except _DeliveryWithdrawnError:
+                    await self.stream.send(
+                        ResponseFrame(
+                            request_id=frame.request_id,
+                            outcome="unknown",
+                            parameters={},
+                            payload_size=0,
+                        ),
+                        b"",
+                        check=self.check,
+                    )
+            except asyncio.CancelledError:
+                if self._closed or self.stream.closed:
+                    raise
+                # A queued send has neither advanced sequence nor written bytes.
+                # Withdraw its application custody, then retain this handler and
+                # leases until the cancellation acknowledgment is delivered.
+                result.cancelled()
                 await self.stream.send(
                     ResponseFrame(
                         request_id=frame.request_id,
