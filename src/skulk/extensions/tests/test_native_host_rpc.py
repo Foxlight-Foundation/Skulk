@@ -4,11 +4,74 @@ import asyncio
 
 import pytest
 
-from skulk.extensions.native_host_protocol import RequestFrame, ResponseFrame
+from skulk.extensions.native_host_protocol import Operation, RequestFrame, ResponseFrame
 from skulk.extensions.native_host_rpc import Peer, Reply
 from skulk.extensions.tests.test_native_host_protocol import (
     Channels,
 )
+
+
+@pytest.mark.parametrize("roots", [16, 32])
+async def test_stream_control_roots_reserve_media_progress(
+    channels: Channels, roots: int
+) -> None:
+    """A full ordinary lane cannot starve admitted streams' readiness/input/output."""
+    entered: asyncio.Queue[None] = asyncio.Queue()
+    release = asyncio.Event()
+
+    async def hold(_peer: Peer, _frame: RequestFrame, _body: bytes) -> Reply:
+        entered.put_nowait(None)
+        await release.wait()
+        return Reply("complete", {}, b"ok")
+
+    core = Peer(channels.core, hold, frozenset(), lambda: None)
+    owner = Peer(
+        channels.owner,
+        hold,
+        frozenset(
+            {"infer_stream", "describe", "stream_ready", "stream_input", "stream_next"}
+        ),
+        lambda: None,
+    )
+    operations: list[Operation] = []
+    operations.extend("infer_stream" for _ in range(roots))
+    operations.extend("describe" for _ in range(32 - roots))
+    calls = [
+        asyncio.create_task(core.request(operation, {})) for operation in operations
+    ]
+    try:
+        async with asyncio.timeout(5):
+            for _ in calls:
+                await entered.get()
+            for operation in ("stream_ready", "stream_input", "stream_next"):
+                for _ in range(roots):
+                    calls.append(asyncio.create_task(core.request(operation, {})))
+            for _ in range(roots * 3):
+                await entered.get()
+            with pytest.raises(ValueError, match="capacity"):
+                await core.request("describe", {})
+            if roots == 32:
+                with pytest.raises(ValueError, match="capacity"):
+                    await core.request("stream_next", {})
+            core.check()
+            owner.check()
+            release.set()
+            for value in await asyncio.gather(*calls):
+                assert value.payload == b"ok"
+                value.release()
+            # All slots and byte leases are reusable after actual delivery.
+            result = await core.request("describe", {})
+            result.release()
+            assert channels.core_budget.used == channels.owner_budget.used == 0
+    finally:
+        release.set()
+        for call in calls:
+            if not call.done():
+                call.cancel()
+        for value in await asyncio.gather(*calls, return_exceptions=True):
+            if not isinstance(value, BaseException):
+                value.release()
+        await asyncio.gather(core.close(), owner.close())
 
 
 async def test_bidirectional_delegate_does_not_compete_for_the_reader(

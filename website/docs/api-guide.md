@@ -7028,6 +7028,10 @@ signed-derived cleanup grace. Cancellation within that grace preserves the
 authenticated owner channel and unrelated calls. Owner authority also fences
 pending terminal/end delivery after the application's execution scope has ended;
 withdrawal cancels that captured root and releases its retained media.
+The protected channel reserves a separate 96-request media lane alongside its
+32-request root/metadata lane, so admitted roots retain readiness/input/output
+capacity. The same independent lane bounds apply at sending and receiving peers;
+shared byte/frame budgets still apply to every request and response.
 
 The owner rechecks current permission and credential lifetime under the shared
 policy lock immediately before writing to the application. Active work observes

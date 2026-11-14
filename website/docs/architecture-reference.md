@@ -2643,6 +2643,9 @@ recovery remains a separate contract and test obligation.
 - `extensions/native_host_protocol.py` and `native_host_rpc.py`: mirrored private
   Core/owner protocol; fresh mutual role admission, directional authenticated
   frames, sequence/correlation fencing, bounded request tasks and cancellation.
+  Independent32 ordinary and96 stream-operation request slots reserve readiness,
+  input and output progress while control roots remain pending; both directions
+  retain shared byte/frame accounting.
   Role authentication does not authenticate the original caller.
 - `extensions/native_host_budget.py`: event-loop-owned raw byte/frame leases;
   reservations survive delivery/backpressure and are released on terminal cleanup.

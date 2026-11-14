@@ -38,6 +38,17 @@ class Reply:
 type Handler = Callable[["Peer", RequestFrame, bytes], Awaitable[Reply]]
 
 
+_STREAM_OPERATIONS = frozenset({"stream_ready", "stream_input", "stream_next"})
+
+
+def _at_capacity(operation: Operation, total: int, media: int) -> bool:
+    # The ordinary lane admits at most32 roots/metadata operations. Every active
+    # stream needs independent readiness/input/output RPCs while its control root
+    # remains pending. Reserve three bounded media slots per possible root so
+    # admitted roots cannot consume the capacity needed to finish themselves.
+    return media >= 96 if operation in _STREAM_OPERATIONS else total - media >= 32
+
+
 class _DeliveryWithdrawnError(Exception):
     """A per-call delivery guard refused before any authenticated frame write."""
 
@@ -59,6 +70,8 @@ class Peer:
         self._sequence = self._incoming = 0
         self._pending: dict[int, asyncio.Future[Received]] = {}
         self._handlers: dict[int, asyncio.Task[None]] = {}
+        self._pending_media: set[int] = set()
+        self._handler_media: set[int] = set()
         self._closed = False
         self.pump = asyncio.create_task(self._read())
 
@@ -82,12 +95,17 @@ class Peer:
         self.check()
         if not math.isfinite(cleanup_seconds) or cleanup_seconds <= 0:
             raise ValueError("native host cleanup resource bound refused")
-        if len(self._pending) >= 32 or self._sequence >= 2**53 - 1:
+        if (
+            _at_capacity(operation, len(self._pending), len(self._pending_media))
+            or self._sequence >= 2**53 - 1
+        ):
             raise ValueError("native host request capacity unavailable")
         self._sequence += 1
         identifier = self._sequence
         future: asyncio.Future[Received] = asyncio.get_running_loop().create_future()
         self._pending[identifier] = future
+        if operation in _STREAM_OPERATIONS:
+            self._pending_media.add(identifier)
         written = False
         transferred = False
 
@@ -130,6 +148,7 @@ class Peer:
                         continue
                 cleanup.result()
             self._pending.pop(identifier, None)
+            self._pending_media.discard(identifier)
             if future.done() and not future.cancelled():
                 error = future.exception()
                 if error is None and not transferred:
@@ -214,6 +233,7 @@ class Peer:
                 reply.release()
             value.release()
             self._handlers.pop(frame.request_id, None)
+            self._handler_media.discard(frame.request_id)
 
     async def _read(self) -> None:
         try:
@@ -227,12 +247,18 @@ class Peer:
                         if (
                             frame.request_id <= self._incoming
                             or frame.operation not in self.operations
-                            or len(self._handlers) >= 32
+                            or _at_capacity(
+                                frame.operation,
+                                len(self._handlers),
+                                len(self._handler_media),
+                            )
                         ):
                             raise ValueError(
                                 "native host request direction or sequence refused"
                             )
                         self._incoming = frame.request_id
+                        if frame.operation in _STREAM_OPERATIONS:
+                            self._handler_media.add(frame.request_id)
                         self._handlers[frame.request_id] = asyncio.create_task(
                             self._handle(value, frame)
                         )
@@ -272,6 +298,7 @@ class Peer:
         value.release()
         if self._handlers.get(identifier) is task:
             self._handlers.pop(identifier, None)
+            self._handler_media.discard(identifier)
         if not task.cancelled() and task.exception() is not None:
             self._fence()
 

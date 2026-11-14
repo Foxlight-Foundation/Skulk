@@ -4002,3 +4002,4 @@ bound, independent of author wire-frame limits.
 Native inference WebSocket ingress has one receive owner throughout discovery, startup and streaming. Its bounded eight-frame queue never blocks disconnect observation; current socket liveness guards protected dispatch and descendant writes.
 
 Protected stream readiness, input and output RPCs retain the selected signed cleanup grace. Owner authority withdrawal also cancels the captured root during pending terminal/end delivery after its execution scope has finished, releasing retained media without withdrawing sibling roots.
+The protected RPC channel independently admits 32 ordinary roots/metadata requests and 96 stream readiness/input/output requests, reserving progress for every admitted stream under the existing shared byte/frame budgets.
