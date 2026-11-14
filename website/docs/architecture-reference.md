@@ -2646,6 +2646,10 @@ recovery remains a separate contract and test obligation.
   Role authentication does not authenticate the original caller.
 - `extensions/native_host_budget.py`: event-loop-owned raw byte/frame leases;
   reservations survive delivery/backpressure and are released on terminal cleanup.
+  Stream readiness/input/output RPC cancellation uses the selected signed cleanup
+  grace. Owner authority withdrawal cancels the captured root even after its
+  execution scope finishes, releasing pending terminal/end media independently
+  of sibling calls.
 - `native-read-policy.json`: disabled by default; exact installation, runtime,
   capability/version and full descriptor revision grants with explicit local
   processing enrollment. `native-policy.lock` excludes updates during the final

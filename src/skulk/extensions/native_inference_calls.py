@@ -357,6 +357,7 @@ class NativeInferenceCalls:
                         lambda: self._permitted(active),
                         completed,
                         listing.stream_seconds,
+                        listing.cleanup_seconds,
                     )
                     await stream.ready(listing.startup_seconds)
                     await consume(stream)

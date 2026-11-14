@@ -7023,6 +7023,12 @@ does not acquire an implicit idle-output deadline. Current authority is checked
 again at guarded socket writes. Neither side automatically replays an uncertain
 request. WebSockets are documented here because OpenAPI cannot describe them.
 
+Each protected readiness, input and output RPC carries the selected application's
+signed-derived cleanup grace. Cancellation within that grace preserves the
+authenticated owner channel and unrelated calls. Owner authority also fences
+pending terminal/end delivery after the application's execution scope has ended;
+withdrawal cancels that captured root and releases its retained media.
+
 The owner rechecks current permission and credential lifetime under the shared
 policy lock immediately before writing to the application. Active work observes
 authority changes every 250 milliseconds and is cancelled on withdrawal. Child

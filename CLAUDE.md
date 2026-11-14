@@ -7,6 +7,11 @@ does not support Chromium installation on Ubuntu 26.04.
 
 ## Project Overview
 
+Native host stream RPC cancellation uses the selected application's signed cleanup
+grace for readiness, input and output. Owner authority remains effective through
+pending terminal/end delivery after execution-scope cleanup; sibling roots retain
+their independent lifetimes.
+
 Experimental delegated capability chat lives in `api/inference_gateway.py`.
 Core owns generic catalog-to-model discovery, direct owner request admission,
 short-lived gateway signatures and chat wire adaptation. Capabilities own their

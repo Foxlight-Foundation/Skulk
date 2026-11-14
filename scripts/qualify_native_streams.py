@@ -666,6 +666,94 @@ async def qualify(source: Path, work: Path, receipt: Path) -> None:
 
             async with connect(
                 endpoint("Server"), additional_headers=headers, proxy=None
+            ) as first, connect(
+                endpoint("Server"), additional_headers=headers, proxy=None
+            ) as second:
+                first_id = await start(first, '{"block":true,"cleanup_delay":3.25}')
+                await output(first)
+                await start(second, '{"delay":4.5}')
+                await first.close()
+                await output(second)
+                terminal, _ = await output(second)
+                assert terminal["kind"] == "completed"
+                assert (
+                    _OBJECT.validate_python(terminal["payload"], strict=True)["pid"]
+                    == expected_process
+                )
+                await output(second)
+                assert (
+                    read_private(child_root / ("cleanup-" + first_id)) == b"closed"
+                )
+            checks.append("signed-slow-cleanup-grace-preserves-same-owner-sibling")
+
+            delivery_broker = NativeInferenceCalls(
+                service_connection, settings.transport_node_id
+            )
+            delivery_withdrawn = False
+
+            async def hold_pending_end(port: NativeInferenceStream) -> None:
+                nonlocal delivery_withdrawn
+                value = await port.next_output()
+                assert value is not None and value.kind == "chunk"
+                value.release()
+                response = await port.peer.request(
+                    "stream_next",
+                    {"call_id": port.call_id},
+                    cleanup_seconds=port.cleanup_seconds,
+                )
+                try:
+                    terminal, _ = native.decode_transport_v2_packet(response.payload)
+                    assert _OBJECT.validate_json(terminal)["kind"] == "completed"
+                finally:
+                    response.release()
+                observation = await observe_native_inference(work, "streamer")
+                scopes = _OBJECT.validate_python(observation["scopes"], strict=True)
+                assert scopes["active_scopes"] == 0 and not port.control.done()
+                # Disable only this diagnostic consumer's repair watchdog. Host
+                # authentication, policy mutation and the owner watcher remain
+                # real, so Core cannot mask a leaked owner delivery phase.
+                assert delivery_broker.watch is not None
+                delivery_broker.watch.cancel()
+                await asyncio.gather(delivery_broker.watch, return_exceptions=True)
+                await policy(False)
+                async with asyncio.timeout(5):
+                    reply = await asyncio.shield(port.control)
+                assert (
+                    isinstance(reply.frame, ResponseFrame)
+                    and reply.frame.outcome == "unknown"
+                )
+                observation = await observe_native_inference(work, "streamer")
+                scopes = _OBJECT.validate_python(observation["scopes"], strict=True)
+                assert (
+                    observation["retained_payload_bytes"] == 0
+                    and scopes["active_scopes"] == 0
+                )
+                delivery_withdrawn = True
+                raise ValueError("expected withdrawn delivery outcome")
+
+            try:
+                caller = delivery_broker.callers.authenticate(credential.token)
+                try:
+                    await delivery_broker.invoke_stream(
+                        caller,
+                        identifier,
+                        "InferenceStreamerServer",
+                        "1.0.0",
+                        b"{}",
+                        hold_pending_end,
+                    )
+                    raise AssertionError("withdrawn delivery unexpectedly succeeded")
+                except ValueError:
+                    assert delivery_withdrawn
+            finally:
+                await delivery_broker.close()
+                await policy(True)
+            checks.append(
+                "owner-authority-withdrawal-drains-completed-scope-pending-end"
+            )
+
+            async with connect(
+                endpoint("Server"), additional_headers=headers, proxy=None
             ) as connection:
                 call_id = await start(connection, '{"block":true}')
                 await output(connection)

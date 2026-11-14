@@ -88,6 +88,7 @@ class NativeInferenceStream:
         authorize: Callable[[], None],
         completed: Callable[[], None],
         write_seconds: float = 300,
+        cleanup_seconds: float = 3,
     ) -> None:
         """Bind original-caller guards, declared schemas and the sole control call."""
         native = host_stream_kernel()
@@ -95,6 +96,7 @@ class NativeInferenceStream:
             raise ValueError("native stream host is unavailable")
         self.kernel, self.peer, self._call_id = native, peer, call_id
         self._mode, self.write_seconds = descriptor.io_mode, write_seconds
+        self.cleanup_seconds = cleanup_seconds
         self.control, self.authorize, self.completed = control, authorize, completed
         self.observer = native.TransportV2Observer(call_id, descriptor.io_mode)
         self.chunk_schema = self._schema(descriptor.output_chunk_schema)
@@ -134,7 +136,10 @@ class NativeInferenceStream:
                 if self.control.done():
                     raise ValueError("native stream completed before connection")
                 response = await self.peer.request(
-                    "stream_ready", {"call_id": self.call_id}, check=self._check
+                    "stream_ready",
+                    {"call_id": self.call_id},
+                    check=self._check,
+                    cleanup_seconds=self.cleanup_seconds,
                 )
                 try:
                     if (
@@ -172,7 +177,11 @@ class NativeInferenceStream:
                 raise ValueError("native stream is finished")
             self.observer.accept_input(wire)
             response = await self.peer.request(
-                "stream_input", {"call_id": self.call_id}, wire, check=self._check
+                "stream_input",
+                {"call_id": self.call_id},
+                wire,
+                check=self._check,
+                cleanup_seconds=self.cleanup_seconds,
             )
             try:
                 if (
@@ -191,7 +200,10 @@ class NativeInferenceStream:
         if not closing and len(self.borrowed) >= 8:
             raise ValueError("native stream output window unavailable")
         response = await self.peer.request(
-            "stream_next", {"call_id": self.call_id}, check=self._check
+            "stream_next",
+            {"call_id": self.call_id},
+            check=self._check,
+            cleanup_seconds=self.cleanup_seconds,
         )
         transferred = False
         try:
