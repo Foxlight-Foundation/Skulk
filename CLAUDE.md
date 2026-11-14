@@ -1209,7 +1209,9 @@ calls and delegated calls over the existing role-authenticated owner channel.
 The explicit rc4 cohort also uses `native_inference_streams.py` for all three
 stream modes. Its bearer WebSocket adapter carries exact protocol-six binary
 packets; terminal delivery requires native end, control completion and call-tree
-cleanup. Per-call byte leases, independent directions and current write guards
+cleanup. `api/server_config.py` shares the production 2 MiB WebSocket
+transport bound with installed qualification. Portable/2 JSON control values
+remain bounded to 64 KiB; larger content uses per-frame-bounded input media. Per-call byte leases, independent directions and current write guards
 keep cancellation scoped to its root. Signed connect/partial-I/O/write/cleanup
 resource bounds do not become generation deadlines. Owner root retirement
 requires actual cleanup acknowledgment or capture/reap of an uncertain process.

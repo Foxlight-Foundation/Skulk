@@ -214,7 +214,7 @@ class NativeInferenceStream:
             )
             if (
                 schema is not None
-                and fields.get("payload") is not None
+                and (fields.get("payload") is not None or fields["kind"] == "completed")
                 and not schema.matches(json.dumps(fields["payload"], allow_nan=False))
             ):
                 raise ValueError("native stream output schema refused")

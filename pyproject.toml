@@ -123,6 +123,9 @@ hook-dirs = "skulk._pyinstaller:get_hook_dirs"
 [dependency-groups]
 dev = [
   "basedpyright>=1.29.0",
+  # The signed native stream qualification uses a real stock client on every
+  # platform; it must not depend on macOS-only transitive client dependencies.
+  "websockets>=17.1,<18",
   # Execute the immutable upstream patchifiers in the wheel reference check.
   "einops==0.8.1",
   # The native inpaint oracle uses the same pyramid math as the Comfy runtime.

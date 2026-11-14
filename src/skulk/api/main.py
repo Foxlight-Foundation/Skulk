@@ -186,6 +186,7 @@ from skulk.api.realtime import (
     RealtimeTranscriptionBridge,
 )
 from skulk.api.remote_pairing import RelayLink, RemotePairingController
+from skulk.api.server_config import create_local_api_server_config
 from skulk.api.steward import (
     MAX_TOOL_RESULT_CHARS,
     STEWARD_NOT_READY_MESSAGES,
@@ -12152,14 +12153,7 @@ class API:
             self.event_receiver.close()
 
     async def run_api(self, ev: anyio.Event):
-        cfg = Config()
-        cfg.bind = [f"0.0.0.0:{self.port}"]
-        # nb: shared.logging needs updating if any of this changes
-        cfg.accesslog = None
-        cfg.errorlog = "-"
-        cfg.logger_class = InterceptLogger
-        cfg.websocket_max_message_size = REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES
-        cfg.websocket_ping_interval = 20.0
+        cfg = create_local_api_server_config(self.port)
         with anyio.CancelScope(shield=True):
             await serve(
                 cast(ASGIFramework, self.app),

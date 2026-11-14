@@ -27,13 +27,17 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from skulk.api.inference_access import ClientCreated, create_inference_access_router
 from skulk.api.native_inference import create_native_inference_router
+from skulk.api.server_config import create_local_api_server_config
 from skulk.extensions.inference_callers import ClientInventory
+from skulk.extensions.native_host_protocol import ResponseFrame
 from skulk.extensions.native_inference_authority import (
     InferenceAccessPolicy,
     inference_issuer,
 )
+from skulk.extensions.native_inference_calls import NativeInferenceCalls
 from skulk.extensions.native_inference_contracts import public_inference_kernel
 from skulk.extensions.native_inference_hosts import InferenceListing
+from skulk.extensions.native_inference_streams import NativeInferenceStream
 from skulk.extensions.runtime_artifacts import (
     RuntimeTrust,
     measure_host,
@@ -92,10 +96,12 @@ async def qualify(source: Path, work: Path, receipt: Path) -> None:
     assert settings.profile_id is not None
     issuer = inference_issuer(settings.profile_id)
     write_private(work / "host.json", settings.model_dump_json().encode())
-    connection = ServiceConnection(
+    service_connection = ServiceConnection(
         manager_root=str(work), profile_id=settings.profile_id or ""
     )
-    write_private(work / "connection.json", connection.model_dump_json().encode())
+    write_private(
+        work / "connection.json", service_connection.model_dump_json().encode()
+    )
     manager = RuntimeManager(work)
     node = NodeId(settings.transport_node_id)
     app = FastAPI()
@@ -112,12 +118,8 @@ async def qualify(source: Path, work: Path, receipt: Path) -> None:
     port = TypeAdapter(tuple[str, int]).validate_python(
         cast(object, network.getsockname()), strict=True
     )[1]
-    config = Config()
-    config.bind, config.accesslog, config.errorlog = (
-        [f"fd://{network.fileno()}"],
-        None,
-        None,
-    )
+    config = create_local_api_server_config(port)
+    config.bind = [f"fd://{network.fileno()}"]
     server: asyncio.Task[None] | None = None
     checks: list[str] = []
     runtime_digest = ""
@@ -413,7 +415,7 @@ async def qualify(source: Path, work: Path, receipt: Path) -> None:
                     elif fault == "sequence":
                         frame["sequence"] = 7
                     elif fault == "schema":
-                        frame["payload"] = "not the declared object"
+                        frame["payload"] = "not an object"
                     elif fault == "profile":
                         envelope["profile_digest"] = "0" * 64
                     else:
@@ -435,6 +437,75 @@ async def qualify(source: Path, work: Path, receipt: Path) -> None:
                         while not (child_root / ("cleanup-" + call_id)).exists():
                             await asyncio.sleep(0.01)
                 checks.append("invalid-" + fault + "-input-cancels-without-replay")
+
+            # Portable/2 fixes JSON control values at 64 KiB. Large contexts
+            # use media rather than silently changing that issued language.
+            before = read_private(child_root / "qualification-effects", 32)
+            for size in (128 * 1024, 3 * 1024 * 1024):
+                async with connect(
+                    endpoint("Server"), additional_headers=headers, proxy=None
+                ) as connection:
+                    try:
+                        await connection.send(json.dumps({"large": "x" * size}))
+                        await connection.recv()
+                        raise AssertionError("oversized JSON control was admitted")
+                    except ConnectionClosed as error:
+                        assert error.code == 1009
+                assert read_private(child_root / "qualification-effects", 32) == before
+            checks.append(
+                "production-json-control-bound-refuses-large-initial-messages-before-effects"
+            )
+            large_media = b"x" * (3 * 1024 * 1024)
+            initial = json.dumps(
+                {"input_media_sha256": hashlib.sha256(large_media).hexdigest()}
+            )
+            async with connect(
+                endpoint("Client"), additional_headers=headers, proxy=None
+            ) as connection:
+                call_id = await start(connection, initial)
+                for sequence in range(5):
+                    kind = (
+                        "started"
+                        if sequence == 0
+                        else "completed"
+                        if sequence == 4
+                        else "chunk"
+                    )
+                    frame: dict[str, JsonValue] = {
+                        "call_id": call_id,
+                        "direction": "caller_to_provider",
+                        "sequence": sequence,
+                        "kind": kind,
+                    }
+                    media = b""
+                    if kind == "chunk":
+                        frame.update(
+                            payload={"input": "large"},
+                            media={
+                                "kind": "inline",
+                                "media_type": "application/octet-stream",
+                            },
+                        )
+                        media = large_media[
+                            (sequence - 1) * 1048576 : sequence * 1048576
+                        ]
+                    await connection.send(
+                        native.encode_transport_v2_packet(json.dumps(frame), media)
+                    )
+                terminal, media = await output(connection)
+                value = _OBJECT.validate_python(terminal["payload"], strict=True)
+                assert terminal["kind"] == "completed" and not media
+                assert value["input_media_bytes"] == len(large_media)
+                assert (
+                    value["input_media_sha256"]
+                    == hashlib.sha256(large_media).hexdigest()
+                )
+                assert value["pid"] == expected_process
+                end, _ = await output(connection)
+                assert end["kind"] == "end"
+            checks.append(
+                "production-server-preserves-three-mib-streamed-input-under-per-frame-media-bounds"
+            )
 
             async with (
                 connect(
@@ -461,6 +532,73 @@ async def qualify(source: Path, work: Path, receipt: Path) -> None:
                     while not (child_root / ("cleanup-" + first_id)).exists():
                         await asyncio.sleep(0.01)
             checks.append("one-disconnected-root-does-not-cancel-same-app-sibling")
+
+            # Hold a legitimate Core consumer open after an invalid input. The
+            # owner must cancel independently of consumer/connection teardown,
+            # even when the app never reads its already-poisoned media socket.
+            broker = NativeInferenceCalls(
+                service_connection, settings.transport_node_id
+            )
+            independently_withdrawn = False
+
+            async def hold_failed_input(port: NativeInferenceStream) -> None:
+                nonlocal independently_withdrawn
+                for sequence, kind in enumerate(("started", "chunk")):
+                    frame: dict[str, JsonValue] = {
+                        "call_id": port.call_id,
+                        "direction": "caller_to_provider",
+                        "sequence": sequence,
+                        "kind": kind,
+                    }
+                    if kind == "chunk":
+                        frame["payload"] = {"input": "invalid sequence"}
+                        frame["sequence"] = 7
+                    response = await port.peer.request(
+                        "stream_input",
+                        {"call_id": port.call_id},
+                        native.encode_transport_v2_packet(json.dumps(frame), b""),
+                    )
+                    try:
+                        assert isinstance(
+                            response.frame, ResponseFrame
+                        ) and response.frame.outcome == (
+                            "complete" if kind == "started" else "unknown"
+                        )
+                    finally:
+                        response.release()
+                async with asyncio.timeout(5):
+                    await asyncio.shield(port.control)
+                assert (
+                    read_private(child_root / ("cleanup-" + port.call_id)) == b"closed"
+                )
+                observation = await observe_native_inference(work, "streamer")
+                scopes = _OBJECT.validate_python(observation["scopes"], strict=True)
+                assert (
+                    observation["dispatched_calls"] == 0
+                    and scopes["active_scopes"] == 0
+                )
+                independently_withdrawn = True
+                raise ValueError("expected failed input outcome")
+
+            try:
+                caller = broker.callers.authenticate(credential.token)
+                try:
+                    await broker.invoke_stream(
+                        caller,
+                        identifier,
+                        "InferenceStreamerClient",
+                        "1.0.0",
+                        b'{"block_before_input":true}',
+                        hold_failed_input,
+                    )
+                    raise AssertionError("failed input unexpectedly succeeded")
+                except ValueError:
+                    assert independently_withdrawn
+            finally:
+                await broker.close()
+            checks.append(
+                "owner-withdraws-unread-input-failure-before-core-consumer-closes"
+            )
 
             async with connect(
                 endpoint("Server"), additional_headers=headers, proxy=None
@@ -511,11 +649,13 @@ async def qualify(source: Path, work: Path, receipt: Path) -> None:
 
     finally:
         stopped.set()
-        if server is not None:
-            await server
-        else:
-            network.close()
-        await manager.close()
+        try:
+            if server is not None:
+                await server
+            else:
+                network.close()
+        finally:
+            await manager.close()
     write_private(
         receipt,
         (

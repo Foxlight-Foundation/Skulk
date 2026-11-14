@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Final
 
 from fastapi import (
     APIRouter,
@@ -20,7 +20,7 @@ from starlette.websockets import WebSocketState
 
 from skulk.api.inference_access import authenticate_inference_request
 from skulk.api.native_calls import OwnedNativeResponse
-from skulk.extensions.native_host_protocol import MAXIMUM_PAYLOAD, Received
+from skulk.extensions.native_host_protocol import Received
 from skulk.extensions.native_inference_calls import NativeInferenceCalls
 from skulk.extensions.native_inference_hosts import InferenceListing
 from skulk.extensions.native_inference_streams import NativeInferenceStream
@@ -29,6 +29,9 @@ from skulk.extensions.runtime_files import read_private
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.shared.constants import SKULK_CONFIG_HOME
 from skulk.shared.types.common import NodeId
+
+MAX_NATIVE_INFERENCE_JSON_BYTES: Final = 65_536
+"""Frozen portable/2 JSON value bound; larger inputs use declared stream media."""
 
 
 def create_native_inference_router(
@@ -110,7 +113,7 @@ def create_native_inference_router(
         ):
             raise HTTPException(415, "Native inference input must be application/json.")
         try:
-            reservation = service.hosts.budget.reserve(MAXIMUM_PAYLOAD)
+            reservation = service.hosts.budget.reserve(MAX_NATIVE_INFERENCE_JSON_BYTES)
         except ValueError:
             raise HTTPException(
                 503, "Native inference capacity is unavailable."
@@ -122,7 +125,7 @@ def create_native_inference_router(
                 async with asyncio.timeout(10):
                     body = bytearray()
                     async for chunk in request.stream():
-                        if len(chunk) > MAXIMUM_PAYLOAD - len(body):
+                        if len(chunk) > MAX_NATIVE_INFERENCE_JSON_BYTES - len(body):
                             raise HTTPException(
                                 413, "Native inference input exceeds its byte bound."
                             )
@@ -217,11 +220,11 @@ def create_native_inference_router(
             caller = await authenticate_inference_request(
                 socket, service.callers, node_id
             )
-            reservation = service.hosts.budget.reserve(MAXIMUM_PAYLOAD)
+            reservation = service.hosts.budget.reserve(MAX_NATIVE_INFERENCE_JSON_BYTES)
             await socket.accept(headers=[(b"cache-control", b"no-store")])
             async with asyncio.timeout(10):
                 payload = (await socket.receive_text()).encode()
-            if len(payload) > MAXIMUM_PAYLOAD:
+            if len(payload) > MAX_NATIVE_INFERENCE_JSON_BYTES:
                 await socket.close(
                     1009, "Native inference input exceeds its byte bound."
                 )

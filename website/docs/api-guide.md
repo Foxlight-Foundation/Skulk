@@ -6953,7 +6953,8 @@ enrollment, and owner access does not inherit another client's permissions.
 | `GET /v1/native-inference` | Observe exact signed, selected, ready inference/read destinations and their current child incarnations. Owners may inspect all declarations for enrollment; clients see only their permitted destinations. A listing includes the full descriptor, target, signed runtime, optional signed `inference_seconds` ceiling and signed-derived `startup_seconds`, `stream_seconds` and `cleanup_seconds` resource bounds. Stream modes appear only when the actual owner and reader support them. Discovery uses shared bounded host admission; unavailable owners supply no executable capacity and discovery grants no permission. |
 | `POST /v1/native-inference/{plugin_id}/{capability_id}/{version}/call` | Send the exact JSON object as raw `application/json`. The path selects an exact implementation. Optional positive finite `timeout_seconds` adds a request duration ceiling; omission adds none. Intersect request, current credential, per-caller owner and signed application ceilings. Return the application's JSON object. Both Core and owner verify original caller, effect, domain, runtime, descriptor, mode, request bytes and active parent bindings. This adapter admits unary `read`/`inference`, including authorized delegation between installed applications. It does not select a model or implement a router. |
 
-Input and output retain the 16 MiB per-frame resource bound. Uploads have an
+JSON input and schema-validated results obey the frozen portable/2 64 KiB
+value bound. Larger request content uses declared caller input media. Uploads have an
 independent ten-second deadline. Resource, health and partial-I/O bounds do not
 become generation timeouts or request allowances. Unsupported modes and governed
 effects are not advertised by this adapter. The JSON call endpoint remains unary;
@@ -6979,7 +6980,10 @@ WebSocket constructor. Authentication/host failures before acceptance result in
 a refused handshake (normally HTTP 403).
 
 After acceptance the client sends exactly one text message containing the raw
-JSON input object, within ten seconds and at most 16 MiB. These exact bytes bind
+JSON input object, within ten seconds and at most 64 KiB. The production server
+retains its 2 MiB message bound; individual native binary packets use at most
+1 MiB media plus 64 KiB metadata. Larger contexts use multiple media packets
+under the application's declared input contract. These exact bytes bind
 the original caller context. Core then sends one text event:
 `{"type":"ready","call_id":"<host-assigned ID>","mode":"<signed mode>"}`.
 This event observes the existing admitted call; polling never creates fresh work.
