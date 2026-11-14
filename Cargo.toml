@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["rust/networking", "rust/skulk_pyo3_bindings", "rust/util"]
+exclude = ["rust/vendor/libp2p-gossipsub"]
 
 [workspace.package]
 version = "0.0.1"
@@ -133,3 +134,8 @@ unused_result_ok = "warn"
 unused_trait_names = "warn"
 unwrap_used = "warn"
 verbose_file_reads = "warn"
+
+# Keep the pinned protocol implementation while repairing subscription loss when
+# one of a peer's overlapping connections closes. See the vendor provenance.
+[patch.crates-io]
+libp2p-gossipsub = { path = "rust/vendor/libp2p-gossipsub" }

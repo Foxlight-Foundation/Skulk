@@ -95,12 +95,12 @@ async def configured(
             owner_id="library",
             operation_id="configure-" + str(time.monotonic_ns()),
             kind="configure",
-            policy_id=(await host.mirrors.page()).policy_id,
+            policy_id=(await available_mirror_page(host)).policy_id,
             configuration=settings or configuration(),
         ),
     )
     assert job.state == "succeeded", job
-    page = await host.mirrors.page()
+    page = await available_mirror_page(host)
     assert page.policy_id is not None
     return page.policy_id
 
@@ -264,7 +264,7 @@ async def test_uncapped_uploads_and_announcement_wait_for_the_disclosure(
         assert state.egress_daily is None and state.egress_monthly is None
         assert state.schema_version == "foxlight.mirror-state.v6"
         assert state.announce is None  # Saved, but nothing is announced yet.
-        page = await host.mirrors.page()
+        page = await available_mirror_page(host)
         assert page.configuration is not None
         assert page.configuration.egress_daily is None
         assert page.configuration.public_url == "http://198.51.100.7:8743"
@@ -276,7 +276,7 @@ async def test_uncapped_uploads_and_announcement_wait_for_the_disclosure(
         state = ledger.read()
         assert state.announce is not None
         assert (state.announce.dht, state.announce.nostr) == (True, True)
-        page = await host.mirrors.page()
+        page = await available_mirror_page(host)
         assert page.configuration is not None
         assert page.configuration.announce_disclosure == 1
         # Configured, but no controller runs: still nothing is announced.
@@ -315,12 +315,12 @@ async def test_intake_is_fenced_refused_beside_a_controller_and_clears_the_grant
         assert busy.state == "failed" and busy.error_code == "mirror_busy_stop_first"
         await host.mirrors.cancel(controller.job_id)
 
-        policy = (await host.mirrors.page()).policy_id
+        policy = (await available_mirror_page(host)).policy_id
         assert policy is not None
         expires = await grant(host, policy)
         saved = await intake(host, policy)
         assert saved.state == "succeeded" and saved.kind == "intake"
-        page = await host.mirrors.page()
+        page = await available_mirror_page(host)
         assert page.intake == MirrorIntake(
             share="eligible", licenses=(LICENCE,), definition=1
         )
@@ -337,7 +337,7 @@ async def test_intake_is_fenced_refused_beside_a_controller_and_clears_the_grant
             host, page.policy_id, withheld=("c" * 64,), operation="narrow"
         )
         assert narrowed.state == "succeeded", narrowed
-        page = await host.mirrors.page()
+        page = await available_mirror_page(host)
         assert page.restart_expires == expires
         assert page.intake is not None and page.intake.withheld == ("c" * 64,)
     finally:
@@ -352,7 +352,7 @@ async def test_a_covered_public_copy_joins_a_running_mirror_without_new_consent(
     try:
         policy = await configured(host)
         assert (await intake(host, policy)).state == "succeeded"
-        policy = (await host.mirrors.page()).policy_id
+        policy = (await available_mirror_page(host)).policy_id
         assert policy is not None
         expires = await grant(host, policy)
         first = await resume(host, policy)
@@ -360,7 +360,7 @@ async def test_a_covered_public_copy_joins_a_running_mirror_without_new_consent(
         _, identity = await public_copy(host, tmp_path, "covered")
         async with asyncio.timeout(60):
             while True:
-                page = await host.mirrors.page()
+                page = await available_mirror_page(host)
                 running = (
                     page.controller_job_id is not None
                     and page.controller_job_id != first.job_id
@@ -400,28 +400,28 @@ async def test_standing_intake_leaves_uncovered_withheld_and_stopped_copies_alon
         policy = await configured(host)
         # Licence not on the list: left for the owner's own review.
         assert (await intake(host, policy, licences=("mit",))).state == "succeeded"
-        policy = (await host.mirrors.page()).policy_id
+        policy = (await available_mirror_page(host)).policy_id
         assert policy is not None
         await grant(host, policy)
         controller = await resume(host, policy)
         await public_copy(host, tmp_path, "unlisted")
         await asyncio.sleep(1)
-        page = await host.mirrors.page()
+        page = await available_mirror_page(host)
         assert page.model_count == 0 and page.controller_job_id == controller.job_id
         await host.mirrors.cancel(controller.job_id)
 
         # Stopped (paused): never admitted, even when the licence is listed.
-        policy = (await host.mirrors.page()).policy_id
+        policy = (await available_mirror_page(host)).policy_id
         assert policy is not None
         assert (
             await intake(host, policy, licences=(LICENCE,), operation="listed")
         ).state == "succeeded"
-        policy = (await host.mirrors.page()).policy_id
+        policy = (await available_mirror_page(host)).policy_id
         assert policy is not None
         await grant(host, policy)
         await public_copy(host, tmp_path, "while-stopped")
         await asyncio.sleep(1)
-        assert (await host.mirrors.page()).model_count == 0
+        assert (await available_mirror_page(host)).model_count == 0
 
         # Chosen share mode admits nothing on its own.
         assert (
@@ -429,13 +429,13 @@ async def test_standing_intake_leaves_uncovered_withheld_and_stopped_copies_alon
                 host, policy, licences=(LICENCE,), share="chosen", operation="chosen"
             )
         ).state == "succeeded"
-        policy = (await host.mirrors.page()).policy_id
+        policy = (await available_mirror_page(host)).policy_id
         assert policy is not None
         await grant(host, policy)
         controller = await resume(host, policy)
         await public_copy(host, tmp_path, "not-chosen")
         await asyncio.sleep(1)
-        page = await host.mirrors.page()
+        page = await available_mirror_page(host)
         assert page.model_count == 0 and page.controller_job_id == controller.job_id
         assert not host.journal.mirror_jobs("core-intake", 0)
     finally:
@@ -610,7 +610,7 @@ async def standing_mirror(host: PreservationHost) -> MirrorJob:
     """Configure an eligible intake policy, grant it and start the resume run."""
     policy = await configured(host)
     assert (await intake(host, policy)).state == "succeeded"
-    policy = (await host.mirrors.page()).policy_id
+    policy = (await available_mirror_page(host)).policy_id
     assert policy is not None
     await grant(host, policy)
     return await resume(host, policy)
@@ -721,10 +721,10 @@ async def test_concurrent_offers_all_join_one_running_mirror(tmp_path: Path) -> 
     host = empty_host(tmp_path)
     try:
         first = await standing_mirror(host)
-        expires = (await host.mirrors.page()).restart_expires
+        expires = (await available_mirror_page(host)).restart_expires
         copies = [await public_copy(host, tmp_path, f"copy-{n}") for n in range(3)]
         await admission_ended(host)
-        page = await host.mirrors.page()
+        page = await available_mirror_page(host)
         retained = {model.manifest_id for model in page.models}
         assert {identity for _, identity in copies} <= retained
         assert all(model.state == "retained" for model in page.models)
@@ -746,7 +746,7 @@ async def test_a_failed_automatic_retain_resumes_the_unchanged_sharing(
     host = empty_host(tmp_path)
     try:
         first = await standing_mirror(host)
-        page = await host.mirrors.page()
+        page = await available_mirror_page(host)
         approval = host.journal.setting("mirror-approved-resume")
         original_source = host.mirrors.source
         opened = 0
@@ -771,7 +771,7 @@ async def test_a_failed_automatic_retain_resumes_the_unchanged_sharing(
         # The ledger's grant never changed, so Core's approval is restored and
         # the earlier sharing resumes under it.
         assert host.journal.setting("mirror-approved-resume") == approval
-        after = await host.mirrors.page()
+        after = await available_mirror_page(host)
         assert after.policy_id == page.policy_id and after.model_count == 0
         assert after.controller_job_id not in {None, first.job_id}
         assert after.activity is not None and after.activity.running
