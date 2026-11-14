@@ -28,7 +28,10 @@ def check_archive(archive: Path, source_root: Path) -> dict[str, str | int]:
     on return; this function never builds, installs or starts the bindings.
     """
     expected_vendor = source_root / "rust/vendor/libp2p-gossipsub"
-    expected_files = sorted(expected_vendor.rglob("*.rs"))
+    # Cargo generates Rust under target/. Only crate source and test roots belong
+    # in this inventory; compiler output must not become a shipping requirement.
+    expected_files = sorted((expected_vendor / "src").rglob("*.rs"))
+    expected_files.extend(sorted((expected_vendor / "tests").rglob("*.rs")))
     expected_files.extend(
         expected_vendor / name
         for name in ("FOXLight-PATCH.md", "upstream-provenance.json")
