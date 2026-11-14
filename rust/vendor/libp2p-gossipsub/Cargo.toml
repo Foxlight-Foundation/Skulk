@@ -10,8 +10,8 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-# Retain upstream provenance in Git; Cargo regenerates this reserved package file.
-exclude = ["Cargo.toml.orig"]
+# Retain upstream provenance in Git; Cargo regenerates these reserved files.
+exclude = [".cargo_vcs_info.json", "Cargo.toml.orig"]
 edition = "2021"
 rust-version = "1.83.0"
 name = "libp2p-gossipsub"

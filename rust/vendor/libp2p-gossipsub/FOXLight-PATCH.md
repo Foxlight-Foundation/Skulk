@@ -36,9 +36,11 @@ The networking crate declares this backport as a direct path dependency and uses
 its crate alias; the workspace patch keeps libp2p's re-export on the same package.
 Maturin does not discover registry overrides when collecting source dependencies.
 The direct declaration makes its archive self-contained without changing resolved
-features or other dependency versions. The original `Cargo.toml.orig` remains in
-Git for provenance but is excluded from repackaging because Cargo reserves that
-filename. CI extracts the real bindings source archive, resolves it with the
+features or other dependency versions. The original `Cargo.toml.orig` and
+`.cargo_vcs_info.json` remain in Git for provenance but are excluded from
+repackaging because Cargo regenerates these reserved files. The original VCS
+identity is also recorded in `upstream-provenance.json`. CI extracts the real
+bindings source archive, resolves it with the
 production lock, and compares the backport's Rust source and provenance files.
 
 Only `src/behaviour.rs` changes runtime behavior. `src/handler.rs` registers the

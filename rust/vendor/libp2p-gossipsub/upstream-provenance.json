@@ -45,7 +45,7 @@
     "tests/smoke.rs": "6935da6d8fbb4b501d3f621a11b2892d5c8c5c2ad1555dfb4bcff2e866ed7617"
   },
   "local_changes": [
-    "Cargo.toml: test-only Ed25519 and restored upstream QuickCheck development dependency",
+    "Cargo.toml: test-only Ed25519, restored upstream QuickCheck development dependency, and exclusion of Cargo-regenerated reserved provenance files from repackaging",
     "Cargo.lock: freeze restored library-test-only QuickCheck and env_logger dependencies",
     "src/behaviour.rs: repeat current subscriptions for additional connections and remaining connections after close",
     "src/handler.rs: register regression tests",
