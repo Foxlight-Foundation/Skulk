@@ -2668,3 +2668,5 @@ separately. Normal journaled Core reattachment preserves enrolled bearers,
 credential lifetimes, revocations and exact grants; stale transport attachments
 still refuse. Authority records share an explicit 128 KiB protected-storage
 bound, independent of author wire-frame limits.
+
+Native inference WebSocket: sole receive/disconnect task starts after the initial JSON; queue8 plus in-flight input uses shared byte leases, saturation cancels the root, and trusted liveness guards persist across dispatch/delegation.

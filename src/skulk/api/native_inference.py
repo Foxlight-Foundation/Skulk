@@ -20,6 +20,7 @@ from starlette.websockets import WebSocketState
 
 from skulk.api.inference_access import authenticate_inference_request
 from skulk.api.native_calls import OwnedNativeResponse
+from skulk.extensions.native_host_budget import PayloadReservation
 from skulk.extensions.native_host_protocol import Received
 from skulk.extensions.native_inference_calls import NativeInferenceCalls
 from skulk.extensions.native_inference_hosts import InferenceListing
@@ -214,6 +215,10 @@ def create_native_inference_router(
         ambient owner fallback, aggregate output allowance or automatic replay.
         """
         call: asyncio.Task[None] | None = None
+        watch: asyncio.Task[None] | None = None
+        ingress_queue: asyncio.Queue[tuple[bytes, PayloadReservation]] = asyncio.Queue(
+            8
+        )
         reservation = None
         try:
             service = await host()
@@ -231,6 +236,28 @@ def create_native_inference_router(
                 return
             reservation.shrink(len(payload))
 
+            async def receive() -> None:
+                # One receiver owns disconnect observation even during discovery,
+                # startup and owner write backpressure. Never block it on a put.
+                while True:
+                    wire = await socket.receive_bytes()
+                    if len(wire) > 1048576 + 65540:
+                        raise ValueError("native stream frame exceeds bound")
+                    lease = service.hosts.budget.reserve(len(wire))
+                    try:
+                        ingress_queue.put_nowait((wire, lease))
+                    except asyncio.QueueFull:
+                        lease.release()
+                        raise ValueError(
+                            "native stream input window unavailable"
+                        ) from None
+
+            watch = asyncio.create_task(receive())
+
+            def connected() -> None:
+                if watch.done():
+                    raise ValueError("native stream caller disconnected")
+
             async def consume(port: NativeInferenceStream) -> None:
                 async with asyncio.timeout(port.write_seconds):
                     await socket.send_json(
@@ -243,10 +270,12 @@ def create_native_inference_router(
 
                 async def ingress() -> None:
                     while True:
-                        wire = await socket.receive_bytes()
-                        if len(wire) > 1048576 + 65540:
-                            raise ValueError("native stream frame exceeds bound")
-                        await port.send_input(wire)
+                        wire, lease = await ingress_queue.get()
+                        try:
+                            connected()
+                            await port.send_input(wire)
+                        finally:
+                            lease.release()
 
                 async def egress() -> None:
                     while (value := await port.next_output()) is not None:
@@ -293,10 +322,17 @@ def create_native_inference_router(
                     payload,
                     consume,
                     timeout_seconds,
+                    caller_guard=connected,
                 )
             )
             try:
-                await asyncio.shield(call)
+                done, _ = await asyncio.wait(
+                    (call, watch), return_when=asyncio.FIRST_COMPLETED
+                )
+                if watch in done:
+                    watch.result()
+                    raise ValueError("native stream receiver ended")
+                call.result()
             except asyncio.CancelledError:
                 if call.done() and call.cancelled():
                     await socket.close(
@@ -321,11 +357,18 @@ def create_native_inference_router(
 
             async def cleanup() -> None:
                 try:
+                    if call is not None and not call.done() and call.cancelling() == 0:
+                        call.cancel()
+                    if watch is not None and not watch.done():
+                        watch.cancel()
                     if call is not None:
-                        if not call.done() and call.cancelling() == 0:
-                            call.cancel()
                         await _drain_stream_call(call)
+                    if watch is not None:
+                        await asyncio.gather(watch, return_exceptions=True)
                 finally:
+                    while not ingress_queue.empty():
+                        _, lease = ingress_queue.get_nowait()
+                        lease.release()
                     if reservation is not None:
                         reservation.release()
 

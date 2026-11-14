@@ -6987,6 +6987,11 @@ under the application's declared input contract. These exact bytes bind
 the original caller context. Core then sends one text event:
 `{"type":"ready","call_id":"<host-assigned ID>","mode":"<signed mode>"}`.
 This event observes the existing admitted call; polling never creates fresh work.
+One receiver observes disconnects from initial JSON admission through discovery,
+startup and active streaming. Caller media uses an eight-frame, shared-byte-budget
+queue plus the current write; queue saturation withdraws the call. A blocked
+owner write cannot block disconnect observation. Socket liveness is rechecked at
+protected dispatch/delivery fences and inherited by delegated calls.
 
 Subsequent application messages are **binary** packets from the public
 `skulk.transport/2` codec (protocol six), not JSON text or base64 wrappers. Use the

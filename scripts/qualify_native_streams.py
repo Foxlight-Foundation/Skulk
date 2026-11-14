@@ -600,6 +600,70 @@ async def qualify(source: Path, work: Path, receipt: Path) -> None:
                 "owner-withdraws-unread-input-failure-before-core-consumer-closes"
             )
 
+            pull_broker = NativeInferenceCalls(
+                service_connection, settings.transport_node_id
+            )
+            pull_withdrawn = False
+
+            async def hold_cancelled_pull(port: NativeInferenceStream) -> None:
+                nonlocal pull_withdrawn
+                value = await port.next_output()
+                assert value is not None and value.kind == "chunk"
+                value.release()
+                pending = asyncio.create_task(
+                    port.peer.request("stream_next", {"call_id": port.call_id})
+                )
+                try:
+                    # The subsequent ready reply crosses the same ordered Core
+                    # channel after the pull was admitted. Keep its root request
+                    # open while cancelling only the output observation.
+                    await asyncio.sleep(0)
+                    ready = await port.peer.request(
+                        "stream_ready", {"call_id": port.call_id}
+                    )
+                    ready.release()
+                    assert not pending.done()
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+                    async with asyncio.timeout(5):
+                        await asyncio.shield(port.control)
+                    assert (
+                        read_private(child_root / ("cleanup-" + port.call_id))
+                        == b"closed"
+                    )
+                    observation = await observe_native_inference(work, "streamer")
+                    scopes = _OBJECT.validate_python(observation["scopes"], strict=True)
+                    assert (
+                        observation["dispatched_calls"] == 0
+                        and scopes["active_scopes"] == 0
+                    )
+                    pull_withdrawn = True
+                    raise ValueError("expected cancelled pull outcome")
+                finally:
+                    if not pending.done():
+                        pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+
+            try:
+                caller = pull_broker.callers.authenticate(credential.token)
+                try:
+                    await pull_broker.invoke_stream(
+                        caller,
+                        identifier,
+                        "InferenceStreamerServer",
+                        "1.0.0",
+                        b'{"block":true}',
+                        hold_cancelled_pull,
+                    )
+                    raise AssertionError("cancelled pull unexpectedly succeeded")
+                except ValueError:
+                    assert pull_withdrawn
+            finally:
+                await pull_broker.close()
+            checks.append(
+                "owner-withdraws-cancelled-output-pull-before-core-root-closes"
+            )
+
             async with connect(
                 endpoint("Server"), additional_headers=headers, proxy=None
             ) as connection:
@@ -667,7 +731,7 @@ async def qualify(source: Path, work: Path, receipt: Path) -> None:
                     "runtime_digest": runtime_digest,
                     "skulk_build_sha256": measured.skulk_build_sha256,
                     "checks": checks,
-                    "scope": "Real TCP bearer WebSocket; normal signed public-SDK application; same-host streaming. No provider-account, migration, routing or distributed claim.",
+                    "scope": "Real TCP bearer WebSocket and independent protected Core consumers; normal signed public-SDK application; same-host streaming. No provider-account, migration, routing or distributed claim.",
                 },
                 indent=2,
                 sort_keys=True,

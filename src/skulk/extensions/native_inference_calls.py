@@ -77,6 +77,7 @@ class _Active:
     expires_at: float | None
     deadline: int | None
     task: asyncio.Task[object]
+    caller_guard: Callable[[], None] | None = None
     children: set[asyncio.Task[object]] = field(default_factory=set)
     next_delegation: int = 1
     delegating: bool = False
@@ -117,6 +118,8 @@ class NativeInferenceCalls:
         return seconds
 
     def _permitted(self, active: _Active) -> None:
+        if active.caller_guard is not None:
+            active.caller_guard()
         if self.closed:
             raise ValueError("inference Core host unavailable")
         authorization = self.callers.authorize(active.caller, active.listing.grant())
@@ -159,14 +162,25 @@ class NativeInferenceCalls:
         payload: bytes,
         consume: Callable[[NativeInferenceStream], Awaitable[None]],
         seconds: float | None = None,
+        *,
+        caller_guard: Callable[[], None] | None = None,
     ) -> None:
         """Own one exact stream and drain it through a trusted application adapter.
 
         The adapter must release borrowed output and consume through its terminal.
         Failure or cancellation drains the same invocation; it never replays work.
+        A trusted adapter may provide a synchronous liveness guard, rechecked at
+        discovery, dispatch, descendant calls and each protected physical write.
         """
         result = await self._invoke(
-            caller, plugin_id, capability_id, version, payload, seconds, consume
+            caller,
+            plugin_id,
+            capability_id,
+            version,
+            payload,
+            seconds,
+            consume,
+            caller_guard,
         )
         result.release()
 
@@ -179,6 +193,7 @@ class NativeInferenceCalls:
         payload: bytes,
         seconds: float | None = None,
         consume: Callable[[NativeInferenceStream], Awaitable[None]] | None = None,
+        caller_guard: Callable[[], None] | None = None,
     ) -> Received:
         """Dispatch one exact caller-authorized implementation without automatic replay.
 
@@ -192,7 +207,11 @@ class NativeInferenceCalls:
         ):
             raise ValueError("inference request duration refused")
         async with asyncio.timeout_at(None if seconds is None else started + seconds):
+            if caller_guard is not None:
+                caller_guard()
             directory = await self.directory.directory(streaming=consume is not None)
+            if caller_guard is not None:
+                caller_guard()
             matches = [
                 value
                 for value in directory
@@ -255,7 +274,7 @@ class NativeInferenceCalls:
                 ),
             )
             return await self._dispatch(
-                listing, context, caller, payload, expiry, consume
+                listing, context, caller, payload, expiry, consume, caller_guard
             )
 
     async def _dispatch(
@@ -266,6 +285,7 @@ class NativeInferenceCalls:
         payload: bytes,
         expiry: float | None,
         consume: Callable[[NativeInferenceStream], Awaitable[None]] | None = None,
+        caller_guard: Callable[[], None] | None = None,
     ) -> Received:
         fields = _OBJECT.validate_json(context.canonical())
         if (
@@ -291,6 +311,7 @@ class NativeInferenceCalls:
             expiry,
             _DEADLINE.validate_python(fields["deadline_unix_ms"], strict=True),
             current,
+            caller_guard=caller_guard,
         )
         self._permitted(active)
         call_id = secrets.token_hex(32)
@@ -501,6 +522,7 @@ class NativeInferenceCalls:
                 parent.caller,
                 payload,
                 min(expiries) if expiries else None,
+                caller_guard=parent.caller_guard,
             )
             transferred = True
             return Reply("complete", {}, response.payload, response.release)

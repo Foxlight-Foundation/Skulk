@@ -3998,3 +3998,5 @@ separately. Normal journaled Core reattachment preserves enrolled bearers,
 credential lifetimes, revocations and exact grants; stale transport attachments
 still refuse. Authority records share an explicit 128 KiB protected-storage
 bound, independent of author wire-frame limits.
+
+Native inference WebSocket ingress has one receive owner throughout discovery, startup and streaming. Its bounded eight-frame queue never blocks disconnect observation; current socket liveness guards protected dispatch and descendant writes.

@@ -2721,3 +2721,5 @@ separately. Normal journaled Core reattachment preserves enrolled bearers,
 credential lifetimes, revocations and exact grants; stale transport attachments
 still refuse. Authority records share an explicit 128 KiB protected-storage
 bound, independent of author wire-frame limits.
+
+Native inference sockets keep a sole receiver active during discovery, startup and blocked input writes. Eight queued frames plus the current write use shared payload leases; saturation/disconnect withdraws the exact root and a synchronous trusted caller guard protects dispatch and descendant writes.
