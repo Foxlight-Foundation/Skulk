@@ -345,21 +345,24 @@ async def test_inventory_loop_contains_scan_failure_and_retries(
 
     node = _publisher_node(_RecordingTelemetrySender())
     attempts = 0
+    recovered = anyio.Event()
 
     async def fail_then_publish(_self: Node) -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise OSError("temporary model root failure")
+        recovered.set()
 
     node._publish_artifact_inventory = MethodType(fail_then_publish, node)
     monkeypatch.setattr(skulk_main, "ARTIFACT_INVENTORY_REFRESH_SECONDS", 0.01)
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(node._artifact_inventory_loop)
-        with anyio.fail_after(0.25):
-            while attempts < 2:
-                await anyio.sleep(0.001)
+        # This verifies recovery, not a latency SLA for exception logging under
+        # a busy test host. Observe the successful retry directly instead of polling.
+        with anyio.fail_after(5):
+            await recovered.wait()
         task_group.cancel_scope.cancel()
 
     assert attempts >= 2
@@ -516,9 +519,7 @@ async def test_store_only_node_persists_master_ordered_model_trust(
                 ),
             )
         )
-        snapshot = State(
-            model_trust_approved_remote_code_identities=(second_identity,)
-        )
+        snapshot = State(model_trust_approved_remote_code_identities=(second_identity,))
         await event_sender.send(
             IndexedEvent(idx=2, event=StateSnapshotHydrated(state=snapshot))
         )
@@ -557,9 +558,7 @@ async def test_store_only_trust_persistence_failure_keeps_event_tap_alive(
         attempts.append(tuple(sorted(approvals)))
         raise OSError("read-only config")
 
-    monkeypatch.setattr(
-        skulk_main, "persist_model_trust_config", fail_persistence
-    )
+    monkeypatch.setattr(skulk_main, "persist_model_trust_config", fail_persistence)
     node = _publisher_node(_RecordingTelemetrySender())
     event_sender, event_receiver = channel[IndexedEvent](2)
     node.artifact_inventory_event_receiver = event_receiver
@@ -769,9 +768,15 @@ async def test_node_follows_the_generation_the_store_holds(
         update={"verification": "registry_verified"}
     )
     client = _RegistryStoreClient(
-        [{"model_id": str(card.model_id), "installed_card": record.model_dump(mode="json")}]
+        [
+            {
+                "model_id": str(card.model_id),
+                "installed_card": record.model_dump(mode="json"),
+            }
+        ]
     )
     recorded: list[dict[ModelId, str]] = []
+
     def remember(identities: dict[ModelId, str]) -> None:
         recorded.append(dict(identities))
 

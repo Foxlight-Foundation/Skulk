@@ -1,0 +1,57 @@
+{
+  "upstream_crate": "libp2p-gossipsub",
+  "version": "0.49.5",
+  "archive_sha256": "3573f3d8e30bd62cda336df5c7c1041a1caa40a648376b8e1e274d585c0ed25c",
+  "original_vcs": {
+    "git": {
+      "sha1": "d6a16b6a88959d1b25e9807d89959b2f9127724c"
+    },
+    "path_in_vcs": "protocols/gossipsub"
+  },
+  "original_files": {
+    ".cargo_vcs_info.json": "694227211a1163493cf2cec94281804f9d3b9de476f6f2f82e095fb58baab3b4",
+    "CHANGELOG.md": "2a36532de2531efb3109394fa10c78b9059c0c8d5d52cd4e09ff269b6968c13b",
+    "Cargo.lock": "3de23d8804ae4837be373addffde59b4456bd303eadf4ec15e10b47ea83f3074",
+    "Cargo.toml": "988b744acf13c79eb12ac3a5f0e2bd6477435b048cf5b8f62af14459679f89eb",
+    "Cargo.toml.orig": "ac54d8b2d817a67a2a81a98f18cb330dce171d335c4f0bc66c5941a69ce76c64",
+    "src/backoff.rs": "0af5e555567d7788602f8ad1ff977ce0a9214585a13d88a86421be40a661aa22",
+    "src/behaviour/tests.rs": "aea98e969f23e7e69786d000c9ae693c91e8d5a062ff3b32af3729cb69a4f28d",
+    "src/behaviour.rs": "494714fb728d6c5b3dd3c0ceb115372dbcd2fd26367d4a882fd0b4af75130225",
+    "src/config.rs": "78433a00e1272a673d9794179f292e72f0c128cc0f03b164accc9f74b31064ed",
+    "src/error.rs": "4151bee368a96ac01338ca765618ef4d44c3bb864b63444301ddd8d846dfffe0",
+    "src/generated/compat/mod.rs": "b46ffabbff515cdcc5bce0fc3c54f01b3aa0525199d4f79228b0e7c13d53c5ab",
+    "src/generated/compat/pb.rs": "20ec3660d700f07aa29813222b5899217ad175993c786e6f1ab01f818e0b3354",
+    "src/generated/compat.proto": "b429afd2343843617f886f09b62a06fbb00a84d910f2b47810e4be3ae300b517",
+    "src/generated/gossipsub/mod.rs": "b46ffabbff515cdcc5bce0fc3c54f01b3aa0525199d4f79228b0e7c13d53c5ab",
+    "src/generated/gossipsub/pb.rs": "01e1679d6a9ed0a939327a72594970df8efbe2942f67c38628466a7607c56d83",
+    "src/generated/mod.rs": "fb32d5c38ecdb43a5a63a58e59ed0405df640fc6ad2eb60702dcf32f26fd0944",
+    "src/generated/rpc.proto": "0a069b08f38a5931951ca6744d75fbe2bdd30a3966eeaa2c9f174828e803eaea",
+    "src/gossip_promises.rs": "0ca8fea2cf104fe8549cb4981dd7fbd2633bd9865733e5895011952e99931a64",
+    "src/handler.rs": "32ff1b36444486984fb6a431ef97c62391061139ee75325a4d7482e3696e1d83",
+    "src/lib.rs": "70bab73b87d8b809b20c11c5e086f0d15b3cb56aaa0fca26c79413ceb191ca7a",
+    "src/mcache.rs": "ecc6d605222d6a56035f974df4cacf80beee8fa98c16c96f4c8aa3d5a94b77b7",
+    "src/metrics.rs": "387681b4d9e9952523e68eb2b67f427bd3d21499d78b9d9699d91d954246ffbb",
+    "src/peer_score/params.rs": "e7a59baa4e72044a5123e355e655fb578ecc3718aa237af1ba76a3b2b1b1c88a",
+    "src/peer_score/tests.rs": "7da4eff4ff7fe8b7f417730bb63c8002f964bca4e9c6af892c2b7c8c772c0cf1",
+    "src/peer_score.rs": "87fe77e4c82e8a2a4f9cc352a7300ad5ed54dce2bdf9792c538356ea4468e225",
+    "src/protocol.rs": "b2b447220a3c1aeb8bd56a92f7c6c2920d959ceefcd1a7035fd1ec4b433eb95b",
+    "src/rpc.rs": "9f0b94b8fb5e1052aecc642cf145c47d41b7fb7096e7c8d94cab6de622061039",
+    "src/rpc_proto.rs": "47e1b7d87d3c7b5dc23add7ab6015caca14a119e4b5a7f1ee6cccd6956ecf100",
+    "src/subscription_filter.rs": "4eaac8cb45edc1c2f2b9710dead664d4ddee73b5ec2b6c3ffea019cbd310dea8",
+    "src/time_cache.rs": "5ea122f02a33cc2f7ed29842906368f6d0031b12aedd0c44b01c69bd3ad750af",
+    "src/topic.rs": "0249c4bd950c2a9340127b395f82b7a55fa8fd8339dd67c35b0b8f8f26b6082d",
+    "src/transform.rs": "43cd9ffcb62adee8d868bb7c972da8f8b0fd944b876dab7558850ee0ade6e8b9",
+    "src/types.rs": "00f6e2ae34e30400736e24bc973303cb936b0a4b798b9fd1d39c90b3f0da24a9",
+    "tests/smoke.rs": "6935da6d8fbb4b501d3f621a11b2892d5c8c5c2ad1555dfb4bcff2e866ed7617"
+  },
+  "local_changes": [
+    "Cargo.toml: test-only Ed25519 and restored upstream QuickCheck development dependency",
+    "Cargo.lock: freeze restored library-test-only QuickCheck and env_logger dependencies",
+    "src/behaviour.rs: repeat current subscriptions for additional connections and remaining connections after close",
+    "src/handler.rs: register regression tests",
+    "src/handler/subscription_reannouncement_tests.rs: regression tests",
+    "FOXLight-PATCH.md: maintenance notes",
+    "upstream-provenance.json: original archive and member hashes",
+    "src/generated/{compat,gossipsub}/pb.rs: remove extra final blank line only for repository whitespace checks; generated Rust tokens unchanged"
+  ]
+}

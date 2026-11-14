@@ -363,6 +363,7 @@ before resuming workloads.
 - **Lives in:** `src/skulk/routing/` (Python wrapper); `rust/networking/` + `rust/skulk_pyo3_bindings/` (Rust libp2p impl + PyO3 bindings)
 - **Topics:** see "Pubsub topics" below
 - **Discovery:** mDNS by default; `--bootstrap-peers` multiaddrs for explicit static peers
+- **Subscription repair:** the pinned `rust/vendor/libp2p-gossipsub/` backport reannounces existing local subscriptions on each additional connection and on close-with-remaining. This repairs a `Subscribe` prefetched by the dying handler. First-connection peer scoring, blacklisting, final-disconnect cleanup and local subscriptions remain authoritative; protocol ids, authentication, framing and namespace/key derivation are unchanged.
 
 ### Election
 

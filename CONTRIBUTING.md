@@ -99,6 +99,24 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `src/skulk/` — Python backend (inference, API, store, worker, routing)
 - `dashboard-react/` — React dashboard (Skulk UI)
 - `rust/` — Rust components (networking, libp2p, PyO3 bindings)
+- `rust/vendor/libp2p-gossipsub/` — Pinned subscription-reannouncement backport; its `FOXLight-PATCH.md` records source provenance, local changes and the focused regression command
+
+Native source archives must carry the pinned networking backport, not resolve an
+unmodified registry package or reach back into a checkout. CI runs the complete
+backport library suite, then builds with the reader's Maturin version and checks
+the actual extracted archive against the source, production dependency lock and
+root typing stub required to retain PEP 561 metadata when rebuilding a wheel:
+
+```sh
+uvx --python 3.13.13 --from maturin==1.15.0 maturin sdist \
+  --manifest-path rust/skulk_pyo3_bindings/Cargo.toml --out target/bindings-sdist
+uv run python scripts/check_bindings_sdist.py --directory target/bindings-sdist
+```
+
+Use an empty output directory so an older archive cannot satisfy the check. This
+verifies packaging and dependency resolution; native wheel builds and live
+cluster qualification remain separate checks.
+
 - `Foxlight-Foundation/foxlight-model-registry/seed/cards/`: curated model cards, in the model registry repository; Skulk ships no model cards
 - `resources/model_registry/`: the embedded TUF root for the signed model-card registry
 - `src/skulk/worker/runner/test_video/foxlight--test-video.toml`: the synthetic test video engine's card, beside the engine; it names no artifact, so the registry can never supply it

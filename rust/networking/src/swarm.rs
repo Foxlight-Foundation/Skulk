@@ -7,7 +7,8 @@ use crate::swarm::transport::tcp_transport;
 use crate::{alias, discovery};
 pub use behaviour::{Behaviour, BehaviourEvent};
 use futures_lite::{Stream, StreamExt};
-use libp2p::{PeerId, SwarmBuilder, gossipsub, identity, swarm::SwarmEvent};
+use libp2p::{PeerId, SwarmBuilder, identity, swarm::SwarmEvent};
+use libp2p_gossipsub as gossipsub;
 use tokio::sync::{mpsc, oneshot};
 
 /// The current version of the network: this prevents devices running different versions of the
