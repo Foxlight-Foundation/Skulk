@@ -114,7 +114,8 @@ def _socket(work: Path, role: str) -> Path:
     return Path("/tmp") / f"skulk-control-{os.getuid()}-{digest}" / "native-host.sock"
 
 
-async def _observe(work: Path, role: str) -> dict[str, JsonValue]:
+async def observe_native_inference(work: Path, role: str) -> dict[str, JsonValue]:
+    """Read bounded diagnostics using the actual protected manager-role channel."""
     # Read-only host diagnostics use the actual normal manager role attachment.
     # Root invocation still goes exclusively through production HTTP admission.
     binding = _binding(work, role)
@@ -209,7 +210,8 @@ async def _wait_quiescent(
                 )
                 if len(listings) == 2:
                     observations = [
-                        await _observe(work, role) for role in ("caller", "receiver")
+                        await observe_native_inference(work, role)
+                        for role in ("caller", "receiver")
                     ]
                     if all(
                         value["retained_payload_bytes"] == 0
@@ -233,7 +235,7 @@ async def _wait_quiescent(
 async def _dispatched(work: Path, role: str) -> None:
     async with asyncio.timeout(10):
         while True:
-            observation = await _observe(work, role)
+            observation = await observe_native_inference(work, role)
             if observation["dispatched_calls"] == 1:
                 return
             await asyncio.sleep(0.01)
@@ -284,6 +286,8 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
     binding = HostSettings(
         transport_node_id="native-inference-qualification", profile_id=uuid4().hex
     )
+    assert binding.profile_id is not None
+    issuer = inference_issuer(binding.profile_id)
     write_private(work / "host.json", binding.model_dump_json().encode())
     connection = ServiceConnection(
         manager_root=str(work), profile_id=binding.profile_id or ""
@@ -469,9 +473,7 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
                                 "principal": {
                                     "identifier": identifier,
                                     "kind": "client",
-                                    "issuer_node_id": inference_issuer(
-                                        binding.profile_id
-                                    ),
+                                    "issuer_node_id": issuer,
                                 },
                                 "grants": [
                                     value.grant().model_dump(mode="json")
@@ -542,7 +544,7 @@ async def qualify(caller: Path, receiver: Path, work: Path, receipt: Path) -> No
                     and context["caller_kind"] == "client"
                 )
                 assert (
-                    context["issuer_node_id"] == inference_issuer(binding.profile_id)
+                    context["issuer_node_id"] == issuer
                     and context["deadline_unix_ms"] is None
                 )
                 assert _counter(child_roots["receiver"]) == 1

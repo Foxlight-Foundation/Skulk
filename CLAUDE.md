@@ -7,6 +7,15 @@ does not support Chromium installation on Ubuntu 26.04.
 
 ## Project Overview
 
+Native host stream RPC cancellation uses the selected application's signed cleanup
+grace for readiness, input and output. Owner authority remains effective through
+pending terminal/end delivery after execution-scope cleanup; sibling roots retain
+their independent lifetimes.
+Protected RPC admission reserves separate32 ordinary and96 stream-operation slots
+at both peers, preventing long-lived control roots from starving media progress.
+Queued response cancellation retains ownership through its sanitized acknowledgment
+and withdraws only that call; uncertain partial writes still fence the connection.
+
 Experimental delegated capability chat lives in `api/inference_gateway.py`.
 Core owns generic catalog-to-model discovery, direct owner request admission,
 short-lived gateway signatures and chat wire adaptation. Capabilities own their
@@ -1186,18 +1195,18 @@ an issued generation's pinned binary. Ordinary selection refuses changes between
 legacy, native transport and native calls interpretations, even when state/schema
 labels match. Such changes require explicit qualified state migration. Call-format
 startup alone does not advertise native invocation or delegation capacity.
-The PyInstaller native hook includes all three cohort receipts and the selected
+The PyInstaller native hook includes all four cohort receipts and the selected
 reader metadata/licenses, refusing a missing receipt during the build.
 
 Runtime envelope 5 and release envelope 3 independently select the published
-0.7.0rc3 inference cohort: portable2/managed2/handshake2/transport2/composition3/
+0.7.0rc3 or 0.7.0rc4 inference cohort: portable2/managed2/handshake2/transport2/composition3/
 calls2. Their signature/digest domains are `skulk.runtime/5\0` and
 `skulk.release/3\0`. Staging validates the installed binary's complete thirteen
 profile inventory, exact manifest identity and calls2 framing. Native inference
 registration retains full descriptor identities; it does not imply readiness.
 Old issued runtime closures and signing bytes remain unchanged. Selection also
 fences transitions into this interpretation, regardless of equal state labels.
-The frozen reader carries all three cohort receipts.
+The frozen reader carries all four cohort receipts, retaining both issued inference closures.
 
 `inference_callers.py` owns original client authentication and credential custody;
 `inference_enrollment.py` verifies exact signed, persisted destinations without
@@ -1206,13 +1215,21 @@ client/policy management. Credentials alone grant no effects, and provider login
 never grants host permission. `native_inference_calls.py` and
 `native_inference_hosts.py` serve `/v1/native-inference`: exact unary read/inference
 calls and delegated calls over the existing role-authenticated owner channel.
+The explicit rc4 cohort also uses `native_inference_streams.py` for all three
+stream modes. Its bearer WebSocket adapter carries exact protocol-six binary
+packets; terminal delivery requires native end, control completion and call-tree
+cleanup. `api/server_config.py` shares the production 2 MiB WebSocket
+transport bound with installed qualification. Portable/2 JSON control values
+remain bounded to 64 KiB; larger content uses per-frame-bounded input media. Per-call byte leases, independent directions and current write guards
+keep cancellation scoped to its root. Signed connect/partial-I/O/write/cleanup
+resource bounds do not become generation deadlines. Owner root retirement
+requires actual cleanup acknowledgment or capture/reap of an uncertain process.
 The owner independently checks current original-caller/effect/domain/runtime/mode
 permission under the shared policy lock at the physical write; bounded authority
 observation cancels active withdrawn work. Permission snapshots do not depend on
 unrelated readiness. Native nullable caller, request and owner ceilings intersect
 without a hidden generation deadline. Cancellation/uncertainty never permits
-host replay. Governed effects, native streaming and remote Fabric execution are
-not admitted by this adapter. Core holds no provider account/session or router
+host replay. Governed effects and remote Fabric execution are not admitted by this adapter. Core holds no provider account/session or router
 policy, and restoring capability state cannot restore Core client credentials.
 
 Generic signed runtime verification and staging use `extensions/runtime_artifacts.py`,
@@ -2713,3 +2730,5 @@ separately. Normal journaled Core reattachment preserves enrolled bearers,
 credential lifetimes, revocations and exact grants; stale transport attachments
 still refuse. Authority records share an explicit 128 KiB protected-storage
 bound, independent of author wire-frame limits.
+
+Native inference sockets keep a sole receiver active during discovery, startup and blocked input writes. Eight queued frames plus the current write use shared payload leases; saturation/disconnect withdraws the exact root and a synchronous trusted caller guard protects dispatch and descendant writes.

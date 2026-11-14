@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import JsonValue
 
 from skulk.extensions.native_inference_contracts import (
+    INFERENCE_KERNEL_VERSION,
     InferenceManifest,
     InferenceProfiles,
     inference_native_wheel,
@@ -39,10 +40,11 @@ from skulk.extensions.tests.test_native_runtime import OBJECT, sign
 
 def inference_fixture(
     directory: Path,
+    version: str = INFERENCE_KERNEL_VERSION,
 ) -> tuple[dict[str, JsonValue], Ed25519PrivateKey, RuntimeTrust, QualifiedHost]:
     """Independently select the new signed domains and actual published wheel."""
     payload, key, trust, host = call_fixture(directory)
-    profiles = InferenceProfiles.qualified()
+    profiles = InferenceProfiles.qualified(version)
     release = OBJECT.validate_python(payload["release"], strict=True)
     wrapper = OBJECT.validate_python(release["manifest"], strict=True)
     manifest = OBJECT.validate_json(str(wrapper["canonical_json"]))
@@ -78,12 +80,16 @@ def inference_fixture(
     manifest["contracts"] = contracts
     record = InferenceManifest.from_json(json.dumps(manifest))
     release.update(protocol=3, manifest={"canonical_json": record.canonical_json})
-    filename, digest, size = inference_native_wheel(host.platform)
+    filename, digest, size = inference_native_wheel(
+        host.platform, version=profiles.version
+    )
     wheels = payload["wheels"]
     assert isinstance(wheels, list)
     wheels[1] = {"filename": filename, "sha256": digest, "size": size}
     release["dependency_lock_sha256"] = hashlib.sha256(
-        canonical_json({"example-dep": "1.0", "skulk-capability-kernel": "0.7.0rc3"})
+        canonical_json(
+            {"example-dep": "1.0", "skulk-capability-kernel": profiles.version}
+        )
     ).hexdigest()
     payload.update(
         protocol=5,
@@ -94,11 +100,13 @@ def inference_fixture(
     return payload, key, trust, host
 
 
+@pytest.mark.parametrize("version", ["0.7.0rc3", "0.7.0rc4"])
 def test_inference_closure_preserves_exact_domains_and_no_generation_ceiling(
     tmp_path: Path,
+    version: str,
 ) -> None:
     """The real compiled reader accepts the new manifest without old identity reuse."""
-    payload, key, trust, host = inference_fixture(tmp_path)
+    payload, key, trust, host = inference_fixture(tmp_path, version)
     runtime = verify_runtime(
         sign(payload, key, b"skulk.runtime/5\0"), trust, host, now=int(time.time())
     )

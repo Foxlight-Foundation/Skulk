@@ -18,6 +18,7 @@ from skulk.extensions.native_inference_authority import InferenceGrant
 from skulk.extensions.native_inference_contracts import (
     InferenceDescriptor,
     InferenceManifest,
+    host_stream_kernel,
 )
 from skulk.extensions.runtime_files import read_private
 
@@ -69,6 +70,21 @@ class InferenceListing(_Contract):
     descriptor: InferenceDescriptor = Field(
         description="Exact signed native declaration."
     )
+    stream_seconds: float = Field(
+        default=300,
+        gt=0,
+        description="Signed partial-I/O and write resource watchdog; not generation lifetime.",
+    )
+    cleanup_seconds: float = Field(
+        default=3,
+        gt=0,
+        description="Signed-derived cancellation and process-reap resource grace, never generation lifetime.",
+    )
+    startup_seconds: float = Field(
+        default=5,
+        gt=0,
+        description="Signed connect resource window, independent of generation lifetime.",
+    )
     inference_seconds: float | None = Field(
         gt=0,
         description="Optional signed owner duration ceiling; null adds no ceiling.",
@@ -94,6 +110,10 @@ class _Child(_Contract):
     incarnation: Profile
     manifest_digest: Digest
     descriptors: tuple[InferenceDescriptor, ...] = Field(max_length=64)
+    streaming: bool = Field(
+        default=False,
+        description="Actual protected owner stream admission availability.",
+    )
 
 
 class _Description(_Contract):
@@ -109,13 +129,18 @@ class InferenceHosts:
         """Use the Core-owned connector; author code never receives this object."""
         self.hosts = hosts
 
-    async def directory(self) -> tuple[InferenceListing, ...]:
+    async def directory(
+        self, *, streaming: bool = False
+    ) -> tuple[InferenceListing, ...]:
         """Observe signed ready targets without rewriting current caller permission."""
         return await self.hosts.scan_signed_owners(
-            self._discover, lambda value: value.target.model_dump_json()
+            lambda path: self._discover(path, streaming=streaming),
+            lambda value: value.target.model_dump_json(),
         )
 
-    async def _discover(self, path: Path) -> tuple[InferenceListing, ...]:
+    async def _discover(
+        self, path: Path, *, streaming: bool = False
+    ) -> tuple[InferenceListing, ...]:
         try:
             binding, runtime, peer = await self.hosts.observed_owner(path.stem)
             manifest = runtime.native_manifest
@@ -156,9 +181,13 @@ class InferenceHosts:
                             "inference owner differs from signed installation"
                         )
                     for descriptor in child.descriptors:
-                        if (
-                            descriptor.behavior not in ("read", "inference")
-                            or descriptor.io_mode != "unary"
+                        if descriptor.behavior not in ("read", "inference") or (
+                            descriptor.io_mode != "unary"
+                            and (
+                                not streaming
+                                or not child.streaming
+                                or host_stream_kernel() is None
+                            )
                         ):
                             continue
                         listings.append(
@@ -175,6 +204,39 @@ class InferenceHosts:
                                     processing_domain=descriptor.processing_domain,
                                 ),
                                 descriptor=descriptor,
+                                stream_seconds=TypeAdapter(float).validate_python(
+                                    TypeAdapter(dict[str, JsonValue]).validate_python(
+                                        manifest.value()["bounds"], strict=True
+                                    )["stream_seconds"],
+                                    strict=True,
+                                ),
+                                cleanup_seconds=max(
+                                    3.0,
+                                    3
+                                    * TypeAdapter(float).validate_python(
+                                        TypeAdapter(
+                                            dict[str, JsonValue]
+                                        ).validate_python(
+                                            manifest.value()["bounds"], strict=True
+                                        )["shutdown_seconds"],
+                                        strict=True,
+                                    )
+                                    + TypeAdapter(float).validate_python(
+                                        TypeAdapter(
+                                            dict[str, JsonValue]
+                                        ).validate_python(
+                                            manifest.value()["bounds"], strict=True
+                                        )["health_seconds"],
+                                        strict=True,
+                                    )
+                                    + 1,
+                                ),
+                                startup_seconds=TypeAdapter(float).validate_python(
+                                    TypeAdapter(dict[str, JsonValue]).validate_python(
+                                        manifest.value()["bounds"], strict=True
+                                    )["startup_seconds"],
+                                    strict=True,
+                                ),
                                 inference_seconds=TypeAdapter[float | None](
                                     float | None
                                 ).validate_python(

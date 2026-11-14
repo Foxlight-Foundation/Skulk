@@ -617,7 +617,7 @@ def verify_runtime(
         if isinstance(claims, _InferenceRuntimeClaims):
             public_inference_kernel()
             filename, digest, size = inference_native_wheel(
-                canonical_platform(claims.platform)
+                canonical_platform(claims.platform), version=claims.kernel.version
             )
         elif isinstance(claims, _CallRuntimeClaims):
             public_call_kernel()
