@@ -9,7 +9,7 @@ name = "skulk_pyo3_bindings"
 # and every installed startup script (old and new) runs uv sync. Bump it in
 # the same PR as any NETWORK_VERSION change so nodes rebuild their bindings
 # on the FIRST auto-update restart, not the second (#659 review, P1).
-version = "0.2.7"
+version = "0.2.9"
 description = "Add your description here"
 readme = "README.md"
 authors = [
@@ -27,6 +27,9 @@ dev = ["skulk_pyo3_bindings", "pytest>=8.4.0", "pytest-asyncio>=1.0.0"]
 #python-source = "python"
 module-name = "skulk_pyo3_bindings"
 features = ["pyo3/extension-module", "pyo3/experimental-async"]
+# Maturin relocates pyproject.toml to the archive root; keep the stub beside it
+# so rebuilding an sdist retains the wheel's PEP 561 typing information.
+include = [{ path = "skulk_pyo3_bindings.pyi", format = "sdist" }]
 
 [tool.pytest.ini_options]
 log_cli = true

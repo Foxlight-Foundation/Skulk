@@ -40,6 +40,8 @@ log = { workspace = true }
 
 # networking
 libp2p = { workspace = true, features = ["full"] }
+# Declare the backport directly so source distributions carry its path dependency.
+libp2p-gossipsub = { path = "../vendor/libp2p-gossipsub" }
 pin-project = "1.1.10"
 
 # data-plane trust: the Zenoh mutual-TLS authority is derived from the libp2p

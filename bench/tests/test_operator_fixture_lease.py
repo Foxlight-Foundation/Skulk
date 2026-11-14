@@ -1,39 +1,49 @@
 """Injected local-process lifecycle tests; no cloud resources are created."""
 
 import os
+import select
 import subprocess
 import sys
-import time
-from pathlib import Path
 
 import pytest
 
 
 @pytest.mark.parametrize("close_parent", [False, True])
 def test_watchdog_reaps_child_on_expiry_or_parent_eof(
-    tmp_path: Path, close_parent: bool
+    close_parent: bool,
 ) -> None:
     """An independent process reaps its child even without runner cleanup code."""
-    pid_file = tmp_path / "child.pid"
-    child_code = "import os,sys,time; from pathlib import Path; Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"
+    child_code = "import time; time.sleep(30)"
+    # Observe the actual spawned PID, rather than requiring the child interpreter
+    # to start and write a file within one second on a busy test host.
     guardian_code = (
-        "import sys; from bench.operator_fixture_lease import supervise_local_process; "
-        "raise SystemExit(supervise_local_process([sys.executable, '-c', sys.argv[1], sys.argv[2]], "
-        "parent_descriptor=sys.stdin.fileno(), lifetime_seconds=1.5))"
+        "import subprocess, sys\n"
+        "from bench.operator_fixture_lease import supervise_local_process\n"
+        "original_spawn = subprocess.Popen\n"
+        "def record_child(*arguments, **options):\n"
+        "    child = original_spawn(*arguments, **options)\n"
+        "    print(child.pid, flush=True)\n"
+        "    return child\n"
+        "subprocess.Popen = record_child\n"
+        "raise SystemExit(supervise_local_process([sys.executable, '-c', sys.argv[1]], "
+        "parent_descriptor=sys.stdin.fileno(), lifetime_seconds=float(sys.argv[2])))"
     )
+    # EOF must stop a still-active lease, rather than passing because expiry won.
+    lifetime_seconds = 30 if close_parent else 1.5
     guardian = subprocess.Popen(
-        [sys.executable, "-c", guardian_code, child_code, str(pid_file)],
+        [sys.executable, "-c", guardian_code, child_code, str(lifetime_seconds)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     try:
-        deadline = time.monotonic() + 1
-        while not pid_file.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert pid_file.exists()
-        child_pid = int(pid_file.read_text())
+        assert guardian.stdout is not None
+        readable, _, _ = select.select([guardian.stdout], [], [], 5)
+        assert readable, "The guardian did not report its spawned child"
+        child_pid = int(guardian.stdout.readline())
         if close_parent:
+            assert guardian.poll() is None
+            os.kill(child_pid, 0)
             assert guardian.stdin is not None
             guardian.stdin.close()
         assert guardian.wait(timeout=5) == 0
