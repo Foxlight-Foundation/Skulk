@@ -519,9 +519,7 @@ async def test_store_only_node_persists_master_ordered_model_trust(
                 ),
             )
         )
-        snapshot = State(
-            model_trust_approved_remote_code_identities=(second_identity,)
-        )
+        snapshot = State(model_trust_approved_remote_code_identities=(second_identity,))
         await event_sender.send(
             IndexedEvent(idx=2, event=StateSnapshotHydrated(state=snapshot))
         )
@@ -560,9 +558,7 @@ async def test_store_only_trust_persistence_failure_keeps_event_tap_alive(
         attempts.append(tuple(sorted(approvals)))
         raise OSError("read-only config")
 
-    monkeypatch.setattr(
-        skulk_main, "persist_model_trust_config", fail_persistence
-    )
+    monkeypatch.setattr(skulk_main, "persist_model_trust_config", fail_persistence)
     node = _publisher_node(_RecordingTelemetrySender())
     event_sender, event_receiver = channel[IndexedEvent](2)
     node.artifact_inventory_event_receiver = event_receiver
@@ -772,9 +768,15 @@ async def test_node_follows_the_generation_the_store_holds(
         update={"verification": "registry_verified"}
     )
     client = _RegistryStoreClient(
-        [{"model_id": str(card.model_id), "installed_card": record.model_dump(mode="json")}]
+        [
+            {
+                "model_id": str(card.model_id),
+                "installed_card": record.model_dump(mode="json"),
+            }
+        ]
     )
     recorded: list[dict[ModelId, str]] = []
+
     def remember(identities: dict[ModelId, str]) -> None:
         recorded.append(dict(identities))
 

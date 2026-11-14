@@ -1,62 +1,49 @@
 """Injected local-process lifecycle tests; no cloud resources are created."""
 
 import os
+import select
 import subprocess
 import sys
-import time
-from pathlib import Path
 
 import pytest
 
 
 @pytest.mark.parametrize("close_parent", [False, True])
 def test_watchdog_reaps_child_on_expiry_or_parent_eof(
-    tmp_path: Path, close_parent: bool
+    close_parent: bool,
 ) -> None:
     """An independent process reaps its child even without runner cleanup code."""
-    pid_file = tmp_path / "child.pid"
     child_code = "import time; time.sleep(30)"
-    guardian_code = """
-import sys
-from pathlib import Path
-import bench.operator_fixture_lease as lease
-
-launch = lease.subprocess.Popen
-
-def record_child(*args, **kwargs):
-    process = launch(*args, **kwargs)
-    path = Path(sys.argv[2])
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(str(process.pid))
-    temporary.replace(path)
-    return process
-
-lease.subprocess.Popen = record_child
-raise SystemExit(lease.supervise_local_process(
-    [sys.executable, '-c', sys.argv[1]],
-    parent_descriptor=sys.stdin.fileno(), lifetime_seconds=float(sys.argv[3]),
-))
-"""
-    # Observe the actual owned PID at allocation, independently of interpreter
-    # startup. EOF must end a long lease rather than pass by waiting for expiry.
-    lifetime = 30 if close_parent else 1.5
+    # Observe the actual spawned PID, rather than requiring the child interpreter
+    # to start and write a file within one second on a busy test host.
+    guardian_code = (
+        "import subprocess, sys\n"
+        "from bench.operator_fixture_lease import supervise_local_process\n"
+        "original_spawn = subprocess.Popen\n"
+        "def record_child(*arguments, **options):\n"
+        "    child = original_spawn(*arguments, **options)\n"
+        "    print(child.pid, flush=True)\n"
+        "    return child\n"
+        "subprocess.Popen = record_child\n"
+        "raise SystemExit(supervise_local_process([sys.executable, '-c', sys.argv[1]], "
+        "parent_descriptor=sys.stdin.fileno(), lifetime_seconds=float(sys.argv[2])))"
+    )
+    # EOF must stop a still-active lease, rather than passing because expiry won.
+    lifetime_seconds = 30 if close_parent else 1.5
     guardian = subprocess.Popen(
-        [sys.executable, "-c", guardian_code, child_code, str(pid_file), str(lifetime)],
+        [sys.executable, "-c", guardian_code, child_code, str(lifetime_seconds)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     try:
-        deadline = time.monotonic() + 120
-        while (
-            not pid_file.exists()
-            and guardian.poll() is None
-            and time.monotonic() < deadline
-        ):
-            time.sleep(0.01)
-        assert pid_file.exists()
-        child_pid = int(pid_file.read_text())
+        assert guardian.stdout is not None
+        readable, _, _ = select.select([guardian.stdout], [], [], 5)
+        assert readable, "The guardian did not report its spawned child"
+        child_pid = int(guardian.stdout.readline())
         if close_parent:
+            assert guardian.poll() is None
+            os.kill(child_pid, 0)
             assert guardian.stdin is not None
             guardian.stdin.close()
         assert guardian.wait(timeout=5) == 0

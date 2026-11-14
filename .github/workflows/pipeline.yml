@@ -52,7 +52,7 @@ jobs:
           # count as well: a libp2p or zenoh upgrade can change protocol
           # behavior without touching our source. The workspace manifest and
           # lockfile live at the REPO ROOT.
-          wire_files="rust/networking/src rust/networking/Cargo.toml Cargo.toml Cargo.lock"
+          wire_files="rust/networking/src rust/networking/Cargo.toml rust/vendor/libp2p-gossipsub/src rust/vendor/libp2p-gossipsub/Cargo.toml rust/vendor/libp2p-gossipsub/Cargo.lock Cargo.toml Cargo.lock"
           # shellcheck disable=SC2086
           touched=$(git diff --name-only "$base"...HEAD -- $wire_files)
           if [ -z "$touched" ]; then
@@ -91,6 +91,27 @@ jobs:
           fi
           echo "::error::This PR touches rust/networking wire surfaces without updating rust/networking/WIRE_COMPAT.md. Wire-behavior changes MUST bump NETWORK_VERSION (rust/networking/src/swarm.rs) and record the bump there (the pnet key derives from the version, making incompatible builds fail loudly at connect); provably wire-neutral changes (comments, timing, logging) record the neutrality judgment instead. See rust/networking/WIRE_COMPAT.md for the doctrine."
           exit 1
+
+  gossipsub-library-tests:
+    name: Pinned gossipsub library regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select stable Rust
+        run: rustup default stable
+
+      - name: Check pinned dependency library and subscription recovery
+        run: cargo test --locked --manifest-path rust/vendor/libp2p-gossipsub/Cargo.toml --lib
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Build bindings source distribution with the reader build tool
+        run: uvx --python 3.13.13 --from maturin==1.15.0 maturin sdist --manifest-path rust/skulk_pyo3_bindings/Cargo.toml --out "$RUNNER_TEMP/bindings-sdist"
+
+      - name: Verify extracted source retains the pinned backport and typing
+        run: uv run --isolated --no-project --python 3.13.13 python scripts/check_bindings_sdist.py --directory "$RUNNER_TEMP/bindings-sdist"
 
   lint:
     name: Lint

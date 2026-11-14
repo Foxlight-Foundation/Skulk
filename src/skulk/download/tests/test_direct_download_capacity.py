@@ -75,9 +75,7 @@ def test_changed_custom_card_requires_new_direct_generation(tmp_path: Path) -> N
     model_directory = tmp_path / "org--model"
     model_directory.mkdir()
     (model_directory / "weights.bin").write_bytes(b"old")
-    old_card = _shard("org/model").model_card.model_copy(
-        update={"is_custom": True}
-    )
+    old_card = _shard("org/model").model_card.model_copy(update={"is_custom": True})
     new_card = old_card.model_copy(update={"hidden_size": 2})
     write_installed_card(
         model_directory,
@@ -119,9 +117,7 @@ async def test_config_only_card_change_never_starts_generation_replacement(
     model_directory.mkdir()
     (model_directory / "config.json").write_text("{}")
     (model_directory / "weights.bin").write_bytes(b"installed-weights")
-    old_card = _shard("org/model").model_card.model_copy(
-        update={"is_custom": True}
-    )
+    old_card = _shard("org/model").model_card.model_copy(update={"is_custom": True})
     new_card = old_card.model_copy(update={"hidden_size": 2})
     write_installed_card(
         model_directory,

@@ -2139,11 +2139,11 @@ async def _download_file(
 async def _cached_file_matches_pin(
     path: Path, size: int, expected_size: int | None, expected_object_id: str | None
 ) -> bool:
-    """Verify original immutable truth before accepting existing pinned bytes.
+    """Verify signed size and content identity before accepting cached bytes.
 
-    Do not hash unpinned legacy files or turn their old offline fallback into a
-    new contract. A signed Git blob uses its length-prefixed object identity;
-    tensors use their full SHA-256. Size alone never authorizes pinned reuse.
+    Git blob identities include the length-prefixed object header; SHA-256
+    identities cover raw content. Legacy unpinned files retain their existing
+    offline behavior, without imposing a new full-file hash scan.
     """
     if expected_size is not None and size != expected_size:
         return False

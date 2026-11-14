@@ -28,6 +28,8 @@ import skulk.store.model_store_server as store_server
 from skulk.main import Node
 from skulk.shared.types.common import NodeId
 from skulk.store.mirror_contracts import MirrorJob, MirrorPage, MirrorRequest
+from skulk.store.mirror_process import MirrorProcess
+from skulk.store.mirror_worker import MirrorWorkerEvent
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_server import ModelStoreServer
 from skulk.store.preservation_contracts import (
@@ -642,6 +644,7 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
 async def test_successful_stop_retry_reconciles_retained_failed_task_and_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Reconcile an expired real worker after a fault installed before launch."""
     host = empty_host(tmp_path)
     try:
         await complete(
@@ -654,17 +657,26 @@ async def test_successful_stop_retry_reconciles_retained_failed_task_and_request
             ),
         )
         page = await host.mirrors.page()
-        job = await host.mirrors.start(
-            MirrorRequest(
-                owner_id="library",
-                operation_id="first",
-                kind="run",
-                policy_id=page.policy_id,
-                public_participation=True,
-                seconds=1,
-            ),
-        )
-        await listening(host, job.job_id)
+        ready = asyncio.Event()
+        original_observations = MirrorProcess.observations
+
+        async def observe_ready(
+            process: MirrorProcess, receive: Callable[[MirrorWorkerEvent], None]
+        ) -> None:
+            """Keep the real owner callback and retain its worker's readiness event."""
+
+            def receive_ready(event: MirrorWorkerEvent) -> None:
+                """Record the real HTTP announcement even if the finite worker exits."""
+                receive(event)
+                if (
+                    event.event in {"ready", "activity"}
+                    and event.activity is not None
+                    and event.activity.running
+                    and event.activity.http_port is not None
+                ):
+                    ready.set()
+
+            await original_observations(process, receive_ready)
 
         def unconfirmed(_identity: int) -> bool:
             return True
@@ -673,6 +685,22 @@ async def test_successful_stop_retry_reconciles_retained_failed_task_and_request
             observation.setattr(
                 "skulk.utils.process_groups._group_is_running", unconfirmed
             )
+            # Install the fault before the one-second worker can finish.
+            # Readiness is witnessed from its real event, not a later poll.
+            observation.setattr(MirrorProcess, "observations", observe_ready)
+            job = await host.mirrors.start(
+                MirrorRequest(
+                    owner_id="library",
+                    operation_id="first",
+                    kind="run",
+                    policy_id=page.policy_id,
+                    public_participation=True,
+                    seconds=1,
+                ),
+            )
+            async with asyncio.timeout(30):
+                await ready.wait()
+
             async with asyncio.timeout(10):
                 while (
                     host.mirrors.job(job.job_id).error_code != "mirror_stop_incomplete"
