@@ -20,13 +20,11 @@ from starlette.websockets import WebSocketState
 
 from skulk.api.inference_access import authenticate_inference_request
 from skulk.api.native_calls import OwnedNativeResponse
+from skulk.api.native_inference_service import NativeInferenceService
 from skulk.extensions.native_host_budget import PayloadReservation
 from skulk.extensions.native_host_protocol import Received
-from skulk.extensions.native_inference_calls import NativeInferenceCalls
 from skulk.extensions.native_inference_hosts import InferenceListing
 from skulk.extensions.native_inference_streams import NativeInferenceStream
-from skulk.extensions.runtime_attachment import ServiceConnection
-from skulk.extensions.runtime_files import read_private
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.shared.constants import SKULK_CONFIG_HOME
 from skulk.shared.types.common import NodeId
@@ -39,32 +37,37 @@ def create_native_inference_router(
     node_id: NodeId,
     *,
     connection_path: Path = SKULK_CONFIG_HOME / "managed-service" / "connection.json",
+    inference_service: NativeInferenceService | None = None,
 ) -> APIRouter:
-    """Bind protected host custody; no request selects an issuer, profile or state path."""
-    broker: NativeInferenceCalls | None = None
+    """Return exact native routes bound to server-selected host custody.
 
-    async def host() -> NativeInferenceCalls:
-        nonlocal broker
-        try:
-            connection = ServiceConnection.model_validate_json(
-                read_private(connection_path)
-            )
-            if broker is not None and broker.connection != connection:
-                await broker.close()
-                broker = None
-            if broker is None:
-                broker = NativeInferenceCalls(connection, str(node_id))
-            return broker
-        except (OSError, ValueError):
-            raise HTTPException(503, "Native inference host is unavailable.") from None
+    Args:
+        node_id: The API's authenticated issuer, also required of a shared service.
+        connection_path: Protected host connection file for a standalone service.
+        inference_service: Optional shared service owned by the enclosing API task.
+            Its caller must close it after all listeners stop. A standalone
+            router instead closes its own service when its lifespan ends.
+
+    Returns:
+        Routes that authenticate each actual request independently. Host access
+        is lazy; no request can select an issuer, profile or state path.
+    """
+    shared = inference_service or NativeInferenceService(
+        node_id, connection_path=connection_path
+    )
+    if shared.node_id != node_id:
+        raise ValueError("native inference service issuer differs")
+    host = shared.host
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
-            if broker is not None:
-                await finish_runtime_work(asyncio.create_task(broker.close()))
+            # Multiple listeners share the production app. An injected broker
+            # belongs to the API owner, not to one relay listener's lifespan.
+            if inference_service is None:
+                await finish_runtime_work(asyncio.create_task(shared.close()))
 
     router = APIRouter(
         prefix="/v1/native-inference", tags=["Native inference"], lifespan=lifespan

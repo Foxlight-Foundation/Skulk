@@ -151,6 +151,7 @@ from skulk.api.music_jobs import (
 )
 from skulk.api.native_calls import create_native_calls_router
 from skulk.api.native_inference import create_native_inference_router
+from skulk.api.native_inference_service import NativeInferenceService
 from skulk.api.node_health import (
     compute_node_health,
     live_data_transports,
@@ -2237,7 +2238,12 @@ class API:
         )
         self.app.include_router(create_native_calls_router(self.node_id))
         self.app.include_router(create_inference_access_router(self.node_id))
-        self.app.include_router(create_native_inference_router(self.node_id))
+        self._native_inference_service = NativeInferenceService(self.node_id)
+        self.app.include_router(
+            create_native_inference_router(
+                self.node_id, inference_service=self._native_inference_service
+            )
+        )
         if operator_pairing_service is not None:
             self.app.include_router(
                 create_operator_auth_router(
@@ -12094,6 +12100,13 @@ class API:
         )
 
     async def run(self):
+        """Run API tasks and all listeners until shutdown, then retire shared custody.
+
+        Own extension hooks, event channels and the native inference broker for
+        the API's full lifetime. Individual relay listener shutdowns do not end
+        that lifetime. Final cleanup drains the broker after listeners stop,
+        including when startup fails before serving begins.
+        """
         shutdown_ev = anyio.Event()
 
         try:
@@ -12145,12 +12158,19 @@ class API:
                     with anyio.CancelScope(shield=True):
                         shutdown_ev.set()
         finally:
-            if self._extensions is not None:
-                await self._extensions.run_shutdown_hooks()
-            if self._event_log is not None:
-                self._event_log.close()
-            self.command_sender.close()
-            self.event_receiver.close()
+            try:
+                # Relay listeners can stop independently of the local API.
+                # Withdraw their shared broker only after the owning task group
+                # has stopped every listener and drained its requests.
+                with anyio.CancelScope(shield=True):
+                    await self._native_inference_service.close()
+            finally:
+                if self._extensions is not None:
+                    await self._extensions.run_shutdown_hooks()
+                if self._event_log is not None:
+                    self._event_log.close()
+                self.command_sender.close()
+                self.event_receiver.close()
 
     async def run_api(self, ev: anyio.Event):
         cfg = create_local_api_server_config(self.port)

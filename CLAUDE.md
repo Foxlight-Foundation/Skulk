@@ -1215,6 +1215,14 @@ client/policy management. Credentials alone grant no effects, and provider login
 never grants host permission. `native_inference_calls.py` and
 `native_inference_hosts.py` serve `/v1/native-inference`: exact unary read/inference
 calls and delegated calls over the existing role-authenticated owner channel.
+`api/native_inference_service.py` shares a single broker across API adapters,
+serializes protected host-generation replacement and drains before shutdown.
+The owning API task retires an injected broker after all local/relay listeners
+stop; an individual listener lifespan cannot close the shared broker. Standalone
+routers retain ownership of their own service.
+Trusted adapters can pin an observed full listing; fresh discovery must match
+the runtime, child incarnation, native declaration and resource policy before
+current caller admission. A selection is never a permission grant.
 The explicit rc4 cohort also uses `native_inference_streams.py` for all three
 stream modes. Its bearer WebSocket adapter carries exact protocol-six binary
 packets; terminal delivery requires native end, control completion and call-tree
