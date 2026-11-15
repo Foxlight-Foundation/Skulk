@@ -6969,6 +6969,65 @@ become generation timeouts or request allowances. Unsupported modes and governed
 effects are not advertised by this adapter. The JSON call endpoint remains unary;
 qualified stream modes use the separate WebSocket contract below.
 
+#### Native models in Chat and the unified API
+
+The experimental native chat adapter uses the same protected broker as the
+exact native inference endpoints. `GET /models` and `GET /v1/models` append
+caller-authorized native model entries unless `status=downloaded`. Responses
+are `Cache-Control: no-store`. The caller needs exact current grants for the
+metadata read and chat destination. Invalid or dummy API keys contribute no
+native models and do not become owner authority; ordinary local model listing
+continues. Direct dashboard reads send `X-Skulk-Dashboard: pairing-v1` and must
+meet the existing protected peer/origin rules. Enrolled clients use their own
+bearer. Native discoveries are never shared through an owner-wide caller cache.
+
+Model addresses have the form
+`native/{plugin_id}/{native_capability_id}@{version}/{model_slug}`. They select
+an explicit implementation, not a task classifier or model router.
+`POST /v1/chat/completions` accepts that address in `model` with normal chat
+parameters, streaming or collected responses, function tools and declared media
+features. Unknown request fields are refused. Hard `local_only` and
+`included_only` inference policies still apply. Authentication failures return
+401/403; an unavailable or unauthorized model returns 403. Each call pins the
+entire freshly observed runtime/child/declaration and independently checks
+current caller permission at dispatch and physical delivery. No inference call
+is automatically retried or redirected to a legacy address.
+
+`POST /v1/chat/continuation/receipt` accepts the existing independently signed
+receipt JSON plus optional query `native_model`, the exact discovered native
+model address. With that query, metadata and continuation grants are required;
+the gateway chat grant is not needed for a receipt-only lookup. Omitting it
+selects the existing owner-only legacy transport. A native refusal never falls
+back. The model's continuation metadata includes `native_model` separately
+from the application's signed `target`. Native transport identities remain
+full 64-character digests; existing application proof revisions remain their
+independent 16-character identities. Application signatures, account/settings
+policy, nonces and continuation authorization are still enforced by the app.
+
+To expose these contracts, signed native annotations declare
+`inference.envelope=skulk.application-envelope@1.0.0`, an opaque
+`inference.envelope.contract`, and independent `inference.application.id`,
+`.version` and `.revision` values. The envelope is exactly
+`{"contract": "<opaque contract>", "revision": "<application revision>", "payload": {}}`.
+The existing generic `inference.catalog`, `inference.contract`,
+`inference.authorization` and `inference.chat` annotations identify supported
+catalog/chat/continuation roles. Metadata and callable declarations must belong
+to the same plugin, signed runtime, child and incarnation; their application
+bindings and processing domains must match the catalog. These annotations do
+not grant permission or replace native or application schema validation.
+
+HTTP output stays inside the native invocation's task and retains byte leases
+through physical writes. Revocation and disconnect cancel blocked delivery.
+Native terminal, end, control and descendant completion must be verified before
+successful completion; receipt lookup never regenerates assistant text. A
+fixed `native_outcome_unavailable` error means uncertainty, not permission to
+replay. The dashboard retains an unavailable native selection and disables
+submission until it is available or the user explicitly selects another model.
+The adapter adds no generation lifetime, output allowance or usage cap;
+existing upload, per-write, frame and collected-response memory bounds remain
+independent resources. Paired/relay or remote-Fabric native authority is not
+established by these local adapters.
+
 #### Native inference WebSocket
 
 `WS /v1/native-inference/{plugin_id}/{capability_id}/{version}/stream` invokes

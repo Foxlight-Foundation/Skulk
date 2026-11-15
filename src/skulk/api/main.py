@@ -150,6 +150,7 @@ from skulk.api.music_jobs import (
     MusicJobRegistry,
 )
 from skulk.api.native_calls import create_native_calls_router
+from skulk.api.native_chat import NativeChatGateway
 from skulk.api.native_inference import create_native_inference_router
 from skulk.api.native_inference_service import NativeInferenceService
 from skulk.api.node_health import (
@@ -2239,6 +2240,9 @@ class API:
         self.app.include_router(create_native_calls_router(self.node_id))
         self.app.include_router(create_inference_access_router(self.node_id))
         self._native_inference_service = NativeInferenceService(self.node_id)
+        self._native_chat_gateway = NativeChatGateway(
+            self._native_inference_service, self._inference_signer
+        )
         self.app.include_router(
             create_native_inference_router(
                 self.node_id, inference_service=self._native_inference_service
@@ -2816,9 +2820,11 @@ class API:
                 "custom overrides. Entries expose active "
                 "installed identity, current registry identity, update availability, "
                 "verification state, and warn-only advisories. Capability catalog "
-                "reads have a six-second overall limit."
+                "reads have a six-second overall limit. Native entries require the "
+                "current caller's exact metadata/chat grants and are never cached "
+                "across callers. Invalid local-model API keys add no native models."
             ),
-        )(self.get_models)
+        )(self.get_models_route)
         self.app.get(
             "/v1/inference/gateway",
             tags=["Capabilities"],
@@ -2832,12 +2838,16 @@ class API:
         )(self.inference_gateway_identity)
         self.app.post(
             "/v1/chat/continuation/receipt",
+            response_model=ReceiptOutcome,
             tags=["Capabilities"],
             summary="Recover a committed capability-chat receipt",
             description=(
                 "Submit a separately signed client receipt proof to its exact local "
-                "continuation destination. Requires direct owner API authority and "
-                "an independently registered client key. Returns content-free commit "
+                "continuation destination. The native_model query selects native "
+                "transport with owner/enrolled-bearer authority and exact grants; "
+                "omission selects legacy direct-owner transport. Both require an "
+                "independently registered application client key. No fallback occurs. "
+                "Returns content-free commit "
                 "metadata or a fixed refusal after verified transport completion; "
                 "transport and cleanup failures return bounded 503 uncertainty; "
                 "never retries inference or returns stored provider content."
@@ -2853,9 +2863,11 @@ class API:
                 "installed generation from current signed registry truth and "
                 "report updates, verification, advisories, and repository-code "
                 "authorization provenance. Capability catalog reads have a "
-                "six-second overall limit."
+                "six-second overall limit. Native entries require the current "
+                "caller's exact metadata/chat grants; invalid local-model API keys "
+                "add no native entries. Responses are no-store."
             ),
-        )(self.get_models)
+        )(self.get_models_route)
         self.app.get(
             "/models/remote-code-approvals",
             tags=["Models"],
@@ -2966,11 +2978,14 @@ class API:
             summary="OpenAI Chat Completions-compatible text generation",
             description=(
                 "Generate text with an OpenAI Chat Completions-compatible payload. The requested "
-                "model must already be placed, running, and declare TextGeneration; speech-only "
+                "mounted model must already be placed, running, and declare TextGeneration; speech-only "
                 "models are rejected before command dispatch. The reserved model id "
                 "'skulk/steward' selects the intelligent-fabric steward and answers 404 when "
                 "that mode is disabled, or 503 with the steward status payload while the "
-                "steward is still being placed, staged, or loaded. Steward observation is "
+                "steward is still being placed, staged, or loaded. Discovered native/ "
+                "model addresses select exact caller-authorized capabilities through "
+                "the protected native broker, with independent application proofs, "
+                "no automatic replay and no legacy fallback. Steward observation is "
                 "available to ordinary clients, but proposal-creation tools are exposed only "
                 "to requests with operator mutation authority."
                 " Capability continuation is explicit via Skulk-Continuation-Proof: "
@@ -6979,7 +6994,7 @@ class API:
         continuation_proof: Annotated[
             str | None, Header(alias="Skulk-Continuation-Proof", max_length=4096)
         ] = None,
-    ) -> StreamingResponse:
+    ) -> Response:
         """Serve chat completions with request-scoped steward proposal authority.
 
         Args:
@@ -6990,6 +7005,10 @@ class API:
         Returns:
             A streaming or collected chat-completions response.
         """
+        if str(payload.model).startswith("native/"):
+            return await self._native_chat_gateway.chat(
+                request, continuation_header=continuation_proof
+            )
         if str(payload.model).startswith("capability/"):
             # Account-backed inference needs its own explicit delegation. The
             # first gateway contract admits only direct owner requests; paired
@@ -11208,8 +11227,17 @@ class API:
         return matches[0] if len(matches) == 1 else None
 
     async def capability_continuation_receipt(
-        self, payload: ReceiptProof, request: Request
-    ) -> ReceiptOutcome:
+        self,
+        payload: ReceiptProof,
+        request: Request,
+        native_model: Annotated[
+            str | None,
+            Query(
+                max_length=768,
+                description="Exact discovered native model address. Omission selects the legacy owner-only transport; no fallback occurs.",
+            ),
+        ] = None,
+    ) -> ReceiptOutcome | Response:
         """Authenticate an exact public receipt lookup without generating text.
 
         Args:
@@ -11219,6 +11247,10 @@ class API:
         Returns:
             A content-free receipt or fixed capability refusal after clean EOF.
         """
+        if native_model is not None:
+            return await self._native_chat_gateway.receipt(
+                payload, request, native_model
+            )
         await authorize_plugin_owner_request(request)
         try:
             check_admission_deadline(payload.request.expires_at)
@@ -11279,6 +11311,22 @@ class API:
                 },
             }
         }
+
+    async def get_models_route(
+        self,
+        request: Request,
+        response: Response,
+        status: str | None = Query(default=None),
+    ) -> ModelList:
+        """Compose ordinary entries with this request's authorized native models."""
+        response.headers["cache-control"] = "no-store"
+        response.headers["pragma"] = "no-cache"
+        models = await self.get_models(status)
+        if status == "downloaded":
+            return models
+        return ModelList(
+            data=[*models.data, *await self._native_chat_gateway.models(request)]
+        )
 
     async def get_models(self, status: str | None = Query(default=None)) -> ModelList:
         """Return available models with cluster-authoritative installed state.

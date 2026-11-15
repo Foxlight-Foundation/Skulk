@@ -90,7 +90,11 @@ export function ChatContinuationControls({ conversationId, target, disabled }: {
       {state.phase !== 'ready' && !disabled && <p role="status">{t('chat.continuation.uncertain', 'Delivery is uncertain. Receipt recovery never regenerates a response or recovers missing assistant text.')}</p>}
       <Button size="sm" disabled={disabled || busy || !state.request_nonce} onClick={() => { void action(async () => {
         const proof = await prepareReceiptLookup(state);
-        const response = await operatorSession.fetch('/v1/chat/continuation/receipt', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Skulk-Dashboard': 'pairing-v1' }, body: JSON.stringify(proof) });
+        // Recovery belongs to the saved conversation's transport, including
+        // when its catalog disappears or another model becomes selected.
+        const modelId = store.getState().chat.conversations[conversationId]?.modelId;
+        const lookup = '/v1/chat/continuation/receipt' + (modelId?.startsWith('native/') ? '?native_model=' + encodeURIComponent(modelId) : '');
+        const response = await operatorSession.fetch(lookup, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Skulk-Dashboard': 'pairing-v1' }, body: JSON.stringify(proof) });
         if (!response.ok) throw new Error('Receipt lookup could not complete. No inference was retried.');
         const outcome = await response.json() as { receipt?: unknown; error?: string };
         if (!outcome.receipt) throw new Error(`Receipt unavailable: ${outcome.error ?? 'unknown'}. No inference was retried.`);

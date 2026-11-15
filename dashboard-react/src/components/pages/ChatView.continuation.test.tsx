@@ -37,10 +37,10 @@ async function click(text: string): Promise<void> {
   await act(async () => { await userEvent.click(button); });
 }
 
-async function renderAndEnroll(features: Array<'image_input' | 'function_tools' | 'reasoning_toggle' | 'text_file_input' | 'pdf_input'> = []): Promise<string> {
-  store.dispatch(chatActions.selectModel(model));
+async function renderAndEnroll(features: Array<'image_input' | 'function_tools' | 'reasoning_toggle' | 'text_file_input' | 'pdf_input'> = [], address = model): Promise<string> {
+  store.dispatch(chatActions.selectModel(address));
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
-  await act(async () => { root!.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ChatView readyInstances={[]} catalog={{ loaded: true, models: { [model]: { id: model, name: 'Independent code', inference_capability: {
+  await act(async () => { root!.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ChatView readyInstances={[]} catalog={{ loaded: true, models: { [address]: { id: address, name: 'Independent code', inference_capability: {
     contract: 'chat.completions@0.2.0', features, processing_domain: 'external', usage: 'unknown', usage_label: 'Synthetic fixture', usage_url: null, expires_at: Date.now() / 1000 + 300,
     continuation: { contract: 'chat.continuation@0.1.0', authorization: 'caller.ed25519@0.1.0', callable_version: '0.1.0', proof_header: 'Skulk-Continuation-Proof', receipt_path: '/v1/chat/continuation/receipt', target },
   } } } }} /></ThemeProvider></Provider>); });
@@ -108,12 +108,12 @@ describe('Chat client continuation', () => {
     expect(container!.querySelector('code')?.textContent).toContain('print(1)');
   });
 
-  it.each(['finish', 'done', 'read error'])('recovers received public output after a lost %s without replay', async loss => {
+  it.each([['finish', model], ['done', model], ['read error', model], ['finish', 'native/managed.example/native.chat@0.2.0/code']])('recovers a lost %s for %s without replay', async (loss, address) => {
     let calls = 0, receipt: Record<string, unknown> | undefined;
     const assistant = { role: 'assistant', content: '  complete answer 🦊\n', reasoning_content: 'exact summary' };
     const requests: Record<string, unknown>[][] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input) === '/v1/chat/continuation/receipt') return new Response(JSON.stringify({ receipt, error: null }));
+      if (String(input) === '/v1/chat/continuation/receipt' + (address.startsWith('native/') ? '?native_model=' + encodeURIComponent(address) : '')) return new Response(JSON.stringify({ receipt, error: null }));
       if (String(input) !== '/v1/chat/completions') return new Response(JSON.stringify({ enabled: false }));
       calls++;
       const header = new Headers(init?.headers).get('Skulk-Continuation-Proof')!;
@@ -130,7 +130,7 @@ describe('Chat client continuation', () => {
       }));
       return new Response(delta + (loss === 'done' ? finish : ''));
     }));
-    await renderAndEnroll(); await send('First');
+    await renderAndEnroll([], address); await send('First');
     await settle(() => {
       const conversation = store.getState().chat.conversations[store.getState().chat.activeConversationId!];
       return conversation.continuation?.phase === 'uncertain' && conversation.messages.length === 2;

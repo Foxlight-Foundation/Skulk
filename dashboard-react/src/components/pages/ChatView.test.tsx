@@ -530,8 +530,7 @@ describe('ChatView delegated inference capabilities', () => {
     expect((requestSignal as AbortSignal | null)?.aborted).toBe(true);
   });
 
-  it('renders capability code and speaks its text through mounted TTS', async () => {
-    const modelId = 'capability/fixture.chat/code';
+  it.each(['capability/fixture.chat/code', 'native/managed.example/native.chat@0.2.0/code'])('renders code from %s and speaks through mounted TTS', async modelId => {
     const spoken: Array<{ model: string; input: string }> = [];
     let requestedModel: string | null = null;
     vi.stubGlobal('AudioContext', class FakeAudioContext {});
@@ -609,8 +608,7 @@ it('withdraws expired provider choices while catalog polling fails', async () =>
   expect(container.textContent).toBe('Native model');
 });
 
-it('preserves a saved capability conversation while native models are already ready', async () => {
-  const modelId = 'capability/fixture.chat/saved';
+it.each(['capability/fixture.chat/saved', 'native/managed.example/native.chat@0.2.0/saved'])('preserves saved %s while mounted models are ready', async modelId => {
   let resolveCatalog: (response: Response) => void = () => { throw new Error('catalog not requested'); };
   const catalog = new Promise<Response>(resolve => { resolveCatalog = resolve; });
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -679,4 +677,25 @@ it('keeps provider choices when switching to Skulk with no native chat models', 
   await act(async () => { await userEvent.click(back); });
   await openChooser();
   expect(catalogRequests).toBe(1);
+});
+
+it('keeps a withdrawn native destination until the user explicitly selects another model', async () => {
+  const native = 'native/managed.example/native.chat@0.2.0/saved';
+  store.dispatch(chatActions.selectModel(native));
+  const original = store.getState().chat.activeConversationId;
+  container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+  await act(async () => { root?.render(<Provider store={store}><ThemeProvider theme={darkTheme}><ChatView readyInstances={[{
+    instanceId: 'local-instance', modelId: 'org/local', sharding: 'Pipeline', instanceType: 'MlxRing', engine: 'mlx', nodeStatuses: [], status: 'ready',
+  }]} catalog={{ loaded: true, models: { 'org/local': { id: 'org/local', name: 'Mounted local' } } }} /></ThemeProvider></Provider>); });
+  expect(store.getState().chat.selectedModelId).toBe(native);
+  expect(store.getState().chat.activeConversationId).toBe(original);
+  expect(container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')?.disabled).toBe(true);
+  const selector = container.querySelector<HTMLButtonElement>('[aria-label="Select chat model"]');
+  expect(selector).not.toBeNull();
+  await act(async () => { await userEvent.click(selector!); });
+  const option = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(item => item.textContent?.includes('org/local'));
+  expect(option).not.toBeUndefined();
+  await act(async () => { await userEvent.click(option!); });
+  expect(store.getState().chat.selectedModelId).toBe('org/local');
+  expect(store.getState().chat.conversations[original!].modelId).toBe(native);
 });

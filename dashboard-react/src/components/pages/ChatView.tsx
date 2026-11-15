@@ -721,9 +721,10 @@ export function ChatView({
     return options;
   }, [modelCatalogById, readyRunnableInstances]);
 
-  // Keep a saved capability conversation while its first catalog is loading.
+  // A native destination stays explicit if discovery or caller authority is
+  // withdrawn. Changing provider requires a new user selection.
   useEffect(() => {
-    if (selectionNeedsReview || activeContinuation || (selectedModelId?.startsWith('capability/') && !modelCatalogLoaded)) return;
+    if (selectionNeedsReview || activeContinuation || selectedModelId?.startsWith('native/') || (selectedModelId?.startsWith('capability/') && !modelCatalogLoaded)) return;
     if (
       readyModels.length > 0
       && (!selectedModelId || !readyModels.some((model) => model.modelId === selectedModelId))
@@ -1322,7 +1323,7 @@ export function ChatView({
           ...(requestTools ? { tools: requestTools } : {}),
           ...(supportsThinking ? { enable_thinking: thinkingEnabled } : {}),
         });
-        if (selectedModelId.startsWith('capability/') && new TextEncoder().encode(requestBody).byteLength > MAX_CHAT_REQUEST_BYTES) {
+        if ((selectedModelId.startsWith('capability/') || selectedModelId.startsWith('native/')) && new TextEncoder().encode(requestBody).byteLength > MAX_CHAT_REQUEST_BYTES) {
           throw new Error('The conversation exceeds the 16 MiB chat transport limit. Remove older attachments or start a new conversation.');
         }
         let continuationHeader: string | undefined;
@@ -1803,7 +1804,7 @@ export function ChatView({
     );
   }
 
-  const modelSelector = (readyModels.length > 1 || stewardStatus?.enabled || modelCatalogById[selectedModelId ?? '']?.inference_capability) ? (
+  const modelSelector = (readyModels.length > 1 || stewardStatus?.enabled || selectedModelId?.startsWith('native/') || modelCatalogById[selectedModelId ?? '']?.inference_capability) ? (
     <ReadyModelSelect value={selectedModelId} onChange={selectModel} fabricEnabled={stewardStatus?.enabled === true} models={readyModels} />
   ) : undefined;
 
