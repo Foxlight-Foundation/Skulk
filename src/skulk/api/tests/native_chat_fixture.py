@@ -172,6 +172,7 @@ class Fixture:
     calls: list[Invocation] = field(default_factory=list)
     metadata_calls: int = 0
     corrupt_end: bool = False
+    refuse_chat: bool = False
     receipt_lookups: int = 0
     owner_peer: Peer | None = None
     wait_control: asyncio.Event = field(default_factory=asyncio.Event)
@@ -353,6 +354,8 @@ async def native_fixture(
                     },
                 },
             ]
+            if fixture.refuse_chat:
+                events = [{"kind": "failed", "error": "policy_denied"}]
             if selected.target.capability_id.endswith("continuation"):
                 application_request = _OBJECT.validate_python(
                     proof["request"], strict=True

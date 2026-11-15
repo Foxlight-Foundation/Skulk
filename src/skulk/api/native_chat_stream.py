@@ -269,6 +269,7 @@ class NativeChatResponse(Response):
                             stream=self.streamed,
                             include_usage=self.include_usage,
                             continuation=self.continuation,
+                            drain_refusals=True,
                         )
                     ) as messages:
                         async for message in messages:

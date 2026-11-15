@@ -2759,7 +2759,8 @@ application proof revision from a native digest. `api/native_chat.py` composes
 those entries into the no-store model endpoints and prepares exact Chat/API
 requests. `api/native_chat_stream.py` owns HTTP writes inside the revocable
 native invocation, retaining output leases through delivery and requiring
-native end/control/descendant completion. Trusted final delivery runs after
+native end/control/descendant completion. Valid semantic refusals also drain
+terminal/end/control completion before their safe error is delivered. Trusted final delivery runs after
 retirement drains, with original-caller/disconnect custody still active and
 completed execution unable to delegate. A failed already-started collected
 response aborts its transport instead of acknowledging a successful JSON body. Receipt recovery selects transport

@@ -536,8 +536,10 @@ async def test_forwarded_stream_has_no_aggregate_generation_cap() -> None:
 
 
 @pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("continued", [False, True])
 async def test_semantic_refusal_drains_transport_before_releasing_the_owner(
     stream: bool,
+    continued: bool,
 ) -> None:
     """A valid client refusal must not cancel a healthy child's terminal cleanup."""
     raw, _, header = prepared(ClientProvider(), Ed25519PrivateKey.generate())
@@ -556,7 +558,9 @@ async def test_semantic_refusal_drains_transport_before_releasing_the_owner(
             payload={
                 "event": {"kind": "failed", "error": "policy_denied"},
                 "continuation_error": "authority_unavailable",
-            },
+            }
+            if continued
+            else {"kind": "failed", "error": "policy_denied"},
         )
         await release.wait()
         completed = True
@@ -572,7 +576,12 @@ async def test_semantic_refusal_drains_transport_before_releasing_the_owner(
         frames=frames(),
     )
     response = chat_response(
-        session, model="fixture", stream=stream, include_usage=False, continuation=proof
+        session,
+        model="fixture",
+        stream=stream,
+        include_usage=False,
+        continuation=proof if continued else None,
+        drain_refusals=not continued,
     )
     if stream:
         assert '"role": "assistant"' in await anext(response)
@@ -584,5 +593,6 @@ async def test_semantic_refusal_drains_transport_before_releasing_the_owner(
     finally:
         release.set()
     result = await pending
-    assert completed and "authority_unavailable" in result and "[DONE]" not in result
+    assert completed and "policy_denied" in result and "[DONE]" not in result
+    assert ("authority_unavailable" in result) is continued
     assert [part async for part in response] == []

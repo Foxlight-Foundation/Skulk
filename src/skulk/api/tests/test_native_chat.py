@@ -781,3 +781,87 @@ async def test_collected_payload_is_not_clean_success_after_invocation_failure(
         )
         assert fixture.broker.active == {} and fixture.broker.hosts.budget.used == 0
         assert len(fixture.calls) == 1
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("corrupt_end", [False, True])
+async def test_native_semantic_refusal_waits_for_verified_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+    corrupt_end: bool,
+) -> None:
+    """Publish an application refusal only after native terminal/end/control admission."""
+    async with native_fixture(tmp_path, monkeypatch) as fixture:
+        fixture.refuse_chat = True
+        fixture.corrupt_end = corrupt_end
+        fixture.wait_control.clear()
+        catalog = (await native_chat_catalogs(fixture.broker, fixture.client))[0]
+        prepared, body = fixture.gateway.signer.prepare(
+            catalog.catalog,
+            "code",
+            {"messages": [{"role": "user", "content": "hello"}]},
+        )
+        response = NativeChatResponse(
+            fixture.broker,
+            fixture.client,
+            catalog.chat,
+            _OBJECT.validate_python(prepared, strict=True),
+            model=catalog.model_id(catalog.catalog.models[0]),
+            streamed=streamed,
+            body=body,
+        )
+        delivered: list[Message] = []
+        incoming: asyncio.Queue[Message] = asyncio.Queue()
+
+        async def send(message: Message) -> None:
+            if message["type"] == "http.response.body" and b"policy_denied" in message.get(
+                "body", b""
+            ):
+                assert fixture.wait_control.is_set()
+                assert fixture.calls[0].end.is_set()
+                assert fixture.calls[0].packets == []
+                assert all(
+                    active.execution_complete
+                    for active in fixture.broker.active.values()
+                )
+            delivered.append(message)
+
+        scope: Scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/chat",
+            "headers": [],
+        }
+        task = asyncio.create_task(response(scope, incoming.get, send))
+        try:
+            async with asyncio.timeout(3):
+                while not fixture.calls:
+                    await asyncio.sleep(0.001)
+                await fixture.calls[0].end.wait()
+                assert not any(
+                    message["type"] == "http.response.body"
+                    and b"policy_denied" in message.get("body", b"")
+                    for message in delivered
+                )
+                fixture.wait_control.set()
+                await task
+            output = b"".join(
+                message.get("body", b"")
+                for message in delivered
+                if message["type"] == "http.response.body"
+            )
+            assert b"[DONE]" not in output
+            if corrupt_end:
+                assert b"policy_denied" not in output
+                assert b"native_outcome_unavailable" in output
+            else:
+                assert output.count(b'"code": "policy_denied"') == 1
+                assert b"native_outcome_unavailable" not in output
+            assert len(fixture.calls) == 1
+            assert fixture.broker.active == {} and fixture.broker.hosts.budget.used == 0
+        finally:
+            fixture.wait_control.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
