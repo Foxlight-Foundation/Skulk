@@ -14,7 +14,10 @@ from skulk.extensions.native_inference_authority import (
     InferenceAccessPolicy,
     PrincipalAccess,
 )
-from skulk.extensions.native_inference_calls import NativeInferenceCalls
+from skulk.extensions.native_inference_calls import (
+    NativeCompletionDelivery,
+    NativeInferenceCalls,
+)
 from skulk.extensions.native_inference_contracts import (
     CompositionRecord,
     InferenceDescriptor,
@@ -130,6 +133,7 @@ async def test_selection_refuses_replacement_even_for_enrolled_owner(
         _expiry: float | None,
         _consume: Callable[[NativeInferenceStream], Awaitable[None]] | None = None,
         _caller_guard: Callable[[], None] | None = None,
+        _complete_delivery: NativeCompletionDelivery | None = None,
     ) -> Received:
         """Observe whether exact admission reaches its independently tested transport."""
         nonlocal dispatched

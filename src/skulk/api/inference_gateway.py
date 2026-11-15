@@ -389,12 +389,15 @@ async def chat_response(
     stream: bool,
     include_usage: bool,
     continuation: ContinuationProof | None = None,
+    drain_refusals: bool = False,
 ) -> AsyncGenerator[str]:
     """Adapt a cancellable capability stream to the existing chat wire format.
 
     Success requires both a common completion event and transport completion.
     Mid-stream failures emit a safe error without a success finish or DONE.
     Closing this iterator closes the provider session and cancels its call.
+    Native adapters opt into draining semantic refusals through transport
+    completion before publishing their safe error, as continuation already does.
     """
     identifier, created = "chatcmpl-" + uuid4().hex, int(time.time())
     content = ""
@@ -480,7 +483,7 @@ async def chat_response(
                     )
                     else "provider_error"
                 )
-                if continuation is not None:
+                if continuation is not None or drain_refusals:
                     # A semantic refusal is still a normal SDK result. Closing
                     # its socket before the terminal/cleanup acknowledgment
                     # cancels a healthy child and can trigger fault recovery.

@@ -168,7 +168,9 @@ class Delegation(_Contract):
 
 @final
 @dataclass(slots=True)
-class _Endpoint:
+class NativeHostEndpoint:
+    """An authenticated peer retained under its exact protected owner binding."""
+
     binding: HostBinding
     peer: Peer
 
@@ -214,7 +216,7 @@ class NativeCalls:
         self.root = Path(connection.manager_root)
         self.kernel = public_call_kernel()
         self.budget = NativePayloadBudget()
-        self.endpoints: dict[str, _Endpoint] = {}
+        self.endpoints: dict[str, NativeHostEndpoint] = {}
         self.active: dict[tuple[Peer, str], _Active] = {}
         self._connect_locks: dict[str, tuple[asyncio.Lock, int]] = {}
         self._probe_locks: dict[str, tuple[asyncio.Lock, int]] = {}
@@ -311,7 +313,7 @@ class NativeCalls:
             else:
                 locks[plugin_id] = (lock, users - 1)
 
-    async def _endpoint(self, binding: HostBinding) -> _Endpoint:
+    async def _endpoint(self, binding: HostBinding) -> NativeHostEndpoint:
         async with self._owner_lock(self._connect_locks, binding.plugin_id):
             existing = self.endpoints.get(binding.plugin_id)
             if existing is not None:
@@ -345,7 +347,7 @@ class NativeCalls:
                     else frozenset({"delegate"}),
                     lambda: self._current(binding),
                 )
-                endpoint = _Endpoint(binding, peer)
+                endpoint = NativeHostEndpoint(binding, peer)
                 self.endpoints[binding.plugin_id] = endpoint
                 return endpoint
             except BaseException:

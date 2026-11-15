@@ -2689,3 +2689,23 @@ Native inference WebSocket: sole receive/disconnect task starts after the initia
   share Core's dashboard origin. Host/Origin checks, child listener custody,
   application cookie/CSRF policy, bounded HTTP/WS forwarding and lifecycle drain
   belong to the owner. Opening the UI grants no inference or remote authority.
+
+
+### Native unified chat adapter (experimental)
+
+`api/native_chat_catalog.py` reads only this authenticated caller's metadata,
+chat and optional continuation grants. Explicit application-envelope annotations
+pair same-plugin/runtime/child/incarnation declarations without deriving an
+application proof revision from a native digest. `api/native_chat.py` composes
+those entries into the no-store model endpoints and prepares exact Chat/API
+requests. `api/native_chat_stream.py` owns HTTP writes inside the revocable
+native invocation, retaining output leases through delivery and requiring
+native end/control/descendant completion. Valid semantic refusals also drain terminal/end/control completion before their safe error is delivered. Trusted final delivery runs after
+retirement drains, with original-caller/disconnect custody still active and
+completed execution unable to delegate. A failed already-started collected
+response aborts its transport instead of acknowledging a successful JSON body. Receipt recovery selects transport
+with `native_model`; its independent application proof target is unchanged.
+The dashboard authenticates catalog reads, withdraws choices on operator
+identity changes and keeps receipt recovery on the saved conversation's native
+address. Provider account/session/catalog behavior remains capability-owned.
+This is explicit destination dispatch; it implements no task routing policy.
