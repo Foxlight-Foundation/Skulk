@@ -65,6 +65,48 @@ def test_summaries_carry_identity_status_and_ready_link_surfaces_only() -> None:
     )
 
 
+def test_native_proxy_facades_open_without_exposing_private_ports() -> None:
+    """A ready isolated owner facade gets the existing browser open action."""
+    proxy = ManagedSurface(
+        surface_id="management",
+        title="Integration settings",
+        kind="proxied",
+        ready=True,
+        url="http://127.0.0.1:49152/",
+    )
+    node = _node().model_copy(update={"surfaces": (proxy,)})
+    (summary,) = summaries_for("managed.fixture", (node,), True)
+    assert summary.surfaces[0].url == proxy.url
+    assert summary.surfaces[0].kind == "link"
+    assert summary.actions[0].surface_id == "management"
+    for url in (
+        None,
+        "https://127.0.0.1:49152/",
+        "http://127.0.0.1/",
+        "http://127.0.0.1:80/",
+        "http://127.0.0.1:49152/?x=1",
+        "http://user:secret@127.0.0.1:49152/",
+        "http://localhost:49152/",
+        "http://remote.example:49152/",
+        "http://127.0.0.1:invalid/",
+    ):
+        hidden = proxy.model_copy(update={"url": url})
+        (summary,) = summaries_for(
+            "managed.fixture", (node.model_copy(update={"surfaces": (hidden,)}),), True
+        )
+        assert summary.surfaces == () and summary.actions == ()
+    (summary,) = summaries_for(
+        "managed.fixture",
+        (
+            node.model_copy(
+                update={"surfaces": (proxy.model_copy(update={"ready": False}),)}
+            ),
+        ),
+        True,
+    )
+    assert summary.surfaces == ()
+
+
 async def test_the_owner_publishes_after_refresh_and_withdraws_on_stop(
     tmp_path: Path,
 ) -> None:

@@ -199,9 +199,10 @@ def _validate_identifier(value: str) -> str:
 class CapabilityNodeSurface(FrozenModel):
     """One user-facing surface a capability node exposes.
 
-    Only ``link`` surfaces are carried today: the dashboard opens ``url`` in a
-    new tab. Proxied surfaces (rendered inside the dashboard) are a later
-    contract and will add a kind without changing this shape.
+    The dashboard opens ``url`` in a new tab. A declared proxied management
+    surface also projects as an opening link once its owner supplies a ready,
+    isolated loopback facade. Neither private upstream ports nor application
+    scripts are put under the Core dashboard's origin.
     """
 
     surface_id: str
@@ -284,7 +285,9 @@ class CapabilityNodeAction(FrozenModel):
             try:
                 # allow_nan=False refuses NaN and Infinity, which are not JSON
                 # and would fail the strict encoder behind GET /state later.
-                encoded = json.dumps(self.payload, separators=(",", ":"), allow_nan=False)
+                encoded = json.dumps(
+                    self.payload, separators=(",", ":"), allow_nan=False
+                )
             except ValueError as error:
                 raise ValueError(
                     "descriptor action payloads must be plain JSON without NaN or Infinity"

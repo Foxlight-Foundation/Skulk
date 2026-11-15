@@ -2680,3 +2680,12 @@ still refuse. Authority records share an explicit 128 KiB protected-storage
 bound, independent of author wire-frame limits.
 
 Native inference WebSocket: sole receive/disconnect task starts after the initial JSON; queue8 plus in-flight input uses shared byte leases, saturation cancels the root, and trusted liveness guards persist across dispatch/delegation.
+
+- **Native management UI:** the owner projects compiled native surface health
+  against signed declarations and actual child lifetime. A ready proxy has an
+  isolated owner-local loopback facade; its private upstream port stays private.
+  Core `managed.summaries_for` admits only an uncredentialed IPv4 loopback facade
+  URL and projects the existing topology opening link. Application scripts never
+  share Core's dashboard origin. Host/Origin checks, child listener custody,
+  application cookie/CSRF policy, bounded HTTP/WS forwarding and lifecycle drain
+  belong to the owner. Opening the UI grants no inference or remote authority.

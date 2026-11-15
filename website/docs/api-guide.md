@@ -4172,6 +4172,15 @@ dashboard mutes a satellite at the same age. The dashboard draws each summary
 as a satellite of its host in the topology and opens its surfaces from a
 flyout. Hosts with no capability nodes are absent from the map.
 
+On the experimental native host, a declared management proxy also becomes a
+`kind: "link"` opening action after its owner supplies an answering, isolated
+loopback facade. The URL belongs to the owner host and is intended for a browser
+on that host. It carries no credential and does not disclose the child's private
+listener port. Native health withdrawal, process retirement or owner shutdown
+withdraws that origin and its active connections. Application scripts are served
+on the separate facade origin, never below the Core dashboard origin; opening a
+management page grants no inference permission or remote operator delegation.
+
 The response carries a live `nodeResources` map as well. Each node entry includes
 its placement `backends`, declared `participation`, `apiAvailable` (whether the
 node process exposes the HTTP API), resolved `dataTransport` (`gossipsub` or

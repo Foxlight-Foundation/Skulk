@@ -2732,3 +2732,11 @@ still refuse. Authority records share an explicit 128 KiB protected-storage
 bound, independent of author wire-frame limits.
 
 Native inference sockets keep a sole receiver active during discovery, startup and blocked input writes. Eight queued frames plus the current write use shared payload leases; saturation/disconnect withdraws the exact root and a synchronous trusted caller guard protects dispatch and descendant writes.
+
+Native management UI proxies use separate owner-local loopback origins, with
+compiled health/signed surface binding, actual listener custody, browser Origin
+checks and incarnation cleanup. Core's managed summary exposes a ready facade
+as the existing topology opening link after screening its URL; it never serves
+capability scripts under the dashboard origin or grants inference by opening
+them. Private child ports and credentials stay out of topology. This is local
+browser management, not remote operator delegation or OS sandboxing.
