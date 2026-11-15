@@ -8,7 +8,7 @@ and cancellation; no detached output queue can outlive its original caller.
 import asyncio
 import json
 import math
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
 from typing import final
 
@@ -39,6 +39,11 @@ from skulk.extensions.streams import (
 )
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
+
+
+@final
+class NativeChatDeliveryUncertainError(RuntimeError):
+    """Abort an already-started collected response instead of acknowledging success."""
 
 
 @final
@@ -288,6 +293,23 @@ class NativeChatResponse(Response):
                 adapter.release()
 
         listing = self.target.listing
+
+        async def complete_delivery(check: Callable[[], None]) -> None:
+            # Native control/descendant retirement has already drained. The
+            # broker still owns the original caller and can cancel this task
+            # throughout the final physical HTTP acknowledgment.
+            async with asyncio.timeout(listing.stream_seconds):
+                check()
+                await start()
+                check()
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": b"data: [DONE]\n\n" if done_marker else b"",
+                        "more_body": False,
+                    }
+                )
+
         call = asyncio.create_task(
             self.broker.invoke_stream(
                 self.caller,
@@ -298,6 +320,7 @@ class NativeChatResponse(Response):
                 consume,
                 caller_guard=connected,
                 expected_listing=listing,
+                complete_delivery=complete_delivery,
             )
         )
         watch = asyncio.create_task(watch_disconnect())
@@ -314,18 +337,14 @@ class NativeChatResponse(Response):
                 # Broker cancellation means current caller authority withdrew;
                 # parent ASGI cancellation is handled by the outer finally.
                 raise ValueError("native HTTP authority withdrew") from None
-            connected()
-            self.broker.callers.authorize(self.caller, listing.grant())
-            async with asyncio.timeout(listing.stream_seconds):
-                await start()
-                await send(
-                    {
-                        "type": "http.response.body",
-                        "body": b"data: [DONE]\n\n" if done_marker else b"",
-                        "more_body": False,
-                    }
-                )
         except (HTTPException, OSError, ValueError, RuntimeError, TimeoutError):
+            if started and not self.streamed:
+                # A valid-looking JSON body is not a completed invocation.
+                # Once headers/payload escaped, only an aborted transport can
+                # preserve uncertainty; a clean terminator would assert success.
+                raise NativeChatDeliveryUncertainError(
+                    "Native capability delivery is uncertain; do not replay."
+                ) from None
             if not disconnected:
                 # Fixed diagnostics contain no provider output. An uncertain
                 # result never becomes permission to submit another request.

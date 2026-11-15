@@ -44,6 +44,9 @@ _OBJECT = TypeAdapter(dict[str, JsonValue])
 _TEXT = TypeAdapter(str)
 _DEADLINE: TypeAdapter[int | None] = TypeAdapter(int | None)
 
+type NativeCompletionDelivery = Callable[[Callable[[], None]], Awaitable[None]]
+"""Trusted final delivery receiving a current original-caller authorization guard."""
+
 
 @final
 class InferenceDelegation(BaseModel):
@@ -82,6 +85,7 @@ class _Active:
     next_delegation: int = 1
     delegating: bool = False
     uncertain: bool = False
+    execution_complete: bool = False
 
 
 @final
@@ -122,6 +126,8 @@ class NativeInferenceCalls:
             active.caller_guard()
         if self.closed:
             raise ValueError("inference Core host unavailable")
+        if active.execution_complete and (active.children or active.uncertain):
+            raise ValueError("completed inference custody is uncertain")
         authorization = self.callers.authorize(active.caller, active.listing.grant())
         if authorization.revision != active.revision:
             raise ValueError("inference caller policy changed")
@@ -178,6 +184,7 @@ class NativeInferenceCalls:
         *,
         caller_guard: Callable[[], None] | None = None,
         expected_listing: InferenceListing | None = None,
+        complete_delivery: NativeCompletionDelivery | None = None,
     ) -> None:
         """Own one exact stream and drain it through a trusted application adapter.
 
@@ -187,6 +194,9 @@ class NativeInferenceCalls:
         discovery, dispatch, descendant calls and each protected physical write.
         A selected listing additionally pins the full signed target, runtime and
         child incarnation; it never grants permission or replaces fresh discovery.
+        Optional trusted final delivery runs after native retirement drains but
+        before caller custody is removed. Its guard and the active watcher
+        protect the final physical write; completed execution cannot delegate.
         """
         result = await self._invoke(
             caller,
@@ -198,6 +208,7 @@ class NativeInferenceCalls:
             consume,
             caller_guard,
             expected_listing=expected_listing,
+            complete_delivery=complete_delivery,
         )
         result.release()
 
@@ -213,6 +224,7 @@ class NativeInferenceCalls:
         caller_guard: Callable[[], None] | None = None,
         *,
         expected_listing: InferenceListing | None = None,
+        complete_delivery: NativeCompletionDelivery | None = None,
     ) -> Received:
         """Dispatch one exact caller-authorized implementation without automatic replay.
 
@@ -297,7 +309,14 @@ class NativeInferenceCalls:
                 ),
             )
             return await self._dispatch(
-                listing, context, caller, payload, expiry, consume, caller_guard
+                listing,
+                context,
+                caller,
+                payload,
+                expiry,
+                consume,
+                caller_guard,
+                complete_delivery,
             )
 
     async def _dispatch(
@@ -309,6 +328,7 @@ class NativeInferenceCalls:
         expiry: float | None,
         consume: Callable[[NativeInferenceStream], Awaitable[None]] | None = None,
         caller_guard: Callable[[], None] | None = None,
+        complete_delivery: NativeCompletionDelivery | None = None,
     ) -> Received:
         fields = _OBJECT.validate_json(context.canonical())
         if (
@@ -371,6 +391,7 @@ class NativeInferenceCalls:
                             raise ValueError(
                                 "native stream descendant completion unavailable"
                             )
+                        active.execution_complete = True
 
                     stream = NativeInferenceStream(
                         peer,
@@ -405,6 +426,7 @@ class NativeInferenceCalls:
                     )
                 ):
                     raise ValueError("inference output schema refused")
+                active.execution_complete = True
                 transferred = True
                 return response
         finally:
@@ -424,17 +446,24 @@ class NativeInferenceCalls:
                         ):
                             control.result().release()
                 finally:
-                    self.active.pop((peer, call_id), None)
                     for child in list(active.children):
                         child.cancel()
                     await self._drain(active.children)
 
             try:
                 await finish_runtime_work(asyncio.create_task(cleanup()))
+                if transferred and complete_delivery is not None:
+                    # Keep this in the captured invocation task, outside the
+                    # shielded cleanup task: withdrawal must interrupt a blocked
+                    # final delivery even though provider execution has ended.
+                    self._permitted(active)
+                    await complete_delivery(lambda: self._permitted(active))
             except BaseException:
                 if response is not None:
                     response.release()
                 raise
+            finally:
+                self.active.pop((peer, call_id), None)
             if response is not None and not transferred:
                 response.release()
 
@@ -484,7 +513,12 @@ class NativeInferenceCalls:
         try:
             delegation = InferenceDelegation.model_validate(request.parameters)
             parent = self.active.get((peer, delegation.parent_call_id))
-            if parent is None or parent.delegating or parent.uncertain:
+            if (
+                parent is None
+                or parent.delegating
+                or parent.uncertain
+                or parent.execution_complete
+            ):
                 raise ValueError("inference parent custody unavailable")
             self._permitted(parent)
             public = self.kernel.CompositionV3Contract.from_json(

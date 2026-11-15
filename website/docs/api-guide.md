@@ -7019,7 +7019,12 @@ not grant permission or replace native or application schema validation.
 HTTP output stays inside the native invocation's task and retains byte leases
 through physical writes. Revocation and disconnect cancel blocked delivery.
 Native terminal, end, control and descendant completion must be verified before
-successful completion; receipt lookup never regenerates assistant text. A
+successful completion. Caller custody and disconnect ownership remain live
+through the final physical success write after native retirement drains;
+completed execution cannot delegate again. If collected JSON already started
+and native retirement or authority then fails, the HTTP transport aborts rather
+than cleanly acknowledging that body. A parseable partial body is not success.
+Receipt lookup never regenerates assistant text. A
 fixed `native_outcome_unavailable` error means uncertainty, not permission to
 replay. The dashboard retains an unavailable native selection and disables
 submission until it is available or the user explicitly selects another model.

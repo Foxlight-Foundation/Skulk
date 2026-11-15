@@ -173,6 +173,7 @@ class Fixture:
     metadata_calls: int = 0
     corrupt_end: bool = False
     receipt_lookups: int = 0
+    owner_peer: Peer | None = None
     wait_control: asyncio.Event = field(default_factory=asyncio.Event)
 
     def policy(
@@ -254,6 +255,10 @@ async def native_fixture(
     invocations: dict[str, Invocation] = {}
 
     async def refuse(_peer: Peer, _request: RequestFrame, _body: bytes) -> Reply:
+        if _request.operation == "delegate_inference":
+            handler = broker.hosts.inference_handler
+            assert handler is not None
+            return await handler(_peer, _request, _body)
         return Reply("pre_dispatch", {})
 
     async def respond(_peer: Peer, request: RequestFrame, body: bytes) -> Reply:
@@ -452,7 +457,7 @@ async def native_fixture(
             core_budget,
         ),
         refuse,
-        frozenset(),
+        frozenset({"delegate_inference"}),
         lambda: None,
     )
     owner_peer = Peer(
@@ -471,6 +476,7 @@ async def native_fixture(
     broker.hosts.endpoints["managed.example"] = NativeHostEndpoint(
         binding(Ed25519PrivateKey.generate()), core
     )
+    fixture.owner_peer = owner_peer
 
     async def models(request: Request) -> list[dict[str, JsonValue]]:
         return [

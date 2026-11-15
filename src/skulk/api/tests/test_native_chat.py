@@ -12,13 +12,18 @@ import pytest
 from pydantic import JsonValue, TypeAdapter
 from starlette.types import Message, Scope
 
+from skulk.api.inference_continuation import ReceiptProof
 from skulk.api.main import API
 from skulk.api.native_chat import NativeChatGateway
-from skulk.api.native_chat_catalog import native_chat_catalogs
-from skulk.api.native_chat_stream import NativeChatResponse
+from skulk.api.native_chat_catalog import ApplicationBinding, native_chat_catalogs
+from skulk.api.native_chat_stream import (
+    NativeChatDeliveryUncertainError,
+    NativeChatResponse,
+)
 from skulk.api.tests.native_chat_fixture import native_fixture
 from skulk.api.tests.test_inference_access import client_for
 from skulk.api.types import ModelList, ModelListModel
+from skulk.extensions.native_host_protocol import ResponseFrame
 from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.shared.election import ElectionMessage
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
@@ -517,3 +522,262 @@ async def test_revocation_or_disconnect_cancels_blocked_physical_delivery(
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("withdraw", ["policy", "credential", "disconnect", "delegate"])
+async def test_final_success_write_retains_revocable_caller_custody(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, withdraw: str
+) -> None:
+    """Native retirement precedes success without dropping the final write's watcher."""
+    async with native_fixture(tmp_path, monkeypatch) as fixture:
+        catalog = (await native_chat_catalogs(fixture.broker, fixture.client))[0]
+        prepared, body = fixture.gateway.signer.prepare(
+            catalog.catalog,
+            "code",
+            {"messages": [{"role": "user", "content": "hello"}]},
+        )
+        response = NativeChatResponse(
+            fixture.broker,
+            fixture.client,
+            catalog.chat,
+            _OBJECT.validate_python(prepared, strict=True),
+            model=catalog.model_id(catalog.catalog.models[0]),
+            streamed=True,
+            body=body,
+        )
+        entered = asyncio.Event()
+        incoming: asyncio.Queue[Message] = asyncio.Queue()
+        delivered: list[Message] = []
+
+        async def send(message: Message) -> None:
+            if message["type"] == "http.response.body" and b"[DONE]" in message.get(
+                "body", b""
+            ):
+                assert fixture.calls[-1].end.is_set()
+                assert len(fixture.broker.active) == 1
+                assert all(
+                    active.execution_complete
+                    for active in fixture.broker.active.values()
+                )
+                entered.set()
+                await asyncio.Future[None]()
+            delivered.append(message)
+
+        scope: Scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/chat",
+            "headers": [],
+        }
+        task = asyncio.create_task(response(scope, incoming.get, send))
+        try:
+            async with asyncio.timeout(3):
+                await entered.wait()
+                if withdraw == "policy":
+                    fixture.policy(client=False)
+                elif withdraw == "credential":
+                    fixture.broker.callers.revoke(
+                        fixture.broker.callers.inventory().revision,
+                        fixture.client.principal.identifier.removeprefix("client:"),
+                    )
+                elif withdraw == "delegate":
+                    (_, parent_call_id), parent = next(
+                        iter(fixture.broker.active.items())
+                    )
+                    context = _OBJECT.validate_json(parent.context.canonical())
+                    kernel = fixture.broker.kernel
+                    payload = json.dumps(
+                        ApplicationBinding.from_listing(fixture.listings[0]).wrap({})
+                    ).encode()
+                    request = kernel.CompositionV3Contract.from_json(
+                        "DelegateRequest",
+                        json.dumps(
+                            {
+                                "protocol": 3,
+                                "contract_profile": "skulk.composition/3",
+                                "profile_digest": kernel.composition_v3_profile_digest(),
+                                "kind": "delegate",
+                                "request_id": "0" * 63 + "1",
+                                "parent_scope_id": context["scope_id"],
+                                "parent_request_sha256": context["request_sha256"],
+                                "destination": fixture.listings[0].target.model_dump(
+                                    mode="json"
+                                ),
+                                "request_sha256": hashlib.sha256(payload).hexdigest(),
+                                "deadline_unix_ms": None,
+                            }
+                        ),
+                    )
+                    policy = kernel.CompositionV3Contract.from_json(
+                        "Policy",
+                        json.dumps(
+                            {
+                                **{
+                                    key: context[key]
+                                    for key in (
+                                        "protocol",
+                                        "contract_profile",
+                                        "profile_digest",
+                                        "caller_id",
+                                        "caller_kind",
+                                        "issuer_node_id",
+                                        "policy_revision",
+                                        "allowed_targets",
+                                        "allowed_processing_domains",
+                                        "deadline_unix_ms",
+                                    )
+                                },
+                                "kind": "policy",
+                            }
+                        ),
+                    )
+                    delegated = parent.context.admit(
+                        request,
+                        policy,
+                        parent.listing.target.model_dump_json(),
+                        payload,
+                        time.time_ns() // 1_000_000,
+                        "e" * 64,
+                    )
+                    owner_peer = fixture.owner_peer
+                    assert owner_peer is not None
+                    before = fixture.metadata_calls
+                    refusal = await owner_peer.request(
+                        "delegate_inference",
+                        {
+                            "parent_call_id": parent_call_id,
+                            "request": _OBJECT.validate_json(request.canonical()),
+                            "context": _OBJECT.validate_json(delegated.canonical()),
+                            "remaining_seconds": None,
+                        },
+                        payload,
+                    )
+                    try:
+                        assert (
+                            isinstance(refusal.frame, ResponseFrame)
+                            and refusal.frame.outcome == "unknown"
+                        )
+                    finally:
+                        refusal.release()
+                    assert fixture.metadata_calls == before
+                else:
+                    incoming.put_nowait({"type": "http.disconnect"})
+                await task
+            assert not any(
+                message["type"] == "http.response.body"
+                and b"[DONE]" in message.get("body", b"")
+                for message in delivered
+            )
+            assert fixture.broker.active == {} and fixture.broker.hosts.budget.used == 0
+            assert len(fixture.calls) == 1
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("kind", ["chat", "receipt"])
+@pytest.mark.parametrize("failure", ["policy", "retirement"])
+async def test_collected_payload_is_not_clean_success_after_invocation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, failure: str
+) -> None:
+    """A started JSON response must abort rather than mask lost native custody."""
+    from skulk.extensions import native_inference_calls
+
+    async with native_fixture(tmp_path, monkeypatch) as fixture:
+        catalog = (await native_chat_catalogs(fixture.broker, fixture.client))[0]
+        model = catalog.model_id(catalog.catalog.models[0])
+        if kind == "receipt":
+            target = catalog.continuation
+            assert target is not None
+            proof = ReceiptProof.model_validate_json(
+                json.dumps(
+                    {
+                        "caller_id": "a" * 32,
+                        "signature": "b" * 128,
+                        "request": {
+                            "contract": "chat.continuation.receipt@0.1.0",
+                            "conversation_id": "c" * 64,
+                            "target": {
+                                "target_node": catalog.catalog.target_node,
+                                "callable_id": target.application.callable_id,
+                                "descriptor_revision": target.application.revision,
+                                "model": "code",
+                            },
+                            "request_nonce": "d" * 64,
+                            "nonce": "e" * 64,
+                            "expires_at": time.time() + 30,
+                        },
+                    }
+                )
+            )
+            response = NativeChatResponse(
+                fixture.broker,
+                fixture.client,
+                target,
+                _OBJECT.validate_json(proof.model_dump_json()),
+                model=model,
+                streamed=False,
+                receipt=proof,
+            )
+        else:
+            prepared, body = fixture.gateway.signer.prepare(
+                catalog.catalog,
+                "code",
+                {"messages": [{"role": "user", "content": "hello"}]},
+            )
+            response = NativeChatResponse(
+                fixture.broker,
+                fixture.client,
+                catalog.chat,
+                _OBJECT.validate_python(prepared, strict=True),
+                model=model,
+                streamed=False,
+                body=body,
+            )
+        payload_sent = False
+        retirement_failed = False
+        delivered: list[Message] = []
+        original = native_inference_calls.finish_runtime_work
+
+        async def fail_retirement(task: asyncio.Task[None]) -> None:
+            nonlocal retirement_failed
+            await original(task)
+            if payload_sent and not retirement_failed:
+                retirement_failed = True
+                raise RuntimeError("synthetic private retirement diagnostic")
+
+        if failure == "retirement":
+            monkeypatch.setattr(
+                native_inference_calls, "finish_runtime_work", fail_retirement
+            )
+
+        async def send(message: Message) -> None:
+            nonlocal payload_sent
+            delivered.append(message)
+            if message["type"] == "http.response.body" and message.get("body"):
+                assert message.get("more_body") is True
+                payload_sent = True
+                if failure == "policy":
+                    fixture.policy(client=False)
+
+        incoming: asyncio.Queue[Message] = asyncio.Queue()
+        scope: Scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/chat",
+            "headers": [],
+        }
+        with pytest.raises(
+            NativeChatDeliveryUncertainError, match="delivery is uncertain"
+        ):
+            async with asyncio.timeout(3):
+                await response(scope, incoming.get, send)
+        assert payload_sent
+        assert not any(
+            message["type"] == "http.response.body"
+            and not message.get("more_body", False)
+            for message in delivered
+        )
+        assert fixture.broker.active == {} and fixture.broker.hosts.budget.used == 0
+        assert len(fixture.calls) == 1
