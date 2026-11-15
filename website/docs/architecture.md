@@ -4004,3 +4004,17 @@ Native inference WebSocket ingress has one receive owner throughout discovery, s
 Protected stream readiness, input and output RPCs retain the selected signed cleanup grace. Owner authority withdrawal also cancels the captured root during pending terminal/end delivery after its execution scope has finished, releasing retained media without withdrawing sibling roots.
 The protected RPC channel independently admits 32 ordinary roots/metadata requests and 96 stream readiness/input/output requests, reserving progress for every admitted stream under the existing shared byte/frame budgets.
 Pre-write response cancellation withdraws only its call and retains resource ownership through the cancellation acknowledgment; uncertain partial writes still fence the authenticated connection.
+
+### Native management surface origins
+
+The experimental native owner retains correlated compiled surface health and
+matches it to the signed declaration and actual child process. Ready management
+proxies use dedicated owner-local IPv4 loopback origins; the private upstream
+port is withheld. Core carries a ready facade as an ordinary topology open
+action after screening it as an uncredentialed loopback URL. It never mounts
+capability JavaScript under its dashboard origin or grants inference by opening
+the page. The owner checks listener custody before sending HTTP bytes, validates
+Host/browser Origin, preserves application session/CSRF checks, and fences active
+HTTP/WS connections on health withdrawal or process retirement. This is local
+browser management, not remote delegation or an OS sandbox. Model selection,
+provider account handling and routing remain separate.

@@ -11,6 +11,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from itertools import islice
 from pathlib import Path
 from typing import Literal, Self, final
+from urllib.parse import urlsplit
 
 from loguru import logger
 from pydantic import (
@@ -88,18 +89,35 @@ def summaries_for(
 ) -> tuple[CapabilityNodeSummary, ...]:
     """Bounded, credential-free topology summaries for an owner's nodes.
 
-    Only link surfaces the owner reported ready with a URL are carried; an
-    unready surface has no endpoint to open, and proxied surfaces wait for
-    that contract. Each carried surface gets an open action.
+    Ready links and owner-isolated management proxy origins get open actions.
+    A proxy URL is an owner facade, never the child's private listener or a
+    path that gives capability scripts the Core dashboard's browser origin.
     """
     summaries: list[CapabilityNodeSummary] = []
     for node in nodes:
         surfaces: list[CapabilityNodeSurface] = []
         actions: list[CapabilityNodeAction] = []
         for surface in node.surfaces:
-            if surface.kind != "link" or not surface.ready or surface.url is None:
+            if (
+                surface.kind not in {"link", "proxied"}
+                or not surface.ready
+                or surface.url is None
+            ):
                 continue
             try:
+                if surface.kind == "proxied":
+                    endpoint = urlsplit(surface.url)
+                    if (
+                        endpoint.scheme != "http"
+                        or endpoint.hostname != "127.0.0.1"
+                        or endpoint.port is None
+                        or not 1024 <= endpoint.port <= 65535
+                        or endpoint.username is not None
+                        or endpoint.password is not None
+                        or endpoint.query
+                        or endpoint.fragment
+                    ):
+                        continue
                 carried = CapabilityNodeSurface(
                     surface_id=surface.surface_id,
                     title=surface.title,
@@ -186,14 +204,18 @@ class ManagedSurface(_WireModel):
     """One surface a managed node reports in its extended description.
 
     A surface is a user-facing endpoint the node serves (a page, or a link to
-    one). Only link surfaces reported ready with a URL reach the topology.
+    one). Ready links and qualified owner-local proxy origins reach topology.
     """
 
     surface_id: str = Field(description="Manifest-declared surface identifier.")
     title: str = Field(description="Operator-facing surface title.")
-    kind: str = Field(description="`link` opens the URL; other kinds are not shown.")
+    kind: str = Field(
+        description="`link` or `proxied` opens an answering URL in its separate browser origin."
+    )
     ready: bool = Field(description="Whether the node reports the surface answering.")
-    url: str | None = Field(default=None, description="Where a ready link opens.")
+    url: str | None = Field(
+        default=None, description="Ready public link or isolated owner facade URL."
+    )
 
 
 class ManagedNode(_WireModel):
