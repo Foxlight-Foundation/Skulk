@@ -5,10 +5,13 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from starlette.types import Message, Scope
 
 from skulk.api.native_inference import create_native_inference_router
 from skulk.api.native_inference_service import NativeInferenceService
-from skulk.api.tests.test_inference_access import application
+from skulk.api.operator_gateway import OperatorGatewayAuthorization
+from skulk.api.tests.test_inference_access import application, client_for
+from skulk.api.tests.test_operator_gateway import paired_service
 from skulk.extensions.native_inference_calls import NativeInferenceCalls
 from skulk.extensions.runtime_attachment import ServiceConnection
 from skulk.extensions.runtime_files import write_private
@@ -36,10 +39,62 @@ async def test_concurrent_adapters_share_one_broker_and_shutdown(
     )
     async with app.router.lifespan_context(app):
         assert await shared.host() is brokers[0]
-    assert brokers[0].closed and brokers[0].hosts.budget.used == 0
+    assert not brokers[0].closed
     await shared.close()
+    assert brokers[0].closed and brokers[0].hosts.budget.used == 0
     with pytest.raises(HTTPException, match="stopped"):
         await shared.host()
+
+
+async def test_relay_stop_and_restart_preserve_local_native_requests(
+    tmp_path: Path,
+) -> None:
+    """Real relay lifespan forwarding cannot retire the local listener's broker."""
+    shared = service(tmp_path)
+    broker = await shared.host()
+    app, _ = application(tmp_path)
+    app.include_router(
+        create_native_inference_router(NodeId("access-core"), inference_service=shared)
+    )
+    pairing, _ = paired_service(tmp_path / "pairing")
+    relay = OperatorGatewayAuthorization(app, pairing)
+    try:
+        async with app.router.lifespan_context(app), client_for(app) as client:
+            for _ in range(2):
+                incoming: asyncio.Queue[Message] = asyncio.Queue()
+                outgoing: asyncio.Queue[Message] = asyncio.Queue()
+                scope: Scope = {
+                    "type": "lifespan",
+                    "state": {},
+                    "asgi": {"version": "3.0"},
+                }
+                task = asyncio.create_task(relay(scope, incoming.get, outgoing.put))
+                try:
+                    async with asyncio.timeout(2):
+                        incoming.put_nowait({"type": "lifespan.startup"})
+                        assert (await outgoing.get())[
+                            "type"
+                        ] == "lifespan.startup.complete"
+                        assert (
+                            await client.get("/v1/native-inference")
+                        ).status_code == 200
+                        incoming.put_nowait({"type": "lifespan.shutdown"})
+                        assert (await outgoing.get())[
+                            "type"
+                        ] == "lifespan.shutdown.complete"
+                        await task
+                        assert not broker.closed and await shared.host() is broker
+                        assert (
+                            await client.get("/v1/native-inference")
+                        ).status_code == 200
+                finally:
+                    if not task.done():
+                        task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+        assert not broker.closed
+    finally:
+        await shared.close()
+    assert broker.closed
 
 
 @pytest.mark.parametrize("cancel_leader", [False, True])

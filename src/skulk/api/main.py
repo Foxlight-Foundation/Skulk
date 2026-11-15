@@ -12100,6 +12100,13 @@ class API:
         )
 
     async def run(self):
+        """Run API tasks and all listeners until shutdown, then retire shared custody.
+
+        Own extension hooks, event channels and the native inference broker for
+        the API's full lifetime. Individual relay listener shutdowns do not end
+        that lifetime. Final cleanup drains the broker after listeners stop,
+        including when startup fails before serving begins.
+        """
         shutdown_ev = anyio.Event()
 
         try:
@@ -12151,12 +12158,19 @@ class API:
                     with anyio.CancelScope(shield=True):
                         shutdown_ev.set()
         finally:
-            if self._extensions is not None:
-                await self._extensions.run_shutdown_hooks()
-            if self._event_log is not None:
-                self._event_log.close()
-            self.command_sender.close()
-            self.event_receiver.close()
+            try:
+                # Relay listeners can stop independently of the local API.
+                # Withdraw their shared broker only after the owning task group
+                # has stopped every listener and drained its requests.
+                with anyio.CancelScope(shield=True):
+                    await self._native_inference_service.close()
+            finally:
+                if self._extensions is not None:
+                    await self._extensions.run_shutdown_hooks()
+                if self._event_log is not None:
+                    self._event_log.close()
+                self.command_sender.close()
+                self.event_receiver.close()
 
     async def run_api(self, ev: anyio.Event):
         cfg = create_local_api_server_config(self.port)

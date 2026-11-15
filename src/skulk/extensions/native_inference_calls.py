@@ -150,7 +150,12 @@ class NativeInferenceCalls:
         *,
         expected_listing: InferenceListing | None = None,
     ) -> Received:
-        """Invoke one exact unary destination under the authenticated original caller."""
+        """Invoke one exact unary destination under the authenticated original caller.
+
+        A trusted adapter may pin an earlier full ``expected_listing``. It must
+        match fresh discovery before current caller permission is checked.
+        The returned response retains its byte lease until delivery or discard.
+        """
         return await self._invoke(
             caller,
             plugin_id,

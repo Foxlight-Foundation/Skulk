@@ -39,7 +39,19 @@ def create_native_inference_router(
     connection_path: Path = SKULK_CONFIG_HOME / "managed-service" / "connection.json",
     inference_service: NativeInferenceService | None = None,
 ) -> APIRouter:
-    """Bind protected host custody; no request selects an issuer, profile or state path."""
+    """Return exact native routes bound to server-selected host custody.
+
+    Args:
+        node_id: The API's authenticated issuer, also required of a shared service.
+        connection_path: Protected host connection file for a standalone service.
+        inference_service: Optional shared service owned by the enclosing API task.
+            Its caller must close it after all listeners stop. A standalone
+            router instead closes its own service when its lifespan ends.
+
+    Returns:
+        Routes that authenticate each actual request independently. Host access
+        is lazy; no request can select an issuer, profile or state path.
+    """
     shared = inference_service or NativeInferenceService(
         node_id, connection_path=connection_path
     )
@@ -52,7 +64,10 @@ def create_native_inference_router(
         try:
             yield
         finally:
-            await finish_runtime_work(asyncio.create_task(shared.close()))
+            # Multiple listeners share the production app. An injected broker
+            # belongs to the API owner, not to one relay listener's lifespan.
+            if inference_service is None:
+                await finish_runtime_work(asyncio.create_task(shared.close()))
 
     router = APIRouter(
         prefix="/v1/native-inference", tags=["Native inference"], lifespan=lifespan
