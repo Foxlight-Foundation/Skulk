@@ -147,10 +147,18 @@ class NativeInferenceCalls:
         version: str,
         payload: bytes,
         seconds: float | None = None,
+        *,
+        expected_listing: InferenceListing | None = None,
     ) -> Received:
         """Invoke one exact unary destination under the authenticated original caller."""
         return await self._invoke(
-            caller, plugin_id, capability_id, version, payload, seconds
+            caller,
+            plugin_id,
+            capability_id,
+            version,
+            payload,
+            seconds,
+            expected_listing=expected_listing,
         )
 
     async def invoke_stream(
@@ -164,6 +172,7 @@ class NativeInferenceCalls:
         seconds: float | None = None,
         *,
         caller_guard: Callable[[], None] | None = None,
+        expected_listing: InferenceListing | None = None,
     ) -> None:
         """Own one exact stream and drain it through a trusted application adapter.
 
@@ -171,6 +180,8 @@ class NativeInferenceCalls:
         Failure or cancellation drains the same invocation; it never replays work.
         A trusted adapter may provide a synchronous liveness guard, rechecked at
         discovery, dispatch, descendant calls and each protected physical write.
+        A selected listing additionally pins the full signed target, runtime and
+        child incarnation; it never grants permission or replaces fresh discovery.
         """
         result = await self._invoke(
             caller,
@@ -181,6 +192,7 @@ class NativeInferenceCalls:
             seconds,
             consume,
             caller_guard,
+            expected_listing=expected_listing,
         )
         result.release()
 
@@ -194,6 +206,8 @@ class NativeInferenceCalls:
         seconds: float | None = None,
         consume: Callable[[NativeInferenceStream], Awaitable[None]] | None = None,
         caller_guard: Callable[[], None] | None = None,
+        *,
+        expected_listing: InferenceListing | None = None,
     ) -> Received:
         """Dispatch one exact caller-authorized implementation without automatic replay.
 
@@ -221,6 +235,10 @@ class NativeInferenceCalls:
             if len(matches) != 1:
                 raise ValueError("inference exact destination unavailable")
             listing = matches[0]
+            if expected_listing is not None and listing != expected_listing:
+                # A catalog is meaningful only for the generation that produced
+                # it. Operator authority must not silently retarget stale work.
+                raise ValueError("inference selected destination changed")
             authorization = self.callers.authorize(caller, listing.grant())
             deadlines = [
                 started_wall + int(value * 1000)

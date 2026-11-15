@@ -151,6 +151,7 @@ from skulk.api.music_jobs import (
 )
 from skulk.api.native_calls import create_native_calls_router
 from skulk.api.native_inference import create_native_inference_router
+from skulk.api.native_inference_service import NativeInferenceService
 from skulk.api.node_health import (
     compute_node_health,
     live_data_transports,
@@ -2237,7 +2238,12 @@ class API:
         )
         self.app.include_router(create_native_calls_router(self.node_id))
         self.app.include_router(create_inference_access_router(self.node_id))
-        self.app.include_router(create_native_inference_router(self.node_id))
+        self._native_inference_service = NativeInferenceService(self.node_id)
+        self.app.include_router(
+            create_native_inference_router(
+                self.node_id, inference_service=self._native_inference_service
+            )
+        )
         if operator_pairing_service is not None:
             self.app.include_router(
                 create_operator_auth_router(
