@@ -37,6 +37,7 @@ from pydantic import (
     SecretStr,
     TypeAdapter,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
@@ -45,6 +46,7 @@ from skulk.extensions.capability_store import (
     StoreTrustUnavailableError,
 )
 from skulk.extensions.managed_limits import MAX_MANAGED_DESCRIPTORS
+from skulk.extensions.native_inference_contracts import InferenceProfiles
 from skulk.extensions.runtime_artifacts import (
     Digest,
     Identifier,
@@ -62,7 +64,10 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 
-ACCEPTED_CATALOG_PROTOCOLS: tuple[int, ...] = (1, 2, 3)
+LEGACY_CATALOG_PROTOCOLS: tuple[int, ...] = (1, 2, 3)
+"""Issued legacy catalog windows, unchanged by native discovery."""
+
+ACCEPTED_CATALOG_PROTOCOLS: tuple[int, ...] = (*LEGACY_CATALOG_PROTOCOLS, 4)
 """Catalog record protocols this host reads: the current and the previous.
 
 Protocol 3 permits sixteen descriptor identifiers; earlier protocols retain
@@ -266,8 +271,8 @@ def catalog_refusal(response: Mapping[str, JsonValue]) -> CatalogRefusedError | 
 
 
 def _accepted_catalog_protocol(value: int) -> int:
-    if value not in ACCEPTED_CATALOG_PROTOCOLS:
-        window = " or ".join(str(item) for item in ACCEPTED_CATALOG_PROTOCOLS)
+    if value not in LEGACY_CATALOG_PROTOCOLS:
+        window = " or ".join(str(item) for item in LEGACY_CATALOG_PROTOCOLS)
         raise ValueError(
             f"catalog protocol {value} is not accepted; this host accepts {window}"
         )
@@ -342,6 +347,121 @@ class _CatalogEntryClaims(_Contract):
         return self
 
 
+@final
+class NativeCatalogBinding(_Contract):
+    """Native consent facts bound to a full declaration, never execution authority."""
+
+    runtime_protocol: Literal[5] = Field(description="Exact native runtime envelope.")
+    release_protocol: Literal[3] = Field(description="Exact native release envelope.")
+    manifest_revision: Digest = Field(
+        description="Full managed/2 declaration identity."
+    )
+    kernel: InferenceProfiles = Field(description="Exact supported native ABI cohort.")
+    processing_domains: tuple[Literal["local", "private_site", "external"], ...] = (
+        Field(
+            min_length=1,
+            max_length=3,
+            description="Sorted unique declared processing domains.",
+        )
+    )
+
+    @field_validator("runtime_protocol", "release_protocol", mode="before")
+    @classmethod
+    def integer_protocol(cls, value: object) -> object:
+        """Refuse boolean and float aliases before selecting native envelopes."""
+        if type(value) is not int:
+            raise ValueError("native catalog protocols must be exact integers")
+        return value
+
+    @model_validator(mode="after")
+    def unique_domains(self) -> Self:
+        """Keep the signed summary deterministic and unambiguous."""
+        if self.processing_domains != tuple(sorted(set(self.processing_domains))):
+            raise ValueError("native catalog domains must be sorted and unique")
+        return self
+
+
+class _NativeCatalogEntryClaims(_Contract):
+    """Catalog-four native entry; legacy index constraints do not retype its IDs."""
+
+    publisher: Identifier
+    sequence: int = Field(ge=1)
+    feed_url: str = Field(max_length=512)
+    release_sha256: Digest
+    release_digest: Digest
+    runtime_platform: Annotated[str, Field(max_length=64)] | None = None
+    artifact_sha256: Digest
+    artifact_size: int = Field(ge=1, le=67108864)
+    transfer_bytes: int = Field(ge=1, le=67108864 + 536870912)
+    platforms: tuple[Literal["darwin", "linux"], ...] = Field(
+        min_length=1, max_length=2
+    )
+    skulk_build_sha256: Digest
+    skulk_requires: str | None = Field(default=None, max_length=128)
+    permissions: tuple[_Text, ...] = Field(min_length=1, max_length=16)
+    operations: bool = False
+    expires_at: int = Field(gt=0)
+
+    bundle_id: str = Field(
+        min_length=1, max_length=128, description="Native bundle identity."
+    )
+    bundle_version: str = Field(
+        min_length=1, max_length=128, description="Native bundle version."
+    )
+    title: str | None = Field(
+        default=None, max_length=512, description="Declared native display title."
+    )
+    descriptors: tuple[Annotated[str, Field(min_length=1, max_length=512)], ...] = (
+        Field(
+            min_length=1,
+            max_length=MAX_MANAGED_DESCRIPTORS,
+            description="Native callable identifiers and versions.",
+        )
+    )
+    surfaces: tuple[Annotated[str, Field(min_length=1, max_length=512)], ...] = Field(
+        default=(), max_length=4, description="Declared management surface titles."
+    )
+    native: NativeCatalogBinding = Field(description="Full native declaration and ABI.")
+    steward_risks: tuple[
+        Literal["observation", "billable", "effect", "inference"], ...
+    ] = Field(
+        default=(), max_length=4, description="Native Steward exposure risk classes."
+    )
+
+    @model_validator(mode="after")
+    def native_runtime(self) -> Self:
+        """Native inference listings require a runtime family and Core version range."""
+        if self.runtime_platform is None or self.skulk_requires is None:
+            raise ValueError("native catalog entry requires runtime and Core range")
+        return self
+
+    @model_validator(mode="after")
+    def served_from_a_directory(self) -> Self:
+        """A feed is an explicit HTTPS directory, like a configured release source."""
+        if self.skulk_requires is not None:
+            try:
+                SpecifierSet(self.skulk_requires)
+            except InvalidSpecifier:
+                raise ValueError(
+                    "catalog entry Skulk range is not a version range"
+                ) from None
+        if self.transfer_bytes < self.artifact_size:
+            raise ValueError("catalog entry transfer size cannot be below its artifact")
+        parsed = urlsplit(self.feed_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.endswith("/")
+            or any(character.isspace() for character in self.feed_url)
+        ):
+            raise ValueError("catalog entry feed requires an explicit HTTPS directory")
+        return self
+
+
 class _CatalogClaims(_Contract):
     protocol: CatalogProtocol
     publisher: Identifier
@@ -383,6 +503,47 @@ class _CatalogClaims(_Contract):
             key = (entry.bundle_id, entry.sequence, family)
             if key in seen:
                 raise ValueError("catalog lists one bundle sequence twice")
+            seen.add(key)
+        return self
+
+
+class _NativeCatalogClaims(_Contract):
+    """Separately versioned native-aware index with unchanged legacy entry variants."""
+
+    protocol: Literal[4]
+    publisher: Identifier
+    revision: int = Field(ge=1)
+    created_at: int = Field(gt=0)
+    expires_at: int = Field(gt=0)
+    entries: tuple[_NativeCatalogEntryClaims | _CatalogEntryClaims, ...] = Field(
+        max_length=64
+    )
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def integer_protocol(cls, value: object) -> object:
+        """Refuse numeric aliases for the independent catalog-four contract."""
+        if type(value) is not int or value != 4:
+            raise ValueError("native catalog protocol must be exact integer 4")
+        return value
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        """Preserve publisher, validity, version-range and unambiguous-family checks."""
+        if self.created_at >= self.expires_at:
+            raise ValueError("native catalog expiry must follow creation")
+        seen: set[tuple[str, int, str | None]] = set()
+        for entry in self.entries:
+            if entry.publisher != self.publisher or entry.skulk_requires is None:
+                raise ValueError("native catalog publisher or Core range differs")
+            family = (
+                canonical_platform(entry.runtime_platform)
+                if entry.runtime_platform is not None
+                else None
+            )
+            key = (entry.bundle_id, entry.sequence, family)
+            if key in seen:
+                raise ValueError("native catalog lists one bundle sequence twice")
             seen.add(key)
         return self
 
@@ -430,7 +591,11 @@ class CatalogEntryReview(BaseModel):
     surfaces: tuple[str, ...] = Field(description="Titles of declared surfaces.")
     operations: bool = Field(description="Whether durable operations are declared.")
     steward_risks: tuple[str, ...] = Field(
-        description="Steward exposure risk classes: observation, billable, effect."
+        description="Declared exposure risks, including inference in native catalogs."
+    )
+    native: NativeCatalogBinding | None = Field(
+        default=None,
+        description="Native declaration, processing and ABI facts; null for legacy entries.",
     )
     expires_at: int = Field(description="Release expiry as a Unix timestamp.")
     matches_host: bool = Field(
@@ -462,7 +627,7 @@ class VerifiedCatalog:
     def __init__(
         self,
         document: bytes,
-        claims: _CatalogClaims,
+        claims: _CatalogClaims | _NativeCatalogClaims,
         revoked_artifacts: frozenset[str] = frozenset(),
     ) -> None:
         self.document = document
@@ -481,7 +646,7 @@ class VerifiedCatalog:
 
     def entry(
         self, bundle_id: str, sequence: int, runtime_platform: str | None
-    ) -> _CatalogEntryClaims | None:
+    ) -> _CatalogEntryClaims | _NativeCatalogEntryClaims | None:
         """The listed, unrevoked release for one bundle sequence and artifact family.
 
         One sequence may be listed once per runtime platform; the family is
@@ -529,7 +694,7 @@ class VerifiedCatalog:
 
     @staticmethod
     def entry_review(
-        entry: _CatalogEntryClaims,
+        entry: _CatalogEntryClaims | _NativeCatalogEntryClaims,
         *,
         skulk_version: str,
         skulk_build_sha256: str,
@@ -564,6 +729,9 @@ class VerifiedCatalog:
             surfaces=entry.surfaces,
             operations=entry.operations,
             steward_risks=entry.steward_risks,
+            native=entry.native
+            if isinstance(entry, _NativeCatalogEntryClaims)
+            else None,
             expires_at=entry.expires_at,
             skulk_requires=entry.skulk_requires,
             matches_host=expected_os in entry.platforms
@@ -600,6 +768,12 @@ def verify_catalog(
     except ValidationError as malformed:
         raise CatalogRefusedError("catalog_invalid", str(malformed)) from None
     payload = canonical_json(signed.catalog)
+    offered = signed.catalog.get("protocol")
+    message = (
+        b"skulk.catalog/4\0" + payload
+        if type(offered) is int and offered == 4
+        else payload
+    )
     publisher = _claimed_publisher(signed.catalog)
     public = trust.publishers.get(publisher) if publisher is not None else None
     if (
@@ -616,13 +790,12 @@ def verify_catalog(
 
     try:
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(public)).verify(
-            bytes.fromhex(signed.signature), payload
+            bytes.fromhex(signed.signature), message
         )
     except (InvalidSignature, ValueError):
         raise CatalogRefusedError(
             "catalog_signature_refused", "catalog signature refused"
         ) from None
-    offered = signed.catalog.get("protocol")
     if (
         isinstance(offered, int)
         and not isinstance(offered, bool)
@@ -630,7 +803,11 @@ def verify_catalog(
     ):
         raise ProtocolUnsupportedError("catalog", offered, ACCEPTED_CATALOG_PROTOCOLS)
     try:
-        claims = _CatalogClaims.model_validate_json(payload)
+        claims = (
+            _NativeCatalogClaims.model_validate_json(payload)
+            if type(offered) is int and offered == 4
+            else _CatalogClaims.model_validate_json(payload)
+        )
     except ValidationError as invalid:
         # Signed by a trusted publisher, yet not a catalog this host reads:
         # the publisher's defect, named so the operator knows it is not theirs.
@@ -1058,6 +1235,7 @@ class HostCatalog:
         from skulk.extensions.capability_store import (
             CAPABILITY_STORE_CATALOG_DOCUMENT,
             CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT,
+            CAPABILITY_STORE_NATIVE_CATALOG_DOCUMENT,
         )
 
         store = self.store
@@ -1065,7 +1243,11 @@ class HostCatalog:
             return ()
         if store.catalog_document != CAPABILITY_STORE_CATALOG_DOCUMENT:
             return (store.catalog_document,)
-        return (store.catalog_document, CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT)
+        return (
+            store.catalog_document,
+            CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT,
+            CAPABILITY_STORE_NATIVE_CATALOG_DOCUMENT,
+        )
 
     def _uses_store(self, state: "_CatalogState") -> bool:
         """Whether reads come from the built-in store, seeded or not yet."""
@@ -1157,12 +1339,13 @@ class HostCatalog:
         assert self.store is not None
         documents = self._store_documents()
         filename = self.store.catalog_document
-        if len(documents) == 2:
-            prefix = self.store.catalog_url + "\n" + documents[1] + "\n"
+        for document in reversed(documents[1:]):
+            prefix = self.store.catalog_url + "\n" + document + "\n"
             if any(key.startswith(prefix) for key in self._state().floors):
                 # Returning from a private catalog must not reset the accepted
                 # version and permit a missing v3 document to hide releases.
-                filename = documents[1]
+                filename = document
+                break
         return CatalogSource(
             revision=revision,
             base_url=self.store.catalog_url,
@@ -1601,38 +1784,41 @@ class HostCatalog:
                     "catalog_unconfigured", "catalog source unconfigured"
                 )
             source, trust = state.source, state.trust
-            candidate = source
             documents = self._store_documents()
-            if (
-                self._is_store(source)
-                and len(documents) == 2
-                and (source.document_filename == documents[0])
-            ):
-                candidate = source.model_copy(
-                    update={
-                        "document_filename": documents[1],
-                        "revision": source.revision + 1,
-                    }
-                )
-            # One deadline includes the optional initial 404 probe. Failure to
-            # authenticate v3 never downgrades; only genuine absence before its
-            # first acceptance can retain the legacy address.
+            candidates = [source]
+            if self._is_store(source):
+                candidates = [
+                    source.model_copy(
+                        update={
+                            "document_filename": document,
+                            "revision": source.revision + 1,
+                        }
+                    )
+                    for document in reversed(
+                        documents[documents.index(source.document_filename) + 1 :]
+                    )
+                ] + candidates
+            # Probe only newer versions. Genuine absence before acceptance may
+            # fall back; a missing accepted version or any authentication failure
+            # must never hide releases by selecting an older catalog.
+            candidate = source
+            raw = b""
             try:
                 async with asyncio.timeout(20):
-                    try:
-                        raw = await self._download(candidate)
-                    except CatalogRefusedError as error:
-                        if (
-                            candidate == source
-                            or error.status != 404
-                            or any(
-                                key.startswith(_floor_key(candidate, ""))
-                                for key in state.floors
-                            )
-                        ):
-                            raise
-                        candidate = source
-                        raw = await self._download(source)
+                    for candidate in candidates:
+                        try:
+                            raw = await self._download(candidate)
+                            break
+                        except CatalogRefusedError as error:
+                            if (
+                                candidate == source
+                                or error.status != 404
+                                or any(
+                                    key.startswith(_floor_key(candidate, ""))
+                                    for key in state.floors
+                                )
+                            ):
+                                raise
             except TimeoutError:
                 raise CatalogRefusedError(
                     "catalog_unreachable", "catalog unavailable"
@@ -1640,12 +1826,13 @@ class HostCatalog:
             verified = verify_catalog(raw, trust, now=current_time)
             if (
                 self._is_store(candidate)
-                and len(documents) == 2
-                and (candidate.document_filename == documents[1])
-                and verified.claims.protocol != 3
+                and len(documents) > 1
+                and candidate.document_filename in documents[1:]
+                and verified.claims.protocol
+                != documents.index(candidate.document_filename) + 2
             ):
                 raise CatalogRefusedError(
-                    "catalog_invalid", "extended catalog requires protocol 3"
+                    "catalog_invalid", "catalog version differs from its address"
                 )
             current = self._state()
             if current.source != source:

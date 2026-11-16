@@ -41,26 +41,51 @@ from skulk.extensions.runtime_manager import (
 )
 from skulk.extensions.runtime_selection import RuntimeSelection, RuntimeSelector
 from skulk.extensions.tests.test_call_runtime import call_fixture
+from skulk.extensions.tests.test_inference_runtime import inference_fixture
 from skulk.extensions.tests.test_managed_services import connect, manager_fixture
 from skulk.extensions.tests.test_native_runtime import OBJECT, native_fixture, sign
 from skulk.extensions.tests.test_runtime_install import artifacts
 from skulk.operator.pairing import PluginGrantUpdate
 
 
-@pytest.mark.parametrize("calls", [False, True])
-@pytest.mark.parametrize("changed_artifact", [False, True])
+@pytest.mark.parametrize(
+    "protocol,fault",
+    [(protocol, fault) for protocol in (3, 4, 5) for fault in ("none", "artifact")]
+    + [
+        (5, fault)
+        for fault in ("missing", "manifest", "domain", "descriptors", "title")
+    ],
+)
 async def test_native_catalog_consent_reads_the_verified_inner_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    calls: bool,
-    changed_artifact: bool,
+    protocol: int,
+    fault: str,
 ) -> None:
     """Real signed catalog binding preserves native identity without staging code."""
-    factory = call_fixture if calls else native_fixture
-    payload, key, trust, host = factory(tmp_path / "source")
-    metadata = sign(
-        payload, key, b"skulk.runtime/4\0" if calls else b"skulk.runtime/3\0"
+    factory = (
+        inference_fixture
+        if protocol == 5
+        else (call_fixture if protocol == 4 else native_fixture)
     )
+    payload, key, trust, host = factory(tmp_path / "source")
+    if protocol == 5:
+        from skulk.extensions.native_inference_contracts import InferenceManifest
+
+        release_value = OBJECT.validate_python(payload["release"], strict=True)
+        wrapper = OBJECT.validate_python(release_value["manifest"], strict=True)
+        value = OBJECT.validate_json(str(wrapper["canonical_json"]))
+        value["steward"] = [
+            {
+                "qualified_id": "example.generate@1.0.0",
+                "behavior": "inference",
+                "risk": "inference",
+            }
+        ]
+        declaration = InferenceManifest.from_json(json.dumps(value))
+        release_value["manifest"] = {"canonical_json": declaration.canonical_json}
+        payload["release"] = release_value
+    metadata = sign(payload, key, f"skulk.runtime/{protocol}\0".encode())
     runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
     release = runtime.claims.release
     manifest = runtime.native_manifest
@@ -75,7 +100,9 @@ async def test_native_catalog_consent_reads_the_verified_inner_manifest(
         "release_sha256": hashlib.sha256(metadata).hexdigest(),
         "release_digest": runtime.digest,
         "runtime_platform": host.platform,
-        "artifact_sha256": "b" * 64 if changed_artifact else manifest.executable_sha256,
+        "artifact_sha256": "b" * 64
+        if fault == "artifact"
+        else manifest.executable_sha256,
         "artifact_size": release.artifact_size,
         "transfer_bytes": release.artifact_size
         + sum(w.size for w in runtime.claims.wheels),
@@ -86,8 +113,43 @@ async def test_native_catalog_consent_reads_the_verified_inner_manifest(
         "descriptors": ["UpperCase:Echo@native@1.0.0"],
         "expires_at": release.expires_at,
     }
+    if protocol == 5:
+        value = manifest.value()
+        contracts = OBJECT.validate_python(value["contracts"], strict=True)
+        descriptors = contracts["descriptors"]
+        assert isinstance(descriptors, list)
+        entry.update(
+            title=value["title"],
+            descriptors=[
+                str(OBJECT.validate_python(d, strict=True)["id"])
+                + "@"
+                + str(OBJECT.validate_python(d, strict=True)["version"])
+                for d in descriptors
+            ],
+            surfaces=[],
+            operations=value["operations"] is not None,
+            steward_risks=["inference"],
+        )
+        if fault != "missing":
+            entry["native"] = {
+                "runtime_protocol": 5,
+                "release_protocol": 3,
+                "manifest_revision": "c" * 64
+                if fault == "manifest"
+                else manifest.digest,
+                "kernel": payload["kernel"],
+                "processing_domains": ["external" if fault == "domain" else "local"],
+            }
+        else:
+            # A legacy-shaped listing cannot conceal an inference runtime by
+            # omitting its native binding and the new exposure risk class.
+            entry["steward_risks"] = []
+        if fault == "descriptors":
+            entry["descriptors"] = ["other.generate@1.0.0"]
+        if fault == "title":
+            entry["title"] = "Different consent title"
     catalog: dict[str, JsonValue] = {
-        "protocol": 2,
+        "protocol": 4 if protocol == 5 else 2,
         "publisher": release.publisher,
         "revision": 1,
         "created_at": now - 1,
@@ -97,7 +159,10 @@ async def test_native_catalog_consent_reads_the_verified_inner_manifest(
     document = canonical_json(
         {
             "catalog": catalog,
-            "signature": key.sign(canonical_json(catalog)).hex(),
+            "signature": key.sign(
+                (b"skulk.catalog/4\0" if protocol == 5 else b"")
+                + canonical_json(catalog)
+            ).hex(),
         }
     )
 
@@ -144,7 +209,7 @@ async def test_native_catalog_consent_reads_the_verified_inner_manifest(
                 plugin_id="managed.native-catalog",
             )
         )
-        if changed_artifact:
+        if fault != "none":
             with pytest.raises(ValueError, match="differs from the listing"):
                 await manager.dispatch(request)
         else:
