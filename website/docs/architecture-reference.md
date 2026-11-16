@@ -3400,6 +3400,9 @@ recovery remains a separate contract and test obligation.
   maximum, including lock waiters; queue/work share the original finite deadline.
   Cancellation/expiry/failure releases both slot and lock. Library identity,
   source-reader custody, current placement/trust and memory admission stay checked.
+  Placement withdrawal/snapshot replacement cancels queued creation owners and
+  joins active native drain before releasing ownership; unchanged snapshots retain
+  their live owners.
 - Master restart recovery rechecks late indexed and ordered pending placements
   while information is missing. A private accounted-instance set prevents
   double-crediting earlier restorations and preserves recorded model-copy counts.

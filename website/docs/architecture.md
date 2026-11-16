@@ -4867,6 +4867,9 @@ supervisor registration. Another preparation cannot withdraw the verified
 library during that handoff. Queue time consumes the original request deadline;
 cancellation, expiry and errors release the slot and ownership lock. The final
 runtime, placement, trust and memory-policy checks remain mandatory.
+Authoritative placement withdrawal or a replacement snapshot cancels queued
+creation ownership immediately. Active native preparation drains before releasing
+its ownership lock; a snapshot retaining the same placement preserves the owner.
 
 Restart recovery reconciles surviving operator placements again while it waits
 for missing library information. Accepted placements not yet replicated also

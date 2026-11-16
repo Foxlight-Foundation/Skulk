@@ -11,8 +11,17 @@ import anyio
 import pytest
 
 from skulk.provisioning.tests import test_ace_step_runtime as fixtures
-from skulk.shared.types.events import TaskStatusUpdated
-from skulk.shared.types.tasks import TaskStatus
+from skulk.shared.types.events import (
+    AceStepPreparationCompleted,
+    IndexedEvent,
+    InstanceDeleted,
+    StateSnapshotHydrated,
+    TaskStatusUpdated,
+)
+from skulk.shared.types.tasks import CreateRunner, TaskId, TaskStatus
+from skulk.shared.types.worker.instances import InstanceId
+from skulk.utils.channels import channel
+from skulk.worker import main as worker_module
 from skulk.worker.tests.test_ace_step_activation import request, runner_fixture
 
 interpreter_fixture = fixtures.interpreter_fixture
@@ -172,6 +181,114 @@ async def test_queued_preparation_deadline_expires_without_starting_native_work(
                 assert worker._native_music_preparation_capacity.borrowed_tokens == 1
         assert installed.probes == 0
     finally:
+        await worker._native_music_media.detach()
+        await worker._ace_step_preparation.close()
+        await worker._demucs_preparation.close()
+
+
+@pytest.mark.parametrize("snapshot", [False, True])
+async def test_withdrawn_queued_creations_release_slots_before_active_owner_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    installed: fixtures.NativeInstall, *, snapshot: bool,
+) -> None:
+    """Actual indexed withdrawal frees all queued slots without waiting for the owner."""
+    worker, original, outgoing = runner_fixture(tmp_path, monkeypatch, installed)
+    indexed, incoming = channel[IndexedEvent]()
+    worker.event_receiver = incoming
+    def preserve_config(*_arguments: object) -> None:
+        """Snapshot tests never mutate the operator's model-trust configuration."""
+    monkeypatch.setattr(worker_module, "persist_model_trust_config", preserve_config)
+    tasks: list[CreateRunner] = []
+    instances = dict(worker.state.instances)
+    for index in range(3):
+        identifier = InstanceId(f"queued-{index}")
+        instance = original.bound_instance.instance.model_copy(update={"instance_id": identifier})
+        instances[identifier] = instance
+        bound = original.bound_instance.model_copy(update={"instance": instance})
+        tasks.append(original.model_copy(update={"task_id": TaskId(f"create-{index}"), "instance_id": identifier, "bound_instance": bound}))
+    worker.state = worker.state.model_copy(update={"instances": instances, "tasks": {task.task_id: task for task in tasks}})
+    try:
+        with anyio.fail_after(5):
+            async with worker._tg as group:
+                group.start_soon(worker._event_applier)
+                async with worker._native_music_preparation_scope(time.time() + 30):
+                    for task in tasks:
+                        await worker._execute_create_runner(task)
+                    while worker._native_music_preparation_capacity.borrowed_tokens < 4:
+                        await anyio.sleep(0)
+                    if snapshot:
+                        retained = worker.state.model_copy(update={"last_event_applied_idx": 0})
+                        await indexed.send(IndexedEvent(idx=0, event=StateSnapshotHydrated(state=retained)))
+                        while worker.state.last_event_applied_idx != 0:
+                            await anyio.sleep(0)
+                        assert len(worker._native_music_creations) == 3
+                        assert worker._native_music_preparation_capacity.borrowed_tokens == 4
+                        current = worker.state.model_copy(update={"instances": {}, "last_event_applied_idx": 1})
+                        await indexed.send(IndexedEvent(idx=1, event=StateSnapshotHydrated(state=current)))
+                    else:
+                        for index, task in enumerate(tasks):
+                            await indexed.send(IndexedEvent(idx=index, event=InstanceDeleted(instance_id=task.instance_id)))
+                    while worker._native_music_creations:
+                        await anyio.sleep(0)
+                    assert worker._native_music_preparation_capacity.borrowed_tokens == 1
+                    assert not worker._native_music_creation_requests
+                    assert not worker._native_music_creation_scopes
+                    cancelled = [await outgoing.receive() for _ in tasks]
+                    assert all(isinstance(event, TaskStatusUpdated) and event.task_status == TaskStatus.Cancelled for event in cancelled)
+                    assert {event.task_id for event in cancelled if isinstance(event, TaskStatusUpdated)} == {task.task_id for task in tasks}
+                    assert installed.probes == installed.downloads == 0
+                async with worker._native_music_preparation_scope(time.time() + 30):
+                    assert worker._native_music_preparation_capacity.borrowed_tokens == 1
+                group.cancel_scope.cancel()
+    finally:
+        indexed.close()
+        await worker._native_music_media.detach()
+        await worker._ace_step_preparation.close()
+        await worker._demucs_preparation.close()
+
+
+async def test_withdrawn_active_creation_drains_native_work_before_releasing_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    installed: fixtures.NativeInstall,
+) -> None:
+    """Withdrawal cancels the real creation but retains ownership until native drain."""
+    worker, task, outgoing = runner_fixture(tmp_path, monkeypatch, installed)
+    worker.state = worker.state.model_copy(update={"tasks": {task.task_id: task}})
+    indexed, incoming = channel[IndexedEvent]()
+    worker.event_receiver = incoming
+    entered, release = threading.Event(), threading.Event()
+    original_probe = installed.probe
+    def probe(arguments: Sequence[str], *, environment: dict[str, str], timeout_seconds: int, capture: bool) -> str:
+        if installed.probes == 0:
+            entered.set()
+            assert release.wait(5)
+        return original_probe(arguments, environment=environment, timeout_seconds=timeout_seconds, capture=capture)
+    monkeypatch.setattr(installed, "probe", probe)
+    try:
+        with anyio.fail_after(10):
+            async with worker._tg as group:
+                group.start_soon(worker._event_applier)
+                await worker._execute_create_runner(task)
+                while not entered.is_set():
+                    await anyio.sleep(0.001)
+                group.start_soon(worker._prepare_ace_step_engine, request(worker, installed))
+                while worker._native_music_preparation_capacity.borrowed_tokens < 2:
+                    await anyio.sleep(0)
+                await indexed.send(IndexedEvent(idx=0, event=InstanceDeleted(instance_id=task.instance_id)))
+                while task.instance_id in worker.state.instances:
+                    await anyio.sleep(0)
+                await anyio.sleep(0.05)
+                assert worker._native_music_preparation_capacity.borrowed_tokens == 2
+                assert task.instance_id in worker._native_music_creation_requests
+                release.set()
+                events = [await outgoing.receive() for _ in range(2)]
+                assert any(isinstance(event, AceStepPreparationCompleted) and event.success for event in events)
+                assert any(isinstance(event, TaskStatusUpdated) and event.task_id == task.task_id and event.task_status == TaskStatus.Cancelled for event in events)
+                assert not worker._native_music_creations and not worker.runners
+                group.cancel_scope.cancel()
+    finally:
+        release.set()
+        indexed.close()
         await worker._native_music_media.detach()
         await worker._ace_step_preparation.close()
         await worker._demucs_preparation.close()

@@ -3317,6 +3317,9 @@ Worker ACE cached recovery, explicit preparation and runner creation share one
 four-owner bounded preparation scope through verification and ownership transfer
 to the supervisor. Preserve queue-inclusive deadlines, cancellation/expiry slot
 release and the final runtime, reader, placement, trust and memory fences.
+Authoritative withdrawal/snapshot replacement must cancel queued creation owners;
+active native work still drains before ownership is released. Snapshots preserving
+the placement must preserve its owner.
 Never return to separate prepare/commit windows that let another preparation
 withdraw the verified library before the runner takes ownership.
 Master restart recovery credits late indexed/pending operator mounts once per
