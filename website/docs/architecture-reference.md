@@ -3391,3 +3391,20 @@ Active/completed starts remain idempotent. Deploy compatible target
 readers before using the new command. This does not reset coordinator state for
 master-generated `DownloadPending` placement recovery; that cross-component
 recovery remains a separate contract and test obligation.
+
+
+## Native music preparation and restart overlap
+
+- Worker `_native_music_preparation_scope` serializes ACE cached restore,
+  explicit prepare and verification-to-supervisor handoff. Four admitted owners
+  maximum, including lock waiters; queue/work share the original finite deadline.
+  Cancellation/expiry/failure releases both slot and lock. Library identity,
+  source-reader custody, current placement/trust and memory admission stay checked.
+  Placement withdrawal/snapshot replacement cancels queued creation owners and
+  joins active native drain before releasing ownership; unchanged snapshots retain
+  their live owners.
+- Master restart recovery rechecks late indexed and ordered pending placements
+  while information is missing. A private accounted-instance set prevents
+  double-crediting earlier restorations and preserves recorded model-copy counts.
+  Dying instances cannot satisfy intents; advancing the head renews only the next
+  intent's existing information-wait budget. No new wire or State surface.

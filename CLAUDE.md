@@ -3309,3 +3309,21 @@ Active/completed starts remain idempotent. Deploy compatible target
 readers before using the new command. This does not reset coordinator state for
 master-generated `DownloadPending` placement recovery; that cross-component
 recovery remains a separate contract and test obligation.
+
+
+## Native music preparation handoff
+
+Worker ACE cached recovery, explicit preparation and runner creation share one
+four-owner bounded preparation scope through verification and ownership transfer
+to the supervisor. Preserve queue-inclusive deadlines, cancellation/expiry slot
+release and the final runtime, reader, placement, trust and memory fences.
+Authoritative withdrawal/snapshot replacement must cancel queued creation owners;
+active native work still drains before ownership is released. Snapshots preserving
+the placement must preserve its owner.
+Never return to separate prepare/commit windows that let another preparation
+withdraw the verified library before the runner takes ownership.
+Master restart recovery credits late indexed/pending operator mounts once per
+instance while awaiting library information. Its private accounted set must also
+include placements it already restored: never consume multiple recorded copies
+with the same instance. Dying placements do not count; the next head intent keeps
+its own information deadline. No inference replay or new wire/State type follows.

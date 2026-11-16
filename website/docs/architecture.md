@@ -4855,3 +4855,25 @@ Active/completed starts remain idempotent. Deploy compatible target
 readers before using the new command. This does not reset coordinator state for
 master-generated `DownloadPending` placement recovery; that cross-component
 recovery remains a separate contract and test obligation.
+
+
+## Native music preparation during restart
+
+ACE-Step cached restoration, explicit engine preparation and runner creation
+share a bounded worker preparation scope. At most four owners, including
+waiters, are admitted. One owner retains the scope from full library verification
+through resource publication and, for runner creation, reader acquisition and
+supervisor registration. Another preparation cannot withdraw the verified
+library during that handoff. Queue time consumes the original request deadline;
+cancellation, expiry and errors release the slot and ownership lock. The final
+runtime, placement, trust and memory-policy checks remain mandatory.
+Authoritative placement withdrawal or a replacement snapshot cancels queued
+creation ownership immediately. Active native preparation drains before releasing
+its ownership lock; a snapshot retaining the same placement preserves the owner.
+
+Restart recovery reconciles surviving operator placements again while it waits
+for missing library information. Accepted placements not yet replicated also
+count. Each instance is credited only once, including instances recovery itself
+already created, so multiple recorded copies of a model remain distinct. A dying
+instance cannot satisfy recovery, and a newly advanced intent receives its own
+information-wait budget. This adds no State field, event type or inference replay.
