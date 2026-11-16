@@ -4896,8 +4896,10 @@ installations expose **Configure release source** for settings and credential
 rotation. Credential inputs are cleared before submission and excluded from Redux,
 browser storage and ordinary errors. Changed source revisions require an explicit
 status refresh before saving. **Retry this installation** recovers only the original
-failed installation after checking current source readiness; reconnect only reads
-the retained operation. Release activation still requires separate permission
+failed installation after checking current source readiness. During recovery the
+dashboard shows that retained release's identity, permissions and processing
+locations even if a different configured release has been inspected; reconnect
+only reads the retained operation. Release activation still requires separate permission
 acceptance, and paid-capacity approval remains a separate plugin operation.
 
 The dashboard's **Choose another release** controls (under **Details** in a plugin's drawer) inspect the configured release,

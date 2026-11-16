@@ -39,7 +39,8 @@ export function RuntimeReleasePanel({ runtime, ownership }: { runtime: ManagedRu
   const [sourceOpen, setSourceOpen] = useState(false);
   const operation = installation.currentData?.operation;
   const source = useGetRuntimeSourceStatusQuery(runtime.plugin_id, { skip: operation?.state !== 'recovery_required', refetchOnMountOrArgChange: true });
-  const review = inspection.currentData ?? operation?.review;
+  // Recovery retries the retained operation, even after a different source release is inspected.
+  const review = operation?.state === 'recovery_required' ? operation.review : inspection.currentData ?? operation?.review;
   const permissionsAccepted = !!review && acceptedDigest === review.runtime_digest;
   const busy = installing.isLoading || activating.isLoading || recovering.isLoading || inspection.isFetching;
   const pending = operation && ['accepted', 'downloading', 'staging'].includes(operation.state);
