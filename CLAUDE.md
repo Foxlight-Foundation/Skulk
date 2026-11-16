@@ -2676,6 +2676,22 @@ retained-document write or returning from a private catalog cannot restore
 legacy fallback. Introduce both catalogs using existing releases, deploy the
 reader, then publish expanded releases.
 
+Native-aware catalogs use protocol 4 at `catalog/catalog-v4.json`, signed over
+`skulk.catalog/4\0` followed by canonical catalog claims. Native entries retain
+runtime protocol 5, release protocol 3, the full managed/2 manifest revision,
+the exact kernel source/version and profile cohort, and all declared processing
+domains (`local`, `private_site`, `external`). Installation compares these
+facts and the callable and management summaries against the independently
+verified runtime. An older listing cannot describe a runtime-five application.
+These facts establish discovery and consent, never caller or execution authority.
+The same authenticated binding is retained in release reviews for recovery,
+so catalog, retry/finish, direct-source and terminal consent can present the
+processing locations and full declaration and ABI identities before acceptance.
+The built-in reader probes v4, then v3, then the original catalog within one
+bounded request. Only a genuine 404 before accepting a version allows fallback.
+Accepted version and revision floors survive restart, failed document retention
+and private-source switches. Existing catalog schemas and signatures are unchanged.
+
 ## Explicit node-download retry
 
 The operator-authorized `POST /download/start` dispatches `RetryDownload` on

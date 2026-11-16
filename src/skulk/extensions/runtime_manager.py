@@ -646,6 +646,47 @@ def _listing_matches(
     runtime = _OBJECT.validate_python(signed["runtime"])
     release = _OBJECT.validate_python(runtime["release"])
     manifest = _OBJECT.validate_python(release["manifest"])
+    if runtime.get("protocol") == 5:
+        declaration = InferenceManifest.model_validate_json(canonical_json(manifest))
+        binding = listing.native
+        if (
+            binding is None
+            or release.get("protocol") != binding.release_protocol
+            or declaration.digest != binding.manifest_revision
+            or _OBJECT.validate_python(runtime["kernel"], strict=True)
+            != _OBJECT.validate_json(binding.kernel.model_dump_json())
+            or tuple(sorted({d.processing_domain for d in declaration.descriptors}))
+            != binding.processing_domains
+            or tuple(f"{d.id}@{d.version}" for d in declaration.descriptors)
+            != listing.descriptors
+        ):
+            return False
+        value = declaration.value()
+        surfaces = value.get("surfaces")
+        steward = value.get("steward")
+        if (
+            value.get("title") != listing.title
+            or not isinstance(surfaces, list)
+            or tuple(
+                _OBJECT.validate_python(surface, strict=True).get("title")
+                for surface in surfaces
+            )
+            != listing.surfaces
+            or (value.get("operations") is not None) != listing.operations
+            or not isinstance(steward, list)
+            or tuple(
+                sorted(
+                    {
+                        str(_OBJECT.validate_python(exposure, strict=True)["risk"])
+                        for exposure in steward
+                    }
+                )
+            )
+            != listing.steward_risks
+        ):
+            return False
+    elif listing.native is not None:
+        return False
     if runtime.get("protocol") in (3, 4, 5):
         # This metadata was authenticated during review. Read its exact native
         # manifest for consent comparison instead of treating the byte wrapper

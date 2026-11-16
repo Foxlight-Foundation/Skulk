@@ -4814,7 +4814,19 @@ staging. It resolves no dependency versions and does not modify Skulk's environm
 | GET | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:read`. Returns `operation`, nullable before installation. The retained operation contains exact `request`, signed `review`, `state`, `downloaded_bytes`, sanitized `error_code`, `attempt` (zero initially) and nullable `attempt_source_revision` for explicit recovery. Reconnect polls this route, never resubmits an uncertain request. |
 | POST | `/v1/plugins/managed/installations/{plugin_id}/install/{operation_id}/recover` | Requires `plugins:manage`. `operation_id` is the original 32-character lowercase hexadecimal ID. Body: `expected_source_revision` from current source readiness, including any explicit credential rotation. Revalidates the original signed metadata against current trust and host compatibility, retains prior attempt evidence, and journals another download/staging attempt for the same exact digest. Only `recovery_required` work is retried; other states return unchanged. Refuses busy installers, changed source revisions and more than eight recovery attempts. Does not activate or approve spending. A verified release outside this host's protocol window answers `409` with the sentence the guided installer prints: which protocol the host accepts, which the release offers, and that the fix is to update Skulk on this host or choose a release published for it. |
 
-Built-in Store catalog reads prefer the separately signed protocol 3 document
+Native-aware built-in Store readers first probe the separately signed protocol 4
+`catalog-v4.json`. Each native entry adds `native` with `runtime_protocol: 5`,
+`release_protocol: 3`, full `manifest_revision`, exact `kernel` source/version
+and ABI profiles, and sorted unique `processing_domains`. Legacy entries return
+`native: null`. Release inspection and retained install reviews carry the same
+nullable `native` binding, so retry and direct-source consent retain these facts
+without requiring the original catalog. Installation binds them to the independently
+authenticated runtime before selecting or staging anything. The native catalog
+uses a separate `skulk.catalog/4\0` signature domain. Once accepted, its version
+and revision floors survive restart and source switches; it never silently
+downgrades. A genuine initial 404 may probe the older documents.
+
+Older built-in Store catalog reads prefer the separately signed protocol 3 document
 `catalog-v3.json`, which supports sixteen capability identifiers per release.
 The original `catalog.json` retains its protocol 2 schema and eight-identifier
 bound. Only an initial HTTP 404 before v3 acceptance permits legacy fallback;
@@ -4884,8 +4896,10 @@ installations expose **Configure release source** for settings and credential
 rotation. Credential inputs are cleared before submission and excluded from Redux,
 browser storage and ordinary errors. Changed source revisions require an explicit
 status refresh before saving. **Retry this installation** recovers only the original
-failed installation after checking current source readiness; reconnect only reads
-the retained operation. Release activation still requires separate permission
+failed installation after checking current source readiness. During recovery the
+dashboard shows that retained release's identity, permissions and processing
+locations even if a different configured release has been inspected; reconnect
+only reads the retained operation. Release activation still requires separate permission
 acceptance, and paid-capacity approval remains a separate plugin operation.
 
 The dashboard's **Choose another release** controls (under **Details** in a plugin's drawer) inspect the configured release,
