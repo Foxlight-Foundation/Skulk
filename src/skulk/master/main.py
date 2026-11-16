@@ -1445,6 +1445,7 @@ class Master:
         self._restart_recovery_observed: dict[NodeId, UUID | None] = {}
         self._restart_recovery_fetched: tuple[NodeId, datetime, ClusterIntentRecord] | None = None
         self._restart_recovery_reconciled = False
+        self._restart_recovery_accounted_instances: set[InstanceId] = set()
         self._ordered_steward_proposals = dict(
             initial_state.steward_action_proposals
             if initial_state is not None
@@ -2480,17 +2481,14 @@ class Master:
                         f"{len(self._restart_recovery_remaining)} placement(s) unrequested"
                     )
                 self._restart_recovery_remaining = []
-            self._restart_recovery_remaining = unrestored_intents(
-                self._restart_recovery_remaining,
-                {
-                    instance_id: instance
-                    for instance_id, instance in self.state.instances.items()
-                    if instance_id not in dying_instance_ids
-                },
-            )
+            self._reconcile_restart_recovery_instances(dying_instance_ids)
             events.extend(
                 self._announce_restart_recovery_plan(self._restart_recovery_remaining)
             )
+        # Library preparation may keep an intent pending after the initial
+        # reconciliation. Credit mounts accepted in that interval before the
+        # planner creates another copy, including creations not yet replicated.
+        self._reconcile_restart_recovery_instances(dying_instance_ids)
         if self._restart_recovery_remaining:
             events.extend(self._restore_recorded_placements(now, connected_node_ids))
             if self._restart_recovery_remaining:
@@ -2697,6 +2695,43 @@ class Master:
             self._prune_ordered_steward_action_proposals()
         return events
 
+    def _reconcile_restart_recovery_instances(
+        self, dying_instance_ids: AbstractSet[InstanceId]
+    ) -> None:
+        """Credit each surviving accepted placement at most once during restore.
+
+        Rechecking only the remaining intents against all live instances would
+        credit earlier restorations twice and lose intentional model copies.
+        Include ordered reservations so replication delay cannot duplicate an
+        operator mount; dead-node cleanup must never satisfy a missing model.
+        """
+        current = dict(self.state.instances)
+        current.update(self._pending_instance_reservations)
+        for reservation in self._steward_reserved_placements.values():
+            current.update(reservation)
+        new_instances = {
+            identifier: instance
+            for identifier, instance in current.items()
+            if identifier not in dying_instance_ids
+            and identifier not in self._restart_recovery_accounted_instances
+        }
+        previous_first = (
+            self._restart_recovery_remaining[0]
+            if self._restart_recovery_remaining
+            else None
+        )
+        self._restart_recovery_remaining = unrestored_intents(
+            self._restart_recovery_remaining, new_instances
+        )
+        if (
+            not self._restart_recovery_remaining
+            or self._restart_recovery_remaining[0] is not previous_first
+        ):
+            # Filtering preserves the original intent objects. Identity also
+            # distinguishes two intentionally identical recorded model copies.
+            self._restart_recovery_info_deadline = None
+        self._restart_recovery_accounted_instances.update(new_instances)
+
     def _restore_recorded_placements(
         self, now: datetime, connected_node_ids: set[NodeId]
     ) -> list[Event]:
@@ -2764,6 +2799,9 @@ class Master:
                 continue
             events.extend(
                 get_transition_events(current, placement, self.state.tasks)
+            )
+            self._restart_recovery_accounted_instances.update(
+                identifier for identifier in placement if identifier not in current
             )
             current = dict(placement)
             self._restart_recovery_restored += 1

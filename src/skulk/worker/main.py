@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 import ipaddress
+import math
 import mimetypes
 import os
 import shutil
@@ -9,8 +10,8 @@ import sys
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Container, Mapping
-from contextlib import suppress
+from collections.abc import AsyncIterator, Callable, Container, Mapping
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1292,6 +1293,10 @@ class Worker:
         self._ace_step_preparation = AceStepPreparationController(
             self._ace_step_manager, offline=offline
         )
+        # A verified library must stay current until its runner owns the exact
+        # context. Bound waiting owners as well as the active preparation.
+        self._native_music_preparation_lock = anyio.Lock()
+        self._native_music_preparation_capacity = anyio.CapacityLimiter(4)
         self._api_available = api_available
         self._data_transport: NodeDataTransport = data_transport
         # Data-plane connectivity sampler threaded into the InfoGatherer so
@@ -1565,6 +1570,32 @@ class Worker:
             }
         )
 
+    @asynccontextmanager
+    async def _native_music_preparation_scope(
+        self, expires_at: float
+    ) -> AsyncIterator[None]:
+        """Serialize bounded ACE verification through its final ownership handoff.
+
+        All manager-mutating worker paths use this scope. A later revalidation
+        cannot withdraw the library between another owner's successful prepare
+        and supervisor registration. Queue time consumes the original deadline;
+        cancellation and errors release both the queue slot and the lock.
+        """
+        remaining = expires_at - time.time()
+        if not math.isfinite(remaining) or not 0 < remaining <= 2 * 60 * 60:
+            raise TimeoutError("Native music preparation requires a live finite deadline")
+        owner = object()
+        try:
+            self._native_music_preparation_capacity.acquire_on_behalf_of_nowait(owner)
+        except WouldBlock as error:
+            raise RuntimeError("Native music preparation capacity is full") from error
+        try:
+            with fail_after(remaining):
+                async with self._native_music_preparation_lock:
+                    yield
+        finally:
+            self._native_music_preparation_capacity.release_on_behalf_of(owner)
+
     async def _restore_cached_native_runtimes(self) -> None:
         """Recheck retained libraries off-loop before restart placement can use them.
 
@@ -1572,8 +1603,15 @@ class Worker:
         cached-only attempt and publishes only its newly verified observations;
         ordinary placement and actual model loading still provide later gates.
         """
-        await self._ace_step_preparation.restore_cached()
-        await self._publish_fresh_node_resources()
+        expires_at = time.time() + 120
+        try:
+            async with self._native_music_preparation_scope(expires_at):
+                await self._ace_step_preparation.restore_cached(
+                    timeout_seconds=max(0.001, expires_at - time.time())
+                )
+                await self._publish_fresh_node_resources()
+        except Exception as error:  # noqa: BLE001 - cached recovery cannot fail the Worker
+            logger.warning("Native music cached recovery could not complete: {}", error)
         await self._demucs_preparation.restore_cached()
         await self._publish_fresh_node_resources()
 
@@ -1587,25 +1625,26 @@ class Worker:
             )
             if package.sha256 != request.package_sha256:
                 raise ValueError("requested native music package is outside the fixed inventory")
-            await self._ace_step_preparation.prepare(
-                request.request_id, package, device=request.device,
-                expires_at=request.expires_at,
-                progress=lambda phase: logger.debug("native music preparation: {}", phase),
-            )
-            resources = await self._gather_node_resources()
-            lane = "ace_step-metal" if request.device == "mps" else f"ace_step-{request.device}"
-            observed = resources.native_music_probes.get(lane)
-            if (
-                lane not in resources.backends
-                or resources.engine_builds.get(lane) != package.build_identity
-                or observed is None
-                or observed.payload_sha256 != package.payload_sha256
-                or observed.device != request.device
-            ):
-                raise RuntimeError("native music verification returned no matching library observation")
-            if self._telemetry_sender is None:
-                raise RuntimeError("node resource telemetry is unavailable")
-            await self._telemetry_sender.send(NodeTelemetry(node_id=self.node_id, info=resources))
+            async with self._native_music_preparation_scope(request.expires_at):
+                await self._ace_step_preparation.prepare(
+                    request.request_id, package, device=request.device,
+                    expires_at=request.expires_at,
+                    progress=lambda phase: logger.debug("native music preparation: {}", phase),
+                )
+                resources = await self._gather_node_resources()
+                lane = "ace_step-metal" if request.device == "mps" else f"ace_step-{request.device}"
+                observed = resources.native_music_probes.get(lane)
+                if (
+                    lane not in resources.backends
+                    or resources.engine_builds.get(lane) != package.build_identity
+                    or observed is None
+                    or observed.payload_sha256 != package.payload_sha256
+                    or observed.device != request.device
+                ):
+                    raise RuntimeError("native music verification returned no matching library observation")
+                if self._telemetry_sender is None:
+                    raise RuntimeError("node resource telemetry is unavailable")
+                await self._telemetry_sender.send(NodeTelemetry(node_id=self.node_id, info=resources))
         except Exception as failure:  # noqa: BLE001 - settle only this preparation
             resources = None
             # Classify the known storage refusal without publishing exception
@@ -4870,6 +4909,7 @@ class Worker:
         """
         fence: SourceReadFence | None = None
         preparation_request = CommandId()
+        expires_at = time.time() + 30 * 60
         self._native_music_creation_requests[task.instance_id] = preparation_request
         try:
             bound = task.bound_instance
@@ -4884,44 +4924,46 @@ class Worker:
             package = select_ace_step_package(self._ace_step_platforms, device=policy.execution.device)
             if package.build_identity != build:
                 raise ValueError("Native music placement differs from this host's fixed inventory")
-            runtime = await self._ace_step_preparation.prepare(
-                preparation_request, package, device=policy.execution.device,
-                expires_at=time.time() + 30 * 60,
-                progress=lambda phase: logger.debug("Native music creation preparation: {}", phase),
-            )
-            await self._publish_fresh_node_resources()
-            root = self._native_music_media.readers_root / separation_reader_key(task.instance_id, bound.bound_runner_id)
-            fence = await self._native_music_media.prepare_reader(root)
-            async with self._staging_runner_transition_lock:
-                observed = await self._gather_node_resources()
-                if self.state.instances.get(task.instance_id) != bound.instance:
-                    await self.event_sender.send(TaskStatusUpdated(
-                        task_id=task.task_id, task_status=TaskStatus.Cancelled,
-                    ))
-                    return
-                _require_worker_model_execution_identity(shard.model_card, self.state)
-                # A concurrent prepare can withdraw/replace this observation.
-                # Never spawn using the earlier private path after withdrawal.
-                if self._ace_step_manager.prepared_runtime(backend, build) != runtime:
-                    raise ValueError("Native music library ownership changed during creation")
-                assessment = assess_native_music_placement(
-                    shard.model_card, backend, self.node_id, observed, self.state.instances,
-                    now_unix_ms=int(time.time() * 1000), excluded_instance=bound.instance,
+            async with self._native_music_preparation_scope(expires_at):
+                runtime = await self._ace_step_preparation.prepare(
+                    preparation_request, package, device=policy.execution.device,
+                    expires_at=expires_at,
+                    progress=lambda phase: logger.debug("Native music creation preparation: {}", phase),
                 )
-                if assessment.policy != policy:
-                    raise ValueError("Native music placement policy differs from current card/library math")
-                if assessment.refusal is not None:
-                    raise ValueError(assessment.refusal)
-                context = NativeMusicRunnerContext(
-                    runtime, root, self._native_music_media.source_root, fence,
-                    resource_guard=NativeMusicHostGuard(
-                        budget=assessment.estimate.process_budget(),
-                        host_total_bytes=assessment.capacity.host_total_bytes,
-                        unified=assessment.capacity.device_memory_kind == "unified",
-                    ),
-                )
-                self._create_supervisor(task, native_music_context=context)
-                fence = None  # The supervisor owns the parent descriptor now.
+                await self._publish_fresh_node_resources()
+                root = self._native_music_media.readers_root / separation_reader_key(task.instance_id, bound.bound_runner_id)
+                fence = await self._native_music_media.prepare_reader(root)
+                async with self._staging_runner_transition_lock:
+                    observed = await self._gather_node_resources()
+                    if self.state.instances.get(task.instance_id) != bound.instance:
+                        await self.event_sender.send(TaskStatusUpdated(
+                            task_id=task.task_id, task_status=TaskStatus.Cancelled,
+                        ))
+                        return
+                    _require_worker_model_execution_identity(shard.model_card, self.state)
+                    # Worker prepares are serialized through this handoff,
+                    # but shutdown can still withdraw the manager. Retain the
+                    # final exact-identity fence before transferring its path.
+                    if self._ace_step_manager.prepared_runtime(backend, build) != runtime:
+                        raise ValueError("Native music library ownership changed during creation")
+                    assessment = assess_native_music_placement(
+                        shard.model_card, backend, self.node_id, observed, self.state.instances,
+                        now_unix_ms=int(time.time() * 1000), excluded_instance=bound.instance,
+                    )
+                    if assessment.policy != policy:
+                        raise ValueError("Native music placement policy differs from current card/library math")
+                    if assessment.refusal is not None:
+                        raise ValueError(assessment.refusal)
+                    context = NativeMusicRunnerContext(
+                        runtime, root, self._native_music_media.source_root, fence,
+                        resource_guard=NativeMusicHostGuard(
+                            budget=assessment.estimate.process_budget(),
+                            host_total_bytes=assessment.capacity.host_total_bytes,
+                            unified=assessment.capacity.device_memory_kind == "unified",
+                        ),
+                    )
+                    self._create_supervisor(task, native_music_context=context)
+                    fence = None  # The supervisor owns the parent descriptor now.
             await self.event_sender.send(TaskStatusUpdated(
                 task_id=task.task_id, task_status=TaskStatus.Complete,
             ))
