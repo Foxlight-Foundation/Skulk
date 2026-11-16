@@ -265,7 +265,7 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
       onRetry={retryOf ? () => void beginRetry(retryOf) : undefined} />;
   }
   if (view.kind === 'retry-review') {
-    return <CatalogRetryReviewPanel title={view.request.title} updating={view.request.updating} stopped={view.stopped} review={view.review} onCancel={toList}
+    return <CatalogRetryReviewPanel key={view.review.runtime_digest} title={view.request.title} updating={view.request.updating} stopped={view.stopped} review={view.review} onCancel={toList}
       onRetry={() => void beginRetry(view.request, view.review.runtime_digest)} />;
   }
   if (view.kind === 'setup') return <CapabilitySetupPanel target={view.target} onManage={onManage} onDone={toList} />;
@@ -273,7 +273,7 @@ export function PluginCatalogBrowse({ onManage, onSetUp, retry, onRetryTaken, re
     const differs = linkOutcome?.kind === 'review' && linkOutcome.versionDiffers && linkOutcome.offer.entry.bundle_id === view.offer.entry.bundle_id ? linkOutcome : null;
     return <>
       {differs ? <Info role="status">{t('plugins.catalog.linkVersionDiffers', 'The install link named version {requested}. This host’s catalog offers {offered}, which is the release reviewed here.', { requested: differs.requestedVersion ?? '', offered: differs.offer.entry.bundle_version })}</Info> : null}
-      <CatalogReviewPanel offer={view.offer} onCancel={toList} onInstall={() => void beginInstall(view.offer, view.listing)} />
+      <CatalogReviewPanel key={view.offer.entry.release_digest} offer={view.offer} onCancel={toList} onInstall={() => void beginInstall(view.offer, view.listing)} />
     </>;
   }
   if (source.isLoading) return <Centered><Spinner size={22} /></Centered>;

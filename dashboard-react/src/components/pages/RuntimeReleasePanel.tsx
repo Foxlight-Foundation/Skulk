@@ -8,6 +8,7 @@ import {
 } from '../../store/endpoints/plugins';
 import { Button } from '../common/Button';
 import { RuntimeSourceForm } from './RuntimeSourceForm';
+import { NativeRuntimeConsent } from './NativeRuntimeConsent';
 import { randomHex32 } from '../../utils/randomIds';
 
 /** Submission fences retained by a parent when release details can unmount. */
@@ -105,6 +106,7 @@ export function RuntimeReleasePanel({ runtime, ownership }: { runtime: ManagedRu
       <p>{t('plugins.releaseExpiry', 'Release expires')}: {new Date(review.expires_at * 1000).toLocaleString()}</p>
       <p>{t('plugins.releaseDigest', 'Release identity')}: <code>{review.runtime_digest}</code></p>
       <ul>{review.permissions.map((permission) => <li key={permission}>{permission}</li>)}</ul>
+      <NativeRuntimeConsent binding={review.native} />
       <Button type="button" disabled={busy || !!pending || !!uncertain || !!installation.error || staged || operation?.state === 'recovery_required'} onClick={() => void installRelease()}>{t('plugins.installRelease', 'Download and install')}</Button>
       {staged ? <>
         <p><label><input type="checkbox" checked={permissionsAccepted} onChange={(event) => setAcceptedDigest(event.target.checked ? review.runtime_digest : null)} /> {t('plugins.acceptReleasePermissions', 'I accept the permissions listed for this release.')}</label></p>

@@ -2720,6 +2720,9 @@ domains (`local`, `private_site`, `external`). Installation compares these
 facts and the callable and management summaries against the independently
 verified runtime. An older listing cannot describe a runtime-five application.
 These facts establish discovery and consent, never caller or execution authority.
+The same authenticated binding is retained in release reviews for recovery,
+so catalog, retry/finish, direct-source and terminal consent can present the
+processing locations and full declaration and ABI identities before acceptance.
 The built-in reader probes v4, then v3, then the original catalog within one
 bounded request. Only a genuine 404 before accepting a version allows fallback.
 Accepted version and revision floors survive restart, failed document retention

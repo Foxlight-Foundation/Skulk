@@ -46,12 +46,16 @@ from skulk.extensions.capability_store import (
     StoreTrustUnavailableError,
 )
 from skulk.extensions.managed_limits import MAX_MANAGED_DESCRIPTORS
-from skulk.extensions.native_inference_contracts import InferenceProfiles
+from skulk.extensions.native_inference_contracts import (
+    InferenceManifest,
+    InferenceProfiles,
+)
 from skulk.extensions.runtime_artifacts import (
     Digest,
     Identifier,
     ProtocolUnsupportedError,
     RuntimeTrust,
+    VerifiedRuntime,
     canonical_json,
     canonical_platform,
     platform_matches,
@@ -379,6 +383,28 @@ class NativeCatalogBinding(_Contract):
         if self.processing_domains != tuple(sorted(set(self.processing_domains))):
             raise ValueError("native catalog domains must be sorted and unique")
         return self
+
+
+def native_runtime_binding(runtime: VerifiedRuntime) -> NativeCatalogBinding | None:
+    """Project authenticated native consent facts for discovery and retained retries.
+
+    Reading metadata grants no execution authority. The full original manifest
+    and ABI identity remain available on every consent path, even when a retry
+    no longer has its catalog listing.
+    """
+    manifest = runtime.native_manifest
+    if not isinstance(manifest, InferenceManifest):
+        return None
+    claims = _OBJECT.validate_json(runtime.payload)
+    return NativeCatalogBinding(
+        runtime_protocol=5,
+        release_protocol=3,
+        manifest_revision=manifest.digest,
+        kernel=InferenceProfiles.model_validate_json(canonical_json(claims["kernel"])),
+        processing_domains=tuple(
+            sorted({item.processing_domain for item in manifest.descriptors})
+        ),
+    )
 
 
 class _NativeCatalogEntryClaims(_Contract):

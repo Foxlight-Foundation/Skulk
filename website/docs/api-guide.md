@@ -4818,7 +4818,9 @@ Native-aware built-in Store readers first probe the separately signed protocol 4
 `catalog-v4.json`. Each native entry adds `native` with `runtime_protocol: 5`,
 `release_protocol: 3`, full `manifest_revision`, exact `kernel` source/version
 and ABI profiles, and sorted unique `processing_domains`. Legacy entries return
-`native: null`. Installation binds these consent facts to the independently
+`native: null`. Release inspection and retained install reviews carry the same
+nullable `native` binding, so retry and direct-source consent retain these facts
+without requiring the original catalog. Installation binds them to the independently
 authenticated runtime before selecting or staging anything. The native catalog
 uses a separate `skulk.catalog/4\0` signature domain. Once accepted, its version
 and revision floors survive restart and source switches; it never silently

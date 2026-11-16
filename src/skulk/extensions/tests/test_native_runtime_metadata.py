@@ -218,6 +218,7 @@ async def test_native_catalog_consent_reads_the_verified_inner_manifest(
             )
             assert bound.review.runtime_digest == runtime.digest
             assert bound.listing.artifact_sha256 == manifest.executable_sha256
+            assert bound.review.native == bound.listing.native
         controller = manager.controllers["managed.native-catalog"]
         assert controller.selector.current() is None
         assert controller.service is None or controller.service.process is None
