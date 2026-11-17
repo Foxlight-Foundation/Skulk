@@ -10,9 +10,11 @@ import json
 import math
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
+from traceback import extract_tb
 from typing import final
 
 from fastapi import HTTPException, Response
+from loguru import logger
 from pydantic import JsonValue, TypeAdapter
 from starlette.types import Receive, Scope, Send
 
@@ -60,6 +62,8 @@ class NativeChatSession:
         """Bind one admitted stream; receipt collection retains its two output frames."""
         self.port, self.target, self.receipt = port, target, receipt
         self.retained: list[NativeInferenceOutput] = []
+        self.input_refused = False
+        self.caller_input: CapabilityStreamInput | None = None
 
     async def _input(self, frame: CapabilityStreamFrame) -> None:
         fields: dict[str, JsonValue] = {
@@ -80,9 +84,17 @@ class NativeChatSession:
             media = frame.media.data
         if frame.error is not None:
             fields["error"] = frame.error.code
-        await self.port.send_input(
-            self.port.kernel.encode_transport_v2_packet(json.dumps(fields), media)
+        accepted = await self.port.send_input(
+            self.port.kernel.encode_transport_v2_packet(json.dumps(fields), media),
+            drain_refusal=True,
         )
+        if not accepted:
+            # A completed provider may reject further input while its original
+            # semantic refusal is still queued. Stop uploading without replay;
+            # output below must prove a refusal, never synthesize success.
+            self.input_refused = True
+            if self.caller_input is not None:
+                self.caller_input.close_locally()
 
     async def _frames(self) -> AsyncGenerator[CapabilityStreamFrame]:
         # The native transport starts at the first chunk. This opener belongs
@@ -107,6 +119,19 @@ class NativeChatSession:
                     payload = self.target.application.unwrap(
                         _OBJECT.validate_python(fields["payload"], strict=True)
                     )
+                    if self.input_refused:
+                        event = payload.get("event", payload)
+                        refused = (
+                            payload.get("receipt") is None
+                            and isinstance(payload.get("error"), str)
+                            if self.receipt
+                            else isinstance(event, dict)
+                            and event.get("kind") == "failed"
+                        )
+                        if not refused:
+                            raise ValueError(
+                                "native refused input cannot produce success"
+                            )
                     frame = CapabilityStreamFrame(
                         call_id=self.port.call_id,
                         direction="provider_to_caller",
@@ -157,6 +182,7 @@ class NativeChatSession:
             caller_input = CapabilityStreamInput(
                 call_id=self.port.call_id, deadline_at=math.inf, send_frame=self._input
             )
+            self.caller_input = caller_input
             await caller_input.start()
         return CapabilityStreamSession(
             CapabilityResult(call_id=self.port.call_id, ok=True, result={}),
@@ -338,7 +364,24 @@ class NativeChatResponse(Response):
                 # Broker cancellation means current caller authority withdrew;
                 # parent ASGI cancellation is handled by the outer finally.
                 raise ValueError("native HTTP authority withdrew") from None
-        except (HTTPException, OSError, ValueError, RuntimeError, TimeoutError):
+        except (
+            HTTPException,
+            OSError,
+            ValueError,
+            RuntimeError,
+            TimeoutError,
+        ) as failure:
+            # Exception messages and locals may contain caller/provider content.
+            # Keep enough control-flow evidence to diagnose an uncertain outcome
+            # without recording that content or suggesting a replay is safe.
+            logger.warning(
+                "Native chat delivery unavailable ({}; {})",
+                type(failure).__name__,
+                ", ".join(
+                    f"{frame.name}:{frame.lineno}"
+                    for frame in extract_tb(failure.__traceback__)
+                ),
+            )
             if started and not self.streamed:
                 # A valid-looking JSON body is not a completed invocation.
                 # Once headers/payload escaped, only an aborted transport can

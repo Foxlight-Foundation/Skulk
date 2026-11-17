@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -173,6 +173,7 @@ class Fixture:
     metadata_calls: int = 0
     corrupt_end: bool = False
     refuse_chat: bool = False
+    reject_input_kind: Literal["started", "chunk", "completed"] | None = None
     receipt_lookups: int = 0
     owner_peer: Peer | None = None
     wait_control: asyncio.Event = field(default_factory=asyncio.Event)
@@ -372,7 +373,11 @@ async def native_fixture(
                 }
                 if application_request["contract"] == "chat.continuation.receipt@0.1.0":
                     fixture.receipt_lookups += 1
-                    events = [{"receipt": receipt, "error": None}]
+                    events = (
+                        [{"receipt": None, "error": "authority_unavailable"}]
+                        if fixture.refuse_chat
+                        else [{"receipt": receipt, "error": None}]
+                    )
                 else:
                     events = [
                         {
@@ -441,6 +446,9 @@ async def native_fixture(
         if request.operation == "stream_input":
             source, media = kernel.decode_transport_v2_packet(body)
             fields = _OBJECT.validate_json(source)
+            if fields["kind"] == fixture.reject_input_kind:
+                invocation.ready.set()
+                return Reply("pre_dispatch", {})
             invocation.input.extend(media)
             if fields["kind"] == "completed":
                 invocation.ready.set()
