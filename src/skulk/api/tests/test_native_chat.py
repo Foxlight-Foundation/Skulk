@@ -873,11 +873,13 @@ async def test_native_semantic_refusal_waits_for_verified_transport(
 
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("reject_input_kind", ["started", "chunk", "completed"])
+@pytest.mark.parametrize("conflicting_chat_kind", [None, "delta", "completed"])
 async def test_native_unaccepted_input_never_releases_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     streamed: bool,
     reject_input_kind: Literal["started", "chunk", "completed"],
+    conflicting_chat_kind: Literal["delta", "completed"] | None,
 ) -> None:
     """Refusal draining cannot publish text/tools or success from unaccepted input."""
     async with (
@@ -885,6 +887,7 @@ async def test_native_unaccepted_input_never_releases_success(
         client_for(fixture.app) as client,
     ):
         fixture.reject_input_kind = reject_input_kind
+        fixture.conflicting_chat_kind = conflicting_chat_kind
         fixture.wait_control.set()
         headers = {"authorization": "Bearer " + fixture.token}
         model = models(await client.get("/models", headers=headers))[0].id
@@ -900,6 +903,7 @@ async def test_native_unaccepted_input_never_releases_success(
         assert result.status_code == (200 if streamed else 503)
         assert "native_outcome_unavailable" in result.text
         assert "print(" not in result.text and "tool_calls" not in result.text
+        assert "forbidden-success" not in result.text
         assert "[DONE]" not in result.text and len(fixture.calls) == 1
         assert fixture.broker.active == {} and fixture.broker.hosts.budget.used == 0
 

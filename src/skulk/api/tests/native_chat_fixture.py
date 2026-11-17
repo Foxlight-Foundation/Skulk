@@ -173,6 +173,7 @@ class Fixture:
     metadata_calls: int = 0
     corrupt_end: bool = False
     refuse_chat: bool = False
+    conflicting_chat_kind: Literal["delta", "completed"] | None = None
     reject_input_kind: Literal["started", "chunk", "completed"] | None = None
     receipt_lookups: int = 0
     owner_peer: Peer | None = None
@@ -357,6 +358,15 @@ async def native_fixture(
             ]
             if fixture.refuse_chat:
                 events = [{"kind": "failed", "error": "policy_denied"}]
+            if fixture.conflicting_chat_kind is not None:
+                events = [
+                    {
+                        "kind": fixture.conflicting_chat_kind,
+                        "event": {"kind": "failed", "error": "policy_denied"},
+                        "delta": {"content": "forbidden-success"},
+                        "finish_reason": "stop",
+                    }
+                ]
             if selected.target.capability_id.endswith("continuation"):
                 application_request = _OBJECT.validate_python(
                     proof["request"], strict=True

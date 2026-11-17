@@ -58,9 +58,11 @@ class NativeChatSession:
         target: NativeApplicationTarget,
         *,
         receipt: bool,
+        continuation: bool,
     ) -> None:
         """Bind one admitted stream; receipt collection retains its two output frames."""
         self.port, self.target, self.receipt = port, target, receipt
+        self.continuation = continuation
         self.retained: list[NativeInferenceOutput] = []
         self.input_refused = False
         self.caller_input: CapabilityStreamInput | None = None
@@ -120,7 +122,9 @@ class NativeChatSession:
                         _OBJECT.validate_python(fields["payload"], strict=True)
                     )
                     if self.input_refused:
-                        event = payload.get("event", payload)
+                        # Match the serializer's request-selected contract;
+                        # provider fields cannot choose the event being checked.
+                        event = payload.get("event") if self.continuation else payload
                         refused = (
                             payload.get("receipt") is None
                             and isinstance(payload.get("error"), str)
@@ -265,7 +269,10 @@ class NativeChatResponse(Response):
         async def consume(port: NativeInferenceStream) -> None:
             nonlocal done_marker
             adapter = NativeChatSession(
-                port, self.target, receipt=self.receipt is not None
+                port,
+                self.target,
+                receipt=self.receipt is not None,
+                continuation=self.continuation is not None,
             )
             try:
                 session = await adapter.open()
