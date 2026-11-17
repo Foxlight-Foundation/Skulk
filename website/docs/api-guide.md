@@ -6937,6 +6937,8 @@ never authenticates a caller or authorizes a delegation.
 
 ### Native inference caller access
 
+On a compatible experimental host, open **Settings → Inference access**. Review the signed capability choices for this dashboard or a separately created API client, explicitly enable approved inference access, and save. Read and inference effects and external processing are shown separately. This is immediate access management, independent of the general Settings draft. Account connection and model selection remain in the capability. New client keys are disclosed once, remain unprivileged until separately approved, and can be revoked here. Updates need approval for the exact new release. A stale save returns a conflict: reload and review instead of automatically replaying it. Retained permissions for revoked callers can be explicitly removed.
+
 The native inference adapter explicitly selects signed runtime envelope 5,
 release envelope 3, `skulk.calls/2` and `skulk.composition/3`. It keeps original
 caller authentication separate from publisher trust, application readiness and
@@ -6949,6 +6951,7 @@ a ten-second upload deadline. Responses use `Cache-Control: no-store`.
 
 | Method and path | Parameters and behavior |
 | --- | --- |
+| `GET /v1/inference-access/owner` | Return the currently authenticated direct-owner `principal` fields (`identifier`, `kind`, `issuer_node_id`) using this host's durable manager-profile issuer. Metadata only: no credential, permission or provider identity is created. Direct-owner authentication and no-store headers apply; stale/unavailable host custody returns 503. |
 | `GET /v1/inference-access/clients` | Return `revision` and enrolled client metadata: server-issued `identifier`, owner `label` and optional `expires_unix_ms`. No bearer, bearer digest or digest seed is returned. Unavailable custody returns 503. |
 | `POST /v1/inference-access/clients` | JSON containing `expected_revision`, `label` (1–128 characters), and optional future `expires_unix_ms` (integer Unix milliseconds; omission/null adds no scheduled expiry). Return 201 with `client`, new `revision` and a standard bearer `token`, disclosed once. The new client has no execution permission. Stale revisions, expired requests or unavailable enrollment return 409. At most 256 active credentials are retained. |
 | `DELETE /v1/inference-access/clients/{identifier}` | JSON body containing `expected_revision`. Remove that exact credential lifetime and return the new inventory. Stale revisions or unknown clients return 409. Revocation shares the owner's physical dispatch fence and cancels active caller work through bounded authority observation. |
@@ -7004,7 +7007,11 @@ features. Unknown request fields are refused. Hard `local_only` and
 `included_only` inference policies still apply. Authentication failures return
 401/403; an unavailable or unauthorized model returns 403. Each call pins the
 entire freshly observed runtime/child/declaration and independently checks
-current caller permission at dispatch and physical delivery. No inference call
+current caller permission at dispatch and physical delivery. An application may
+refuse a request before accepting its input body. Core stops uploading and exposes
+that refusal only after validating the original output terminal, end and control
+completion. Unaccepted input cannot produce a successful response or receipt;
+missing or invalid transport completion remains an uncertain outcome. No inference call
 is automatically retried or redirected to a legacy address.
 
 `POST /v1/chat/continuation/receipt` accepts the existing independently signed

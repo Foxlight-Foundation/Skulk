@@ -20,6 +20,11 @@ _TEXT = TypeAdapter(str)
 
 
 @final
+class NativeInferenceInputRefusedError(ValueError):
+    """The owner accepted no input frame; only a verified refusal may be drained."""
+
+
+@final
 class NativeInferenceOutput:
     """Own a native-admitted output and its byte lease until delivery/discard."""
 
@@ -161,10 +166,22 @@ class NativeInferenceStream:
                     response.release()
                 await asyncio.sleep(0.01)
 
-    async def send_input(self, wire: bytes) -> None:
-        """Write one caller frame; failure permanently withdraws this stream handle."""
+    async def send_input(self, wire: bytes, *, drain_refusal: bool = False) -> bool:
+        """Write one frame, or explicitly retain output for refusal-only inspection.
+
+        The default closes on any input failure. A trusted semantic adapter may
+        retain an exact pre-dispatch refusal, but must reject success and still
+        verify the original output terminal, end and control acknowledgment.
+        No refused frame is retried.
+        """
         try:
             await self._send_input(wire)
+            return True
+        except NativeInferenceInputRefusedError:
+            if drain_refusal:
+                return False
+            self.close()
+            raise
         except BaseException:
             self.close()
             raise
@@ -184,6 +201,13 @@ class NativeInferenceStream:
                 cleanup_seconds=self.cleanup_seconds,
             )
             try:
+                if (
+                    isinstance(response.frame, ResponseFrame)
+                    and response.frame.outcome == "pre_dispatch"
+                    and not response.payload
+                    and not response.frame.parameters
+                ):
+                    raise NativeInferenceInputRefusedError("native input not accepted")
                 if (
                     not isinstance(response.frame, ResponseFrame)
                     or response.frame.outcome != "complete"

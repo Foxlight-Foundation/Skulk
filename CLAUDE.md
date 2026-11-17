@@ -1210,7 +1210,7 @@ The frozen reader carries all four cohort receipts, retaining both issued infere
 
 `inference_callers.py` owns original client authentication and credential custody;
 `inference_enrollment.py` verifies exact signed, persisted destinations without
-requiring readiness. `/v1/inference-access` supplies direct-owner revision-fenced
+requiring readiness. Settings → Inference access manages explicit dashboard/client enrollment independently of the general Settings draft; `GET /v1/inference-access/owner` supplies the authenticated manager-profile identity without granting permission. New client bearers are disclosed once in component memory only. `/v1/inference-access` supplies direct-owner revision-fenced
 client/policy management. Credentials alone grant no effects, and provider login
 never grants host permission. `native_inference_calls.py` and
 `native_inference_hosts.py` serve `/v1/native-inference`: exact unary read/inference

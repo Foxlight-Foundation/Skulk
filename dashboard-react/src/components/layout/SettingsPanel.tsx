@@ -26,9 +26,10 @@ import { uiActions } from '../../store/slices/uiSlice';
 import type { ThemeName } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { DevicesPanel } from './DevicesPanel';
+import { InferenceAccessPanel } from './InferenceAccessPanel';
 import { RightDrawer } from '../common/RightDrawer';
 import { CollapsibleSection } from '../common/Surfaces';
-import { FiArrowLeft, FiChevronRight, FiSmartphone } from 'react-icons/fi';
+import { FiArrowLeft, FiChevronRight, FiKey, FiSmartphone } from 'react-icons/fi';
 
 /** Visibility and dismissal for the draft-owning Settings drawer. */
 export interface SettingsPanelProps {
@@ -190,13 +191,16 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [themeDraft, setThemeDraft] = useState<ThemeName>(themeName);
   const seeded = useRef(false);
   const [devicesOpen, setDevicesOpen] = useState(false);
+  const [accessOpen, setAccessOpen] = useState(false);
   const [width, setWidth] = useState(420);
   const [devicesWidth, setDevicesWidth] = useState(720);
   const devicesEntry = useRef<HTMLButtonElement>(null);
   const devicesBack = useRef<HTMLButtonElement>(null);
+  const accessEntry = useRef<HTMLButtonElement>(null);
   const returnToSettings = () => {
     setDevicesOpen(false);
-    requestAnimationFrame(() => devicesEntry.current?.focus());
+    setAccessOpen(false);
+    requestAnimationFrame(() => (accessOpen ? accessEntry : devicesEntry).current?.focus());
   };
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
     try {
@@ -369,22 +373,24 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   }, [draft, storeDefaults, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, recoveryDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- Closing the modal resets its nested navigation for the next opening.
-  useEffect(() => { if (!open) setDevicesOpen(false); }, [open]);
+  useEffect(() => { if (!open) { setDevicesOpen(false); setAccessOpen(false); } }, [open]);
 
   if (!open) return null;
 
   return (
-    <RightDrawer open={open} onClose={onClose} width={devicesOpen ? devicesWidth : width} minWidth={360} maxWidth={720} onWidthChange={devicesOpen ? setDevicesWidth : setWidth}
-      ariaLabel={devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
-      title={devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
-      headerLeading={devicesOpen ? <Button ref={devicesBack} variant="ghost" size="sm" aria-label={t('devices.backToSettings', 'Back to Settings')} onClick={returnToSettings}><FiArrowLeft /></Button> : undefined}
+    <RightDrawer open={open} onClose={onClose} width={devicesOpen || accessOpen ? devicesWidth : width} minWidth={360} maxWidth={720} onWidthChange={devicesOpen || accessOpen ? setDevicesWidth : setWidth}
+      ariaLabel={accessOpen ? t('inferenceAccess.title', 'Inference access') : devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
+      title={accessOpen ? t('inferenceAccess.title', 'Inference access') : devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
+      headerLeading={devicesOpen || accessOpen ? <Button ref={devicesBack} variant="ghost" size="sm" aria-label={t('devices.backToSettings', 'Back to Settings')} onClick={returnToSettings}><FiArrowLeft /></Button> : undefined}
       closeLabel={t('settings.close', 'Close settings')} resizeLabel={t('settings.resize', 'Resize settings')}>
       {devicesOpen ? <DevicesPanel /> : null}
-        <Body style={{ display: devicesOpen ? 'none' : undefined }}>
+      {accessOpen ? <InferenceAccessPanel /> : null}
+        <Body style={{ display: devicesOpen || accessOpen ? 'none' : undefined }}>
           {loading && <LoadingText>{t('settings.loadingConfig', 'Loading config...')}</LoadingText>}
           {error && <ErrorText>{error}</ErrorText>}
 
           <DevicesEntry ref={devicesEntry} aria-label={t('devices.title', 'Devices & pairing')} onClick={() => { setDevicesOpen(true); requestAnimationFrame(() => devicesBack.current?.focus()); }}><FiSmartphone aria-hidden /><span>{t('devices.title', 'Devices & pairing')}<small>{t('devices.manageHint', 'Manage paired devices and invitations')}</small></span><FiChevronRight size={14} aria-hidden /></DevicesEntry>
+          <DevicesEntry ref={accessEntry} aria-label={t('inferenceAccess.title', 'Inference access')} onClick={() => { setAccessOpen(true); requestAnimationFrame(() => devicesBack.current?.focus()); }}><FiKey aria-hidden /><span>{t('inferenceAccess.title', 'Inference access')}<small>{t('inferenceAccess.manageHint', 'Approve dashboard and API client capability access')}</small></span><FiChevronRight size={14} aria-hidden /></DevicesEntry>
 
           <Sections>
           {/* Appearance */}
@@ -820,7 +826,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
           {configPath && <ConfigPath style={{ marginTop: 16, overflowWrap: 'anywhere' }}>{t('settings.configPath', 'Config: {configPath}', { configPath })}</ConfigPath>}
         </Body>
 
-        <Footer style={{ display: devicesOpen ? 'none' : undefined }}>
+        <Footer style={{ display: devicesOpen || accessOpen ? 'none' : undefined }}>
           <Spacer />
           <Button variant="outline" size="md" onClick={onClose}>
             {t('common.cancel', 'Cancel')}

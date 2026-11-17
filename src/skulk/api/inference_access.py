@@ -24,7 +24,10 @@ from skulk.extensions.inference_enrollment import (
     InferenceEnrollment,
     InferencePolicyUpdate,
 )
-from skulk.extensions.native_inference_authority import InferenceAccessPolicy
+from skulk.extensions.native_inference_authority import (
+    InferenceAccessPolicy,
+    InferencePrincipal,
+)
 from skulk.extensions.runtime_attachment import ServiceConnection
 from skulk.extensions.runtime_files import read_private
 from skulk.shared.constants import SKULK_CONFIG_HOME
@@ -239,6 +242,15 @@ def create_inference_access_router(
                 503, "Inference client inventory is unavailable."
             ) from None
 
+    async def owner(request: Request, response: Response) -> InferencePrincipal:
+        """Describe this authenticated owner without granting any inference access."""
+        authenticated = await authenticate_capability_owner(request, node_id)
+        _no_store(response)
+        try:
+            return host().owner(authenticated).principal
+        except (OSError, ValueError):
+            raise HTTPException(503, "Inference owner identity is unavailable.") from None
+
     async def create(
         request: Request, body: ClientCreate, response: Response
     ) -> ClientCreated:
@@ -293,6 +305,12 @@ def create_inference_access_router(
                 409, "Inference policy enrollment changed or is unavailable."
             ) from None
 
+    router.get(
+        "/owner",
+        response_model=InferencePrincipal,
+        summary="Read the authenticated inference owner",
+        description="Direct owner access. Return this request's server-authenticated direct-owner principal and durable manager-profile issuer for explicit policy enrollment. This metadata is not a credential, permission or provider identity. Paired and inference-client credentials cannot read it. Unavailable or stale host attachment returns 503. Responses are not cached.",
+    )(owner)
     router.get(
         "/clients",
         response_model=ClientInventory,

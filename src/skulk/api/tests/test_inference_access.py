@@ -68,6 +68,64 @@ def client_for(
     )
 
 
+async def test_owner_identity_uses_current_host_profile_without_permission(
+    tmp_path: Path,
+) -> None:
+    """The UI receives the actual authenticated owner realm, never a guessed issuer."""
+    app, service = application(tmp_path)
+    async with client_for(app) as client:
+        response = await client.get("/v1/inference-access/owner")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.json() == {
+        "identifier": "direct-owner",
+        "kind": "operator",
+        "issuer_node_id": "core-profile:" + "a" * 32,
+    }
+    assert service.policy().enabled is False and service.policy().callers == ()
+
+
+async def test_owner_identity_rejects_client_and_stale_host_attachment(
+    tmp_path: Path,
+) -> None:
+    """An inference bearer cannot inspect owner setup; changed host custody fails shut."""
+    app, service = application(tmp_path)
+    _, token = service.create(service.inventory().revision, "API", None)
+    async with client_for(app) as client:
+        refused = await client.get(
+            "/v1/inference-access/owner", headers={"authorization": f"Bearer {token}"}
+        )
+        assert refused.status_code == 403
+        write_private(
+            tmp_path / "host.json",
+            HostSettings(profile_id="b" * 32, transport_node_id="access-core")
+            .model_dump_json()
+            .encode(),
+        )
+        unavailable = await client.get("/v1/inference-access/owner")
+    assert unavailable.status_code == 503
+    assert "core-profile" not in unavailable.text
+
+
+@pytest.mark.parametrize("fault", ["browser", "origin", "forwarded", "paired"])
+async def test_owner_identity_keeps_direct_owner_origin_boundary(
+    tmp_path: Path, fault: str
+) -> None:
+    """The owner-description route has the same boundary as enrollment mutations."""
+    app, _ = application(tmp_path)
+    headers: dict[str, str] = {}
+    if fault == "origin":
+        headers["origin"] = "https://untrusted.invalid"
+    elif fault == "forwarded":
+        headers["x-forwarded-for"] = "127.0.0.1"
+    elif fault == "paired":
+        headers["authorization"] = "Bearer paired-device"
+    async with client_for(app, dashboard=fault != "browser") as client:
+        response = await client.get("/v1/inference-access/owner", headers=headers)
+    assert response.status_code == 403
+
+
 async def test_owner_can_enroll_once_list_metadata_and_revoke(tmp_path: Path) -> None:
     """The bearer exists only in the creation response; revocation invalidates it."""
     app, service = application(tmp_path)

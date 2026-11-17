@@ -6,6 +6,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
+from typing import Literal
 
 import httpx
 import pytest
@@ -785,15 +786,18 @@ async def test_collected_payload_is_not_clean_success_after_invocation_failure(
 
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("corrupt_end", [False, True])
+@pytest.mark.parametrize("reject_input_kind", [None, "started", "chunk", "completed"])
 async def test_native_semantic_refusal_waits_for_verified_transport(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     streamed: bool,
     corrupt_end: bool,
+    reject_input_kind: Literal["started", "chunk", "completed"] | None,
 ) -> None:
     """Publish an application refusal only after native terminal/end/control admission."""
     async with native_fixture(tmp_path, monkeypatch) as fixture:
         fixture.refuse_chat = True
+        fixture.reject_input_kind = reject_input_kind
         fixture.corrupt_end = corrupt_end
         fixture.wait_control.clear()
         catalog = (await native_chat_catalogs(fixture.broker, fixture.client))[0]
@@ -815,9 +819,9 @@ async def test_native_semantic_refusal_waits_for_verified_transport(
         incoming: asyncio.Queue[Message] = asyncio.Queue()
 
         async def send(message: Message) -> None:
-            if message["type"] == "http.response.body" and b"policy_denied" in message.get(
-                "body", b""
-            ):
+            if message[
+                "type"
+            ] == "http.response.body" and b"policy_denied" in message.get("body", b""):
                 assert fixture.wait_control.is_set()
                 assert fixture.calls[0].end.is_set()
                 assert fixture.calls[0].packets == []
@@ -865,3 +869,89 @@ async def test_native_semantic_refusal_waits_for_verified_transport(
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("reject_input_kind", ["started", "chunk", "completed"])
+@pytest.mark.parametrize("conflicting_chat_kind", [None, "delta", "completed"])
+async def test_native_unaccepted_input_never_releases_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+    reject_input_kind: Literal["started", "chunk", "completed"],
+    conflicting_chat_kind: Literal["delta", "completed"] | None,
+) -> None:
+    """Refusal draining cannot publish text/tools or success from unaccepted input."""
+    async with (
+        native_fixture(tmp_path, monkeypatch) as fixture,
+        client_for(fixture.app) as client,
+    ):
+        fixture.reject_input_kind = reject_input_kind
+        fixture.conflicting_chat_kind = conflicting_chat_kind
+        fixture.wait_control.set()
+        headers = {"authorization": "Bearer " + fixture.token}
+        model = models(await client.get("/models", headers=headers))[0].id
+        result = await client.post(
+            "/chat",
+            headers=headers,
+            json={
+                "model": model,
+                "stream": streamed,
+                "messages": [{"role": "user", "content": "unaccepted"}],
+            },
+        )
+        assert result.status_code == (200 if streamed else 503)
+        assert "native_outcome_unavailable" in result.text
+        assert "print(" not in result.text and "tool_calls" not in result.text
+        assert "forbidden-success" not in result.text
+        assert "[DONE]" not in result.text and len(fixture.calls) == 1
+        assert fixture.broker.active == {} and fixture.broker.hosts.budget.used == 0
+
+
+@pytest.mark.parametrize("corrupt_end", [False, True])
+@pytest.mark.parametrize("reject_input_kind", ["started", "completed"])
+async def test_native_early_receipt_refusal_requires_verified_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corrupt_end: bool,
+    reject_input_kind: Literal["started", "completed"],
+) -> None:
+    """An early lookup refusal releases no receipt and still verifies end/control."""
+    async with (
+        native_fixture(tmp_path, monkeypatch) as fixture,
+        client_for(fixture.app) as client,
+    ):
+        fixture.reject_input_kind = reject_input_kind
+        fixture.refuse_chat = True
+        fixture.corrupt_end = corrupt_end
+        headers = {"authorization": "Bearer " + fixture.token}
+        model = models(await client.get("/models", headers=headers))[0].id
+        query = {
+            "caller_id": "a" * 32,
+            "signature": "b" * 128,
+            "request": {
+                "contract": "chat.continuation.receipt@0.1.0",
+                "conversation_id": "c" * 64,
+                "target": {
+                    "target_node": "application-proof-realm",
+                    "callable_id": "independent.continuation",
+                    "descriptor_revision": "c" * 16,
+                    "model": "code",
+                },
+                "request_nonce": "d" * 64,
+                "nonce": "e" * 64,
+                "expires_at": time.time() + 30,
+            },
+        }
+        result = await client.post(
+            "/receipt", params={"native_model": model}, json=query, headers=headers
+        )
+        if corrupt_end:
+            assert result.status_code == 503
+            assert "authority_unavailable" not in result.text
+        else:
+            assert result.status_code == 200
+            assert result.json() == {"receipt": None, "error": "authority_unavailable"}
+            assert fixture.calls[0].end.is_set()
+        assert len(fixture.calls) == 1 and fixture.receipt_lookups == 1
+        assert fixture.broker.active == {} and fixture.broker.hosts.budget.used == 0

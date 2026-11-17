@@ -4044,6 +4044,10 @@ browser management, not remote delegation or an OS sandbox. Model selection,
 provider account handling and routing remain separate.
 
 
+### Native caller setup (experimental)
+
+Settings exposes direct-owner inference access independently of its general configuration draft. `GET /v1/inference-access/owner` returns the authenticated manager-profile principal for explicit enrollment; it creates no credentials or permission. The UI presents signed native observations as unchecked choices, shows read/inference and processing domains, and saves exact caller grants under the existing policy revision fence. API-client credentials are disclosed once in component memory, outside Redux, persistent browser storage and capability state. Caller revocation and capability updates retain their existing backend authority checks. Opening a capability or connecting its account does not enroll the dashboard or an API client.
+
 ### Native unified chat adapter (experimental)
 
 `api/native_chat_catalog.py` reads only this authenticated caller's metadata,
