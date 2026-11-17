@@ -38,8 +38,10 @@ export function InferenceAccessPanel() {
   const [label, setLabel] = useState('');
   const [issued, setIssued] = useState<InferenceClientCreated | null>(null);
   const mounted = useRef(false);
+  const sessionGeneration = useRef(0);
 
   const load = useCallback(async (signal?: AbortSignal) => {
+    const generation = sessionGeneration.current;
     setBusy(true); setError(''); setNotice('');
     try {
       const [owner, clients, current, listings] = await Promise.all([
@@ -48,17 +50,28 @@ export function InferenceAccessPanel() {
         inferenceAccessRequest<InferenceAccessPolicy>('/v1/inference-access/policy', 'GET', undefined, signal),
         inferenceAccessRequest<InferenceListing[]>('/v1/native-inference', 'GET', undefined, signal),
       ]);
-      if (mounted.current && !signal?.aborted) {
+      if (mounted.current && generation === sessionGeneration.current && !signal?.aborted) {
         setSnapshot({ owner, clients, policy: current, listings }); setPolicy(current);
       }
     } catch (failure) {
-      if (mounted.current && !signal?.aborted) setError(failure instanceof Error ? failure.message : t('inferenceAccess.loadFailed', 'Could not load inference access.'));
-    } finally { if (mounted.current && !signal?.aborted) setBusy(false); }
+      if (mounted.current && generation === sessionGeneration.current && !signal?.aborted) setError(failure instanceof Error ? failure.message : t('inferenceAccess.loadFailed', 'Could not load inference access.'));
+    } finally { if (mounted.current && generation === sessionGeneration.current && !signal?.aborted) setBusy(false); }
   }, [t]);
 
   useEffect(() => {
-    mounted.current = true; const controller = new AbortController(); void load(controller.signal);
-    return () => { mounted.current = false; controller.abort(); };
+    mounted.current = true;
+    let controller = new AbortController();
+    const changed = () => {
+      // A session may leave and return to direct access within one React batch.
+      // Fence every notification, including bodies arriving after fetch resolves.
+      sessionGeneration.current += 1; controller.abort(); controller = new AbortController();
+      setSnapshot(null); setPolicy(null); setIssued(null); setSelected('direct-owner');
+      setLabel(''); setBusy(false); setError(''); setNotice('');
+      if (operatorSession.snapshot().mode === 'direct') void load(controller.signal);
+    };
+    const unsubscribe = operatorSession.subscribe(changed);
+    changed();
+    return () => { mounted.current = false; sessionGeneration.current += 1; controller.abort(); unsubscribe(); };
   }, [load]);
 
   const principal: InferencePrincipal | undefined = selected === 'direct-owner' ? snapshot?.owner
@@ -82,35 +95,38 @@ export function InferenceAccessPanel() {
 
   const save = async () => {
     if (!snapshot || !policy) return;
+    const generation = sessionGeneration.current;
     setBusy(true); setError(''); setNotice('');
     try {
       const current = await inferenceAccessRequest<InferenceAccessPolicy>('/v1/inference-access/policy', 'PUT', { expected_revision: snapshot.policy.revision, enabled: policy.enabled, callers: policy.callers });
-      if (mounted.current) { setSnapshot({ ...snapshot, policy: current }); setPolicy(current); setNotice(t('inferenceAccess.saved', 'Inference access saved.')); }
-    } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : t('inferenceAccess.saveFailed', 'Could not save access. Reload before trying again.')); }
-    finally { if (mounted.current) setBusy(false); }
+      if (mounted.current && generation === sessionGeneration.current) { setSnapshot({ ...snapshot, policy: current }); setPolicy(current); setNotice(t('inferenceAccess.saved', 'Inference access saved.')); }
+    } catch (failure) { if (mounted.current && generation === sessionGeneration.current) setError(failure instanceof Error ? failure.message : t('inferenceAccess.saveFailed', 'Could not save access. Reload before trying again.')); }
+    finally { if (mounted.current && generation === sessionGeneration.current) setBusy(false); }
   };
 
   const create = async () => {
     if (!snapshot || !label.trim()) return;
+    const generation = sessionGeneration.current;
     setBusy(true); setError(''); setNotice('');
     try {
       const result = await inferenceAccessRequest<InferenceClientCreated>('/v1/inference-access/clients', 'POST', { expected_revision: snapshot.clients.revision, label: label.trim() });
-      if (mounted.current) {
+      if (mounted.current && generation === sessionGeneration.current) {
         setIssued(result); setLabel(''); setSelected(`client:${result.client.identifier}`);
         setSnapshot({ ...snapshot, clients: { revision: result.revision, clients: [...snapshot.clients.clients, result.client] } });
       }
-    } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : t('inferenceAccess.createFailed', 'Client creation outcome is unavailable. Reload the inventory before trying again.')); }
-    finally { if (mounted.current) setBusy(false); }
+    } catch (failure) { if (mounted.current && generation === sessionGeneration.current) setError(failure instanceof Error ? failure.message : t('inferenceAccess.createFailed', 'Client creation outcome is unavailable. Reload the inventory before trying again.')); }
+    finally { if (mounted.current && generation === sessionGeneration.current) setBusy(false); }
   };
 
   const revoke = async () => {
     if (!snapshot || !selected.startsWith('client:')) return;
+    const generation = sessionGeneration.current;
     setBusy(true); setError(''); setNotice('');
     try {
       const clients = await inferenceAccessRequest<InferenceClients>(`/v1/inference-access/clients/${encodeURIComponent(selected.slice(7))}`, 'DELETE', { expected_revision: snapshot.clients.revision });
-      if (mounted.current) { setSnapshot({ ...snapshot, clients }); setIssued(null); setSelected('direct-owner'); setNotice(t('inferenceAccess.revoked', 'Client key revoked. Its requests can no longer authenticate.')); }
-    } catch (failure) { if (mounted.current) setError(failure instanceof Error ? failure.message : t('inferenceAccess.revokeFailed', 'Could not confirm revocation. Reload before trying again.')); }
-    finally { if (mounted.current) setBusy(false); }
+      if (mounted.current && generation === sessionGeneration.current) { setSnapshot({ ...snapshot, clients }); setIssued(null); setSelected('direct-owner'); setNotice(t('inferenceAccess.revoked', 'Client key revoked. Its requests can no longer authenticate.')); }
+    } catch (failure) { if (mounted.current && generation === sessionGeneration.current) setError(failure instanceof Error ? failure.message : t('inferenceAccess.revokeFailed', 'Could not confirm revocation. Reload before trying again.')); }
+    finally { if (mounted.current && generation === sessionGeneration.current) setBusy(false); }
   };
 
   return <Body>
@@ -118,7 +134,7 @@ export function InferenceAccessPanel() {
     {error && <ErrorText role="alert">{error}</ErrorText>}
     {notice && <p role="status">{notice}</p>}
     <Row><Button variant="outline" size="sm" disabled={busy} onClick={() => void load()}>{t('inferenceAccess.reload', 'Reload access')}</Button>
-      {operatorSession.snapshot().mode !== 'direct' && <Button variant="outline" size="sm" disabled={busy} onClick={() => { operatorSession.useDirectAccess(); setSnapshot(null); setPolicy(null); setIssued(null); void load(); }}>{t('inferenceAccess.direct', 'Use direct host access')}</Button>}</Row>
+      {operatorSession.snapshot().mode !== 'direct' && <Button variant="outline" size="sm" disabled={busy} onClick={() => operatorSession.useDirectAccess()}>{t('inferenceAccess.direct', 'Use direct host access')}</Button>}</Row>
     {busy && !snapshot && <p role="status">{t('inferenceAccess.loading', 'Loading inference access…')}</p>}
     {snapshot && policy && <>
       <Group><h3>{t('inferenceAccess.permissionTitle', 'Caller permissions')}</h3>
@@ -142,7 +158,7 @@ export function InferenceAccessPanel() {
     </>}
     {issued && <Group><h3>{t('inferenceAccess.keyTitle', 'Save this key now')}</h3><p>{t('inferenceAccess.keyHint', 'This key is shown once. Store it securely in your API client. It is cleared when dismissed or when you leave this panel.')}</p>
       <Field aria-label={t('inferenceAccess.key', 'New client key')} readOnly type="password" value={issued.token} autoComplete="off" />
-      <Row><Button variant="outline" onClick={() => { void copyToClipboard(issued.token).then(() => setNotice(t('inferenceAccess.copied', 'Client key copied.')), () => setError(t('inferenceAccess.copyFailed', 'Copy failed. Save the key from the field before dismissing it.'))); }}>{t('inferenceAccess.copy', 'Copy client key')}</Button><Button onClick={() => setIssued(null)}>{t('inferenceAccess.dismiss', 'I saved the key')}</Button></Row>
+      <Row><Button variant="outline" onClick={() => { const generation = sessionGeneration.current; void copyToClipboard(issued.token).then(() => { if (mounted.current && generation === sessionGeneration.current) setNotice(t('inferenceAccess.copied', 'Client key copied.')); }, () => { if (mounted.current && generation === sessionGeneration.current) setError(t('inferenceAccess.copyFailed', 'Copy failed. Save the key from the field before dismissing it.')); }); }}>{t('inferenceAccess.copy', 'Copy client key')}</Button><Button onClick={() => setIssued(null)}>{t('inferenceAccess.dismiss', 'I saved the key')}</Button></Row>
     </Group>}
   </Body>;
 }

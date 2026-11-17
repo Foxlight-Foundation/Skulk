@@ -4,6 +4,7 @@ import { ThemeProvider } from 'styled-components';
 import { userEvent } from 'vitest/browser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { darkTheme } from '../../theme/theme';
+import { operatorSession } from '../../auth/operatorSession';
 import { InferenceAccessPanel } from './InferenceAccessPanel';
 import { inferenceGrantKey, selectInferenceGrant, type InferenceAccessPolicy, type InferenceGrant } from '../../utils/inferenceAccess';
 
@@ -51,7 +52,7 @@ async function mount() {
   await expect.poll(() => container.textContent).toContain('Example hosted chat');
 }
 
-afterEach(async () => { await act(async () => root?.unmount()); container?.remove(); root = null; vi.unstubAllGlobals(); });
+afterEach(async () => { await act(async () => root?.unmount()); container?.remove(); root = null; operatorSession.useDirectAccess(); vi.unstubAllGlobals(); });
 
 describe('explicit inference access', () => {
   it('loads authenticated setup without automatically granting or enabling anything', async () => {
@@ -121,5 +122,39 @@ describe('explicit inference access', () => {
     const chosen = selectInferenceGrant([old, other], grant, true);
     expect(chosen).toEqual([other, grant]);
     expect(inferenceGrantKey(old)).not.toBe(inferenceGrantKey(grant));
+  });
+
+  it('clears disclosed credentials and drafts when the operator session ends', async () => {
+    await mount();
+    await userEvent.fill(container.querySelector<HTMLInputElement>('input[maxlength="128"]')!, 'Session-bound client');
+    await userEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Create client key')!);
+    await expect.poll(() => container.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe(token);
+    await userEvent.click(container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[1]);
+    await act(async () => operatorSession.disconnect());
+    expect(container.querySelector('input[type="password"]')).toBeNull();
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    await userEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Use direct host access')!);
+    await expect.poll(() => container.textContent).toContain('Example hosted chat');
+    expect(container.querySelector('input[type="password"]')).toBeNull();
+    expect(container.querySelectorAll('input[type="checkbox"]:checked')).toHaveLength(0);
+    expect(container.querySelector<HTMLSelectElement>('select')?.value).toBe('direct-owner');
+  });
+
+  it('discards a late credential body even when the session returns to direct in one batch', async () => {
+    await mount();
+    let finishBody: () => void = () => { throw new Error('Body was not requested'); };
+    const response = new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      finishBody = () => { controller.enqueue(new TextEncoder().encode(JSON.stringify({ client: { identifier: clientId, label: 'Late client', expires_unix_ms: null }, token, revision: '1'.repeat(64) }))); controller.close(); };
+    } }), { headers: { 'Content-Type': 'application/json' }, status: 201 });
+    await userEvent.fill(container.querySelector<HTMLInputElement>('input[maxlength="128"]')!, 'Late client');
+    vi.mocked(fetch).mockResolvedValueOnce(response);
+    await userEvent.click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Create client key')!);
+    await expect.poll(() => response.bodyUsed).toBe(true);
+    await act(async () => operatorSession.useDirectAccess());
+    await expect.poll(() => container.textContent).toContain('Example hosted chat');
+    await act(async () => { finishBody(); });
+    expect(container.querySelector('input[type="password"]')).toBeNull();
+    expect(container.querySelector<HTMLSelectElement>('select')?.value).toBe('direct-owner');
+    expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
   });
 });
