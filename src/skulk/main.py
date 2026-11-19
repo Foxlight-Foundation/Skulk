@@ -1251,6 +1251,11 @@ class Node:
         async with self._store_lifetime(), self._tg as tg:
             signal.signal(signal.SIGINT, lambda _, __: self.shutdown())
             signal.signal(signal.SIGTERM, lambda _, __: self.shutdown())
+            if sys.platform == "win32":
+                # Ctrl-Break is the one console signal a supervisor can send to
+                # a Windows process group, so it requests the same orderly
+                # shutdown that SIGTERM does elsewhere.
+                signal.signal(signal.SIGBREAK, lambda _, __: self.shutdown())
             tg.start_soon(self.router.run)
             tg.start_soon(self.event_router.run)
             tg.start_soon(self.election.run)
