@@ -7,12 +7,10 @@ contents, executable paths or storage destinations from its caller.
 
 import argparse
 import contextlib
-import grp
 import json
 import os
 import platform
 import plistlib
-import pwd
 import re
 import stat
 import subprocess
@@ -21,6 +19,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast, final
 from uuid import uuid4
+
+if sys.platform != "win32":
+    # POSIX account databases. Windows registration is separate work; guarding
+    # the import keeps this module loadable there for the node's API.
+    import grp
+    import pwd
 
 # Preserve the signed/persisted Linux artifact identifier; it is not an OS-version gate.
 ServicePlatform = str
