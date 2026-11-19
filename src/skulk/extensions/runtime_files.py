@@ -1,11 +1,8 @@
 """Protected local files and exclusive ownership for managed plugin runtimes."""
 
 import asyncio
-import fcntl
 import functools
-import grp
 import os
-import pwd
 import stat
 import time
 from pathlib import Path
@@ -16,6 +13,10 @@ from uuid import uuid4
 @functools.cache
 def _private_group(group_id: int, user_id: int) -> bool:
     """Whether ``group_id`` is the account's own group with no other members."""
+    # POSIX-only modules, imported at use so this module loads on Windows.
+    import grp
+    import pwd
+
     try:
         group = grp.getgrgid(group_id)
         account = pwd.getpwuid(user_id)
@@ -149,6 +150,9 @@ class RuntimeLock:
             "catalog.lock",
         }:
             raise ValueError("unknown runtime lock")
+        # POSIX-only module, imported at use so this module loads on Windows.
+        import fcntl
+
         private_directory(root)
         self.descriptor = os.open(
             root / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
