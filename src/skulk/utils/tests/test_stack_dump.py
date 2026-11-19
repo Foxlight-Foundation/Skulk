@@ -5,6 +5,8 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 _CHILD = """
 import sys, time
 from skulk.utils.stack_dump import install_stack_dump_signal
@@ -18,6 +20,7 @@ waiting_in_a_named_frame()
 """
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no SIGUSR1")
 def test_sigusr1_dumps_every_threads_python_stack_and_the_process_lives() -> None:
     child = subprocess.Popen(
         [sys.executable, "-c", _CHILD],

@@ -23,7 +23,9 @@ dependencies = [
   # mlx-lm is a Foxlight fork installed as a wheel from the Foxlight index
   # (see [tool.uv.sources]); a .postN version is a Foxlight build of one
   # pinned fork commit.
-  "mlx-lm==0.32.2.post1",
+  # Not installed on Windows: it requires mlx, which has no Windows build, and
+  # a Windows node never runs an inference engine.
+  "mlx-lm==0.32.2.post1; sys_platform != 'win32'",
   "mlx-optiq[convert]; sys_platform == 'darwin'",
   "tiktoken>=0.12.0",                             # required for kimi k2 tokenizer
   "hypercorn>=0.18.0",
@@ -33,7 +35,7 @@ dependencies = [
   "tomlkit>=0.14.0",
   "tuf>=6,<7",
   # Public preservation core; serving remains an explicit operator action.
-  "foxlight-model-preservation[peer] @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@d66ab33f8c80299a43ed191c957ffd3961476745",
+  "foxlight-model-preservation[peer] @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@e2982df0612ba9cb263000cf3eb480b3b2e4f814",
   # Native peer wheels are qualified on Python 3.13; other supported Python
   # versions retain HTTP mirrors and receive-only preservation.
   "libtorrent==2.0.14; python_version < '3.14'",
@@ -232,7 +234,13 @@ root = "src"
 # supported platforms for this project
 [tool.uv]
 required-version = ">=0.8.6"
-environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
+# Windows (win32) is a non-compute target only: it runs the management
+# participation mode and hosts capabilities, never an inference engine.
+environments = [
+  "sys_platform == 'darwin'",
+  "sys_platform == 'linux'",
+  "sys_platform == 'win32'",
+]
 extra-build-dependencies = { "miniaudio" = ["setuptools", "cffi", "pycparser"] }
 
 ###
