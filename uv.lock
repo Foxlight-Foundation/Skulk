@@ -3,10 +3,10 @@ revision = 5
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version < '3.14' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and sys_platform == 'linux'",
     "python_full_version < '3.14' and sys_platform == 'win32'",
 ]
 supported-markers = [
@@ -525,8 +525,8 @@ version = "5.0.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version < '3.14' and sys_platform == 'darwin'",
     "python_full_version < '3.14' and sys_platform == 'win32'",
 ]
 dependencies = [
@@ -678,8 +678,8 @@ wheels = [
 
 [[package]]
 name = "foxlight-model-preservation"
-version = "0.29.0"
-source = { git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=d66ab33f8c80299a43ed191c957ffd3961476745#d66ab33f8c80299a43ed191c957ffd3961476745" }
+version = "0.38.0"
+source = { git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=e2982df0612ba9cb263000cf3eb480b3b2e4f814#e2982df0612ba9cb263000cf3eb480b3b2e4f814" }
 dependencies = [
     { name = "cryptography" },
     { name = "jsonschema" },
@@ -790,8 +790,8 @@ version = "2026.6.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version < '3.14' and sys_platform == 'darwin'",
     "python_full_version < '3.14' and sys_platform == 'win32'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/10/a1/ae4e3e5003468d6391d2c77b6fa1cd73bd5d13511d81c642d7b28ac90ed4/fsspec-2026.6.0.tar.gz", hash = "sha256:f5bac145310fe30e16e1471bd6840b2d990d609e872251d7e674241822abf01a", size = 313646, upload-time = "2026-06-16T01:57:28.105Z" }
@@ -3224,7 +3224,7 @@ requires-dist = [
     { name = "ddgs", specifier = ">=9.6.1" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "filelock", specifier = ">=3.18.0" },
-    { name = "foxlight-model-preservation", extras = ["peer"], git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=d66ab33f8c80299a43ed191c957ffd3961476745" },
+    { name = "foxlight-model-preservation", extras = ["peer"], git = "https://github.com/Foxlight-Foundation/foxlight-model-preservation.git?rev=e2982df0612ba9cb263000cf3eb480b3b2e4f814" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=1.8.0" },
     { name = "hypercorn", specifier = ">=0.18.0" },
