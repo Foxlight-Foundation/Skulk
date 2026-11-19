@@ -1,0 +1,152 @@
+# Builds the Rust networking bindings (`skulk_pyo3_bindings`) as a wheel for
+# Windows and publishes it to the Foxlight PEP 503 index (wheels.foxlight.ai).
+#
+# macOS and Linux nodes still build the bindings from the workspace source when
+# `uv sync` runs. A Windows node has no compiler toolchain to assume, so native
+# code reaches it as a wheel built here, never as something compiled on the
+# user's machine.
+#
+# The wheel's version is the bindings version in
+# `rust/skulk_pyo3_bindings/pyproject.toml`. The index is append-only: a
+# published filename is never replaced, so any change under `rust/` that a
+# Windows node must receive needs a bindings version bump before it is
+# published again.
+#
+# Build runs on pull requests and dev pushes that touch the bindings, the
+# workspace manifests or this workflow; PUBLISH runs only on manual dispatch
+# with publish=true (cutting a wheel release is a deliberate act).
+name: bindings-wheel
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the bindings wheel to the Foxlight R2 index"
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - ".github/workflows/bindings-wheel.yml"
+      - "rust/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  push:
+    branches: [dev]
+    paths:
+      - ".github/workflows/bindings-wheel.yml"
+      - "rust/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Build wheel
+        shell: bash
+        working-directory: rust/skulk_pyo3_bindings
+        env:
+          # maturin needs the interpreter's full path on Windows; a bare
+          # version such as `3.13` does not resolve there.
+          PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          rustc --version
+          uvx maturin build --release --locked -i "$PYTHON" --out ../../dist
+          ls -la ../../dist
+
+      - name: Verify the wheel's name, version and platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/skulk_pyo3_bindings/pyproject.toml)"
+          test -n "$version"
+          expected="skulk_pyo3_bindings-${version}-cp313-cp313-win_amd64.whl"
+          found="$(cd dist && ls *.whl)"
+          if [ "$found" != "$expected" ]; then
+            echo "expected only $expected, found: $found" >&2
+            exit 1
+          fi
+
+      - name: Import the wheel and start the swarm
+        shell: bash
+        env:
+          # An isolated private-network key: this swarm must never be able to
+          # join another Skulk network reachable from the runner.
+          SKULK_LIBP2P_NAMESPACE: bindings-wheel-ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          uv venv --python "${{ steps.python.outputs.python-path }}" smoke
+          uv pip install --python smoke/Scripts/python.exe dist/*.whl
+          smoke/Scripts/python.exe - <<'PY'
+          import asyncio
+
+          import skulk_pyo3_bindings as bindings
+
+
+          async def main() -> None:
+              handle = bindings.NetworkingHandle(bindings.Keypair.generate(), listen_port=0)
+
+              async def read_events() -> None:
+                  # The swarm only processes commands while its event stream
+                  # is being read.
+                  while True:
+                      await handle.recv()
+
+              reader = asyncio.create_task(read_events())
+              addresses = await asyncio.wait_for(handle.listen_addresses(), 30)
+              assert await asyncio.wait_for(handle.gossipsub_subscribe("smoke"), 30)
+              reader.cancel()
+              print("listening on", addresses)
+
+
+          asyncio.run(main())
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-wheel-win_amd64
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-index:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    # Every wheel workflow regenerates the one shared index from the bucket's
+    # contents, so publications serialize across workflows.
+    concurrency:
+      group: foxlight-engine-wheel-index-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "bindings-wheel-*"
+          merge-multiple: true
+          path: dist
+      - uses: astral-sh/setup-uv@v6
+      - name: Publish wheels to the Foxlight index
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          uv run --no-project --with boto3 python scripts/publish_wheel_index.py dist/*.whl
