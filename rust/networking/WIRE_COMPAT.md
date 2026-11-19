@@ -33,6 +33,16 @@ bindings while `versionStatus` reported "consistent".
 
 ## Entries (newest first)
 
+- **wire-neutral** (2026-11-19): on Windows only, `src/discovery.rs` dials
+  from a fresh local port (`PortUse::New`) instead of the listening port.
+  Windows refuses the listening-port rebind on a redial (error 10048) and
+  crossing dials from two listening ports can fail the noise handshake. Only
+  the local source port of an outbound TCP connection changes; protocols,
+  topics, framing, upgrades and the pnet key are untouched, and POSIX builds
+  compile the same dial options as before, so `NETWORK_VERSION` stays v0.0.3.
+  A peer that accepts a Windows node's connection now observes an ephemeral
+  remote port, as it already does for any dialer behind address translation.
+
 - **wire-neutral** (2026-10-10): the lockfile moves to security-fixed
   patch releases. `libp2p-gossipsub` 0.49.2 to 0.49.5 ignores invalid and
   bounds remote PRUNE backoff values, caps subscriptions at 2,000 topics per
