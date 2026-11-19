@@ -3,12 +3,11 @@ import hashlib
 import ipaddress
 import multiprocessing as mp
 import os
-import resource
 import signal
 import socket
 import sys
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, MutableMapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
@@ -2180,9 +2179,11 @@ def main():
 
         sys.exit(doctor_main(sys.argv[2:]))
     args = Args.parse()
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    target = min(max(soft, 65535), hard)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    try:
+        args = apply_platform_participation(args, sys.platform, os.environ)
+    except UnsupportedParticipationError as error:
+        sys.exit(str(error))
+    _raise_open_file_limit()
 
     mp.set_start_method("spawn", force=True)
     # `kill -USR1 <pid>` writes every thread's Python stack to the log.
@@ -2380,6 +2381,57 @@ async def run_node(args: "Args") -> None:
     """
     node = await Node.create(args)
     await node.run()
+
+
+class UnsupportedParticipationError(Exception):
+    """The requested node participation cannot run on this platform."""
+
+
+NODE_PARTICIPATION_ENV_VAR: Final = "SKULK_NODE_PARTICIPATION"
+
+
+def apply_platform_participation(
+    args: "Args", platform: str, environ: "MutableMapping[str, str]"
+) -> "Args":
+    """Return launch arguments restricted to what this platform can run.
+
+    Windows hosts no inference engine, so a Windows node always runs with
+    management participation: no worker, never a placement target. An unset
+    participation becomes ``management`` (recorded in ``environ`` because
+    resource telemetry and provisioning read the variable directly); an
+    explicit ``full`` or ``ffn_only`` is refused rather than silently
+    downgraded. Every other platform gets its arguments back unchanged.
+
+    Raises:
+        UnsupportedParticipationError: Windows was asked for a participation
+            that needs an inference engine.
+    """
+    if platform != "win32":
+        return args
+    declared = environ.get(NODE_PARTICIPATION_ENV_VAR, "").strip().lower()
+    if declared not in ("", "management"):
+        raise UnsupportedParticipationError(
+            f"{NODE_PARTICIPATION_ENV_VAR}={declared} is not available on "
+            "Windows: a Windows node runs without an inference engine. Unset "
+            "the variable or set it to 'management'."
+        )
+    environ[NODE_PARTICIPATION_ENV_VAR] = "management"
+    return args.model_copy(update={"no_worker": True})
+
+
+def _raise_open_file_limit() -> None:
+    """Raise the soft open-file limit toward 65535 where the platform has one.
+
+    Windows has no per-process descriptor limit to raise and no ``resource``
+    module, so this is a no-op there.
+    """
+    if sys.platform == "win32":
+        return
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = min(max(soft, 65535), hard)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
 
 
 class Args(CamelCaseModel):
