@@ -25,6 +25,10 @@ from typing import Final, Literal, Protocol, final, overload, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+if sys.platform != "win32":
+    # POSIX-only; the guard keeps this module loadable on Windows.
+    import resource
+
 
 class AudioPlane(Protocol):
     """Narrow AudioPlane read interface verified against the pinned PyAV runtime."""
@@ -360,17 +364,11 @@ def _resident_peak_bytes() -> int:
                     raise ValueError("source decoder has invalid resident peak accounting")
                 return int(fields[1]) * 1024
         raise ValueError("source decoder lacks resident peak accounting")
-    # POSIX-only module, imported at use so this module loads on Windows.
-    import resource
-
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
 
 def main() -> None:
     """Prepare one bounded local attachment with heap/file limits and parent reaping."""
-    # POSIX-only module, imported at use so this module loads on Windows.
-    import resource
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)

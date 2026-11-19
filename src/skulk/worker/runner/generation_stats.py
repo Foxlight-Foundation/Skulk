@@ -32,6 +32,10 @@ from typing import Callable, cast, final
 from skulk.api.types import GenerationStats
 from skulk.shared.types.memory import Memory
 
+if sys.platform != "win32":
+    # POSIX-only; the guard keeps this module loadable on Windows.
+    import resource
+
 
 def process_peak_memory() -> Memory:
     """Peak resident set size of this process as a :class:`Memory`.
@@ -43,9 +47,6 @@ def process_peak_memory() -> Memory:
     instead (:func:`subprocess_peak_memory`), because the model and KV cache
     live there, not in the proxy.
     """
-    # POSIX-only module, imported at use so this module loads on Windows.
-    import resource
-
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if sys.platform != "darwin":
         peak *= 1024

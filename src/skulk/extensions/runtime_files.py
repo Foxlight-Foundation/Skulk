@@ -4,19 +4,22 @@ import asyncio
 import functools
 import os
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import final
 from uuid import uuid4
 
+if sys.platform != "win32":
+    # POSIX-only; the guard keeps this module loadable on Windows.
+    import fcntl
+    import grp
+    import pwd
+
 
 @functools.cache
 def _private_group(group_id: int, user_id: int) -> bool:
     """Whether ``group_id`` is the account's own group with no other members."""
-    # POSIX-only modules, imported at use so this module loads on Windows.
-    import grp
-    import pwd
-
     try:
         group = grp.getgrgid(group_id)
         account = pwd.getpwuid(user_id)
@@ -150,9 +153,6 @@ class RuntimeLock:
             "catalog.lock",
         }:
             raise ValueError("unknown runtime lock")
-        # POSIX-only module, imported at use so this module loads on Windows.
-        import fcntl
-
         private_directory(root)
         self.descriptor = os.open(
             root / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
