@@ -80,7 +80,10 @@ jobs:
           # Skulk must install exactly the version this job builds, and only
           # from the Foxlight index; a pin that drifts from this table would
           # publish a wheel nothing installs, or install one nobody built.
-          grep -qF "\"${DISTRIBUTION}==${BUILD_VERSION}\"" skulk/pyproject.toml
+          # The pin may carry an environment marker (the fork is not installed
+          # on Windows), so accept the bare pin or the pin followed by one.
+          grep -qF -e "\"${DISTRIBUTION}==${BUILD_VERSION}\"" \
+            -e "\"${DISTRIBUTION}==${BUILD_VERSION}; " skulk/pyproject.toml
           grep -qE "^${DISTRIBUTION} = \{ index = \"foxlight\" \}" skulk/pyproject.toml
 
       - uses: actions/checkout@v4
