@@ -1113,6 +1113,19 @@ Rust code in `rust/` provides:
 - `skulk_pyo3_bindings`: PyO3 bindings exposing Rust to Python
 - `system_custodian`: System-level operations
 
+Windows (`win32`) is a non-compute target: the entry point forces management
+participation (`apply_platform_participation`; an explicit `full` or `ffn_only`
+is refused), Ctrl-Break requests the same orderly shutdown as SIGTERM, and
+outbound libp2p dials use a fresh local port (`DIAL_FROM_FRESH_PORT` in
+`rust/networking/src/discovery.rs`) because Windows refuses the listening-port
+rebind. No module may import a POSIX-only standard-library module
+(`fcntl`, `grp`, `pwd`, `resource`, `termios`) at module level; import it in the
+function that needs it or under a platform check
+(`tests/test_platform_participation.py` enforces this). The bindings reach
+Windows as a wheel built by `.github/workflows/bindings-wheel.yml`; publishing
+is a manual dispatch and a republish needs a bindings version bump. Capability
+hosting, signed installs and an unattended service on Windows are not built yet.
+
 ### Extension API (plugins)
 
 `extensions/proposal_review.py` supplies provider-neutral proposal references and

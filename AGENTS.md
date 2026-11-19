@@ -211,6 +211,19 @@ Rust code in `rust/` provides:
 - `skulk_pyo3_bindings`: PyO3 bindings exposing Rust to Python
 - `system_custodian`: System-level operations
 
+Windows (`win32`) is a non-compute target: the entry point forces management
+participation (`apply_platform_participation`; an explicit `full` or `ffn_only`
+is refused), Ctrl-Break requests the same orderly shutdown as SIGTERM, and
+outbound libp2p dials use a fresh local port (`DIAL_FROM_FRESH_PORT` in
+`rust/networking/src/discovery.rs`) because Windows refuses the listening-port
+rebind. No module may import a POSIX-only standard-library module
+(`fcntl`, `grp`, `pwd`, `resource`, `termios`) at module level; import it in the
+function that needs it or under a platform check
+(`tests/test_platform_participation.py` enforces this). The bindings reach
+Windows as a wheel built by `.github/workflows/bindings-wheel.yml`; publishing
+is a manual dispatch and a republish needs a bindings version bump. Capability
+hosting, signed installs and an unattended service on Windows are not built yet.
+
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`, dark = the operator design system's Den palette); components never branch on the theme name. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field (scene crown + shooting stars, mesh retired); default builds ship a CSS-only night gradient with the mesh.
 
