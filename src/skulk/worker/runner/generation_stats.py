@@ -24,7 +24,6 @@ This module provides the shared pieces those engines need:
 
 from __future__ import annotations
 
-import resource
 import sys
 import time
 from pathlib import Path
@@ -44,6 +43,9 @@ def process_peak_memory() -> Memory:
     instead (:func:`subprocess_peak_memory`), because the model and KV cache
     live there, not in the proxy.
     """
+    # POSIX-only module, imported at use so this module loads on Windows.
+    import resource
+
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if sys.platform != "darwin":
         peak *= 1024
