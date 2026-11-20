@@ -507,8 +507,9 @@ index only on manual dispatch with `publish=true`. The command line runs it
 against any branch that carries the workflow file
 (`gh workflow run bindings-wheel.yml --ref <branch> -f publish=true`); only the
 website's Run button needs the file on the default branch. The index is
-append-only, so republishing needs a bindings version bump. macOS and Linux still build the bindings from the
-workspace source. The CUDA wheel builds with
+append-only, so republishing needs a bindings version bump. A Windows install takes the bindings from
+that index (pyproject pins the version for `win32`); macOS and Linux still build
+them from `rust/`. The CUDA wheel builds with
 `GGML_CUDA_NO_VMM=ON`: GPU-less CI cannot satisfy the driver API's transitive
 libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
 driver-API-dependent flags to that build. The aarch64 lane uses CUDA 12.9 and
@@ -1133,8 +1134,13 @@ rebind. No module may import a POSIX-only standard-library module
 (`fcntl`, `grp`, `pwd`, `resource`, `termios`) at module level; import it in the
 function that needs it or under a platform check
 (`tests/test_platform_participation.py` enforces this). The bindings reach
-Windows as a wheel built by `.github/workflows/bindings-wheel.yml`; publishing
-is a manual dispatch and a republish needs a bindings version bump. Capability
+Windows as a wheel built by `.github/workflows/bindings-wheel.yml` and published
+to the Foxlight index by manual dispatch. `pyproject.toml` pins that wheel for
+`win32` on CPython 3.13 and splits the source by platform, which is why the
+bindings are a path source and not a uv workspace member (uv refuses an index
+source for a member). The pin must equal the bindings version
+(`tests/test_windows_bindings_wheel.py`), so a bindings version bump moves the
+pin and needs the Windows wheel published from that branch before `uv lock`. Capability
 hosting, signed installs and an unattended service on Windows are not built yet.
 
 ### Extension API (plugins)

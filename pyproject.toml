@@ -16,7 +16,15 @@ dependencies = [
   "psutil>=7.0.0",
   "loguru>=0.7.3",
   "packaging>=24.0",                                # extension version gating
-  "skulk_pyo3_bindings",                            # rust bindings
+  # Rust bindings. macOS and Linux build them from rust/ during `uv sync`.
+  # Windows has no compiler toolchain to assume, so it installs the wheel that
+  # .github/workflows/bindings-wheel.yml publishes to the Foxlight index (see
+  # [tool.uv.sources]). That wheel exists for CPython 3.13 only. The Windows pin
+  # must equal the version in rust/skulk_pyo3_bindings/pyproject.toml
+  # (src/skulk/tests/test_windows_bindings_wheel.py enforces it): bump both
+  # together and publish the Windows wheel before running `uv lock`.
+  "skulk_pyo3_bindings; sys_platform != 'win32'",
+  "skulk_pyo3_bindings==0.2.8; sys_platform == 'win32' and python_version < '3.14'",
   "anyio==4.14.2",
   "mlx==0.32.4; sys_platform == 'darwin'",
   "mlx[cpu]==0.32.4; sys_platform == 'linux'",
@@ -158,10 +166,17 @@ llama-cpp = [
 ###
 
 [tool.uv.workspace]
-members = ["rust/skulk_pyo3_bindings", "bench"]
+members = ["bench"]
 
 [tool.uv.sources]
-skulk_pyo3_bindings = { workspace = true }
+# The bindings are a path source, not a workspace member: uv refuses an index
+# source for a workspace member, and Windows must take the published wheel.
+# Off Windows this resolves exactly as the member did (an editable build of
+# rust/skulk_pyo3_bindings).
+skulk_pyo3_bindings = [
+  { path = "rust/skulk_pyo3_bindings", editable = true, marker = "sys_platform != 'win32'" },
+  { index = "foxlight", marker = "sys_platform == 'win32'" },
+]
 # Using official mlx — the RDMA fork (rltakashige/mlx-jaccl-fix-small-recv) doesn't
 # build on macOS 26 Metal SDK. The fork's only change is a DSB memory barrier for
 # Thunderbolt RDMA GPU coherence, which we don't need (Skulk uses libp2p, not RDMA).

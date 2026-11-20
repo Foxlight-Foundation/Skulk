@@ -14,6 +14,13 @@ only when it moves, and every installed startup script runs `uv sync`, so
 the bump makes auto-updating nodes rebuild their bindings on the FIRST
 restart instead of running new Python against stale wire code.
 
+Windows nodes do not build the bindings: they install the published
+`win_amd64` wheel of the version pinned for `win32` in the root
+`pyproject.toml`. A bindings version bump therefore also moves that pin, and
+the Windows wheel is published (`.github/workflows/bindings-wheel.yml`, manual
+dispatch from the branch) before `uv lock`, or Windows nodes would keep the
+old wire code.
+
 CI enforces the pairing: a PR touching anything under this crate's `src/`
 tree, this crate's `Cargo.toml`, or the workspace `Cargo.toml`/`Cargo.lock`
 at the repo root (a libp2p or zenoh dependency bump changes protocol
