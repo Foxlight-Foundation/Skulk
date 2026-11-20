@@ -19,7 +19,6 @@ supported-markers = [
 members = [
     "skulk",
     "skulk-bench",
-    "skulk-pyo3-bindings",
 ]
 
 [[package]]
@@ -3184,7 +3183,8 @@ dependencies = [
     { name = "pyyaml" },
     { name = "qrcode" },
     { name = "rustworkx" },
-    { name = "skulk-pyo3-bindings" },
+    { name = "skulk-pyo3-bindings", version = "0.2.8", source = { registry = "https://wheels.foxlight.ai/simple/" }, marker = "python_full_version < '3.14' and sys_platform == 'win32'" },
+    { name = "skulk-pyo3-bindings", version = "0.2.8", source = { editable = "rust/skulk_pyo3_bindings" }, marker = "sys_platform != 'win32'" },
     { name = "tiktoken" },
     { name = "tomlkit" },
     { name = "torchvision", marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
@@ -3253,7 +3253,8 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "qrcode", specifier = ">=8.2" },
     { name = "rustworkx", specifier = ">=0.17.1" },
-    { name = "skulk-pyo3-bindings", editable = "rust/skulk_pyo3_bindings" },
+    { name = "skulk-pyo3-bindings", marker = "sys_platform != 'win32'", editable = "rust/skulk_pyo3_bindings" },
+    { name = "skulk-pyo3-bindings", marker = "python_full_version < '3.14' and sys_platform == 'win32'", specifier = "==0.2.8", index = "https://wheels.foxlight.ai/simple/" },
     { name = "tiktoken", specifier = ">=0.12.0" },
     { name = "tomlkit", specifier = ">=0.14.0" },
     { name = "torchvision", marker = "sys_platform == 'darwin'", specifier = "==0.28.0" },
@@ -3319,13 +3320,23 @@ requires-dist = [
 [[package]]
 name = "skulk-pyo3-bindings"
 version = "0.2.8"
-source = { editable = "rust/skulk_pyo3_bindings" }
+source = { registry = "https://wheels.foxlight.ai/simple/" }
+resolution-markers = [
+    "python_full_version < '3.14' and sys_platform == 'win32'",
+]
+wheels = [
+    { url = "https://wheels.foxlight.ai/wheels/skulk_pyo3_bindings-0.2.8-cp313-cp313-win_amd64.whl", hash = "sha256:134046ba5d16ab0ac8a0213fcd7e8a280cfa770878039d3c1e848e0ec60c2d75" },
+]
 
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "skulk-pyo3-bindings" },
+[[package]]
+name = "skulk-pyo3-bindings"
+version = "0.2.8"
+source = { editable = "rust/skulk_pyo3_bindings" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and sys_platform == 'linux'",
 ]
 
 [package.metadata]
@@ -3334,7 +3345,7 @@ dev = [
 dev = [
     { name = "pytest", specifier = ">=8.4.0" },
     { name = "pytest-asyncio", specifier = ">=1.0.0" },
-    { name = "skulk-pyo3-bindings", editable = "rust/skulk_pyo3_bindings" },
+    { name = "skulk-pyo3-bindings" },
 ]
 
 [[package]]
