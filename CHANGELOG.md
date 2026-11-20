@@ -7,6 +7,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Peer discovery
+
+- Nodes on the same network find each other more reliably. Each node now repeats its
+  discovery query every minute instead of every 25 minutes, so a lost multicast packet
+  (common over Wi-Fi) delays discovery by a minute or two instead of leaving two nodes
+  unaware of each other for up to 25 minutes. Explicit `--bootstrap-peers` are unchanged.
+
 ### Capability store install links
 
 - Open a capability's review from a store install link: `/plugins?install=<bundle>&version=<version>`

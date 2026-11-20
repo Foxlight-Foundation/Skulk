@@ -497,7 +497,16 @@ unchanged. Skulk's Python forks (mflux, mlx-lm) ship there too:
 `.github/workflows/fork-wheel.yml` builds each pinned fork commit as an
 `<upstream>.postN` wheel, and pyproject installs them from that explicit
 index, never as git sources (a git source made every fresh install fetch
-the fork's whole history, about 177 MB for mflux). The CUDA wheel builds with
+the fork's whole history, about 177 MB for mflux). The Rust bindings
+(`skulk_pyo3_bindings`) have a Windows wheel lane,
+`.github/workflows/bindings-wheel.yml`: it builds the `win_amd64` CPython 3.13
+wheel on pull requests and `dev` pushes that touch `rust/**`, the workspace
+manifests or the workflow, checks the wheel's name, then installs it and starts
+the swarm on an isolated `SKULK_LIBP2P_NAMESPACE`. It publishes to the same
+index only on manual dispatch with `publish=true`, which needs the workflow
+file on the default branch; the index is append-only, so republishing needs a
+bindings version bump. macOS and Linux still build the bindings from the
+workspace source. The CUDA wheel builds with
 `GGML_CUDA_NO_VMM=ON`: GPU-less CI cannot satisfy the driver API's transitive
 libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
 driver-API-dependent flags to that build. The aarch64 lane uses CUDA 12.9 and

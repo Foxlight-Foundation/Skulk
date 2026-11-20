@@ -33,6 +33,16 @@ bindings while `versionStatus` reported "consistent".
 
 ## Entries (newest first)
 
+- **wire-neutral** (2026-11-19): the mDNS query interval drops from 1,500 s
+  to 60 s (`MDNS_QUERY_INTERVAL` in `src/discovery.rs`); the record TTL stays
+  2,500 s. libp2p ends its start-up probing at the first answer, so each pair
+  of nodes used to get one query/answer exchange per 25 minutes, and a
+  measured LAN lost a real share of those multicast packets. This is timing
+  only: the mDNS service name, record contents, protocol ids, topics, framing,
+  behaviour composition and key derivation are unchanged, and old and new
+  nodes discover each other as before, so `NETWORK_VERSION` remains v0.0.3.
+  Bindings advance to 0.2.8 so ordinary upgrades rebuild them instead of
+  keeping a cached wheel with the old interval.
 - **wire-neutral** (2026-11-19): on Windows only, `src/discovery.rs` dials
   from a fresh local port (`PortUse::New`) instead of the listening port.
   Windows refuses the listening-port rebind on a redial (error 10048) and
@@ -42,7 +52,6 @@ bindings while `versionStatus` reported "consistent".
   compile the same dial options as before, so `NETWORK_VERSION` stays v0.0.3.
   A peer that accepts a Windows node's connection now observes an ephemeral
   remote port, as it already does for any dialer behind address translation.
-
 - **wire-neutral** (2026-10-10): the lockfile moves to security-fixed
   patch releases. `libp2p-gossipsub` 0.49.2 to 0.49.5 ignores invalid and
   bounds remote PRUNE backoff values, caps subscriptions at 2,000 topics per

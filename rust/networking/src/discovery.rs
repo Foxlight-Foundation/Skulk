@@ -32,7 +32,16 @@ mod managed {
     use std::time::Duration;
 
     const MDNS_RECORD_TTL: Duration = Duration::from_secs(2_500);
-    const MDNS_QUERY_INTERVAL: Duration = Duration::from_secs(1_500);
+    /// How often a node repeats its mDNS query.
+    ///
+    /// libp2p stops its start-up probing at the first answer, so on a
+    /// populated LAN a node asks once and then waits this long. Multicast is
+    /// unreliable, most of all over Wi-Fi: a measured LAN lost between one in
+    /// ten and one in two query/answer exchanges. At the previous 1,500 s a
+    /// lost packet left two nodes unaware of each other for 25 minutes. One
+    /// minute bounds that to a few rounds, and each round costs one small
+    /// multicast packet per node plus one answer from every other node.
+    const MDNS_QUERY_INTERVAL: Duration = Duration::from_secs(60);
     const PING_TIMEOUT: Duration = Duration::from_secs(5);
     const PING_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -65,6 +74,21 @@ mod managed {
 
         let mdns_behaviour = tokio::Behaviour::new(mdns_config, keypair.public().to_peer_id());
         Ok(mdns_behaviour?)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{MDNS_QUERY_INTERVAL, MDNS_RECORD_TTL};
+        use std::time::Duration;
+
+        #[test]
+        fn mdns_repeats_its_query_often_enough_to_survive_lost_packets() {
+            // A node that misses a peer must ask again soon, and a record
+            // must outlive many lost refreshes so a known peer is not expired
+            // by ordinary multicast loss.
+            assert!(MDNS_QUERY_INTERVAL <= Duration::from_secs(120));
+            assert!(MDNS_RECORD_TTL >= MDNS_QUERY_INTERVAL * 10);
+        }
     }
 
     fn ping_behaviour() -> ping::Behaviour {
