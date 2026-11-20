@@ -147,8 +147,11 @@ if [ "$WITH_LLAMA_SERVER" -eq 1 ]; then
   if [ ! -d "$LLAMA_CPP_DIR/.git" ]; then
     git clone --depth 1 https://github.com/ggml-org/llama.cpp "$LLAMA_CPP_DIR"
   fi
+  # No embedded chat page: Skulk only uses the server's API, and the page's
+  # build-time download breaks on a shallow clone.
   cmake -S "$LLAMA_CPP_DIR" -B "$LLAMA_CPP_DIR/build" \
-    -DGGML_CUDA=ON -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release >/dev/null
+    -DGGML_CUDA=ON -DGGML_RPC=ON -DLLAMA_USE_PREBUILT_UI=OFF \
+    -DCMAKE_BUILD_TYPE=Release >/dev/null
   cmake --build "$LLAMA_CPP_DIR/build" --target llama-server ggml-rpc-server -j"$(nproc)" >/dev/null
   log "llama-server: ${LLAMA_CPP_DIR}/build/bin/llama-server"
   log "ggml-rpc-server (pooling donor): ${LLAMA_CPP_DIR}/build/bin/ggml-rpc-server"

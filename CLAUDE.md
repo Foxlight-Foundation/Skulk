@@ -506,7 +506,12 @@ the swarm on an isolated `SKULK_LIBP2P_NAMESPACE`. It publishes to the same
 index only on manual dispatch with `publish=true`, which needs the workflow
 file on the default branch; the index is append-only, so republishing needs a
 bindings version bump. macOS and Linux still build the bindings from the
-workspace source. The CUDA wheel builds with
+workspace source. Every Skulk build of `llama-server` (the engine wheels, the
+CUDA pod image and both `install-deps.sh` scripts) passes
+`LLAMA_USE_PREBUILT_UI=OFF`: llama.cpp otherwise downloads its built-in chat
+page at build time, choosing the bundle by commit count, which is wrong on a
+shallow clone and made builds depend on upstream's newest bundle. Skulk calls
+only the server's API on 127.0.0.1 and never serves that page. The CUDA wheel builds with
 `GGML_CUDA_NO_VMM=ON`: GPU-less CI cannot satisfy the driver API's transitive
 libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
 driver-API-dependent flags to that build. The aarch64 lane uses CUDA 12.9 and
