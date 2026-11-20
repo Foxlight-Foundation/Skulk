@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
+from multiprocessing.synchronize import Event
 from queue import Empty
 from typing import cast
 
@@ -44,12 +45,15 @@ def run_pipeline_device(
     world_size: int,
     hostfile_path: str,
     result_queue: Queue[PipelineResult],
+    startup_queue: Queue[int],
+    start_computation: Event,
 ) -> None:
     """Run one real ring rank and report its computed array or exception.
 
     ``rank`` and the host file select the two-process ring. Results travel to
     the parent's bounded wait through ``result_queue``; model execution remains
-    in the child process.
+    in the child process. ``startup_queue`` reports completed cold imports;
+    ``start_computation`` separates that setup from the real ring deadline.
     """
     import os
 
@@ -75,6 +79,9 @@ def run_pipeline_device(
             return x
 
     try:
+        startup_queue.put(rank)
+        if not start_computation.wait(timeout=120):
+            raise TimeoutError("Parent did not admit the prepared ring ranks")
         group = mx.distributed.init(backend="ring", strict=True)
 
         mock = MockLayerInner()
@@ -134,20 +141,46 @@ def test_composed_call_works() -> None:
         hostfile_path = f.name
 
     result_queue: Queue[PipelineResult] = ctx.Queue()
+    startup_queue: Queue[int] = ctx.Queue()
+    start_computation = ctx.Event()
     processes: list[BaseProcess] = []
     # Spawn imports the inference modules and their strict schemas before it
     # can join the ring. Short joins plus Queue.empty() raced that startup and
     # removed the host file while valid ranks were still importing.
-    deadline = time.monotonic() + 60
+    startup_deadline = time.monotonic() + 120
     try:
         for rank in range(world_size):
             process = ctx.Process(
                 target=run_pipeline_device,
-                args=(rank, world_size, hostfile_path, result_queue),
+                args=(
+                    rank,
+                    world_size,
+                    hostfile_path,
+                    result_queue,
+                    startup_queue,
+                    start_computation,
+                ),
             )
             process.start()
             processes.append(process)
 
+        prepared: set[int] = set()
+        for _ in range(world_size):
+            try:
+                rank = startup_queue.get(
+                    timeout=max(0.0, startup_deadline - time.monotonic())
+                )
+            except Empty:
+                pytest.fail(
+                    f"Timed out importing MLX ranks; prepared={sorted(prepared)}, "
+                    f"exitcodes={[process.exitcode for process in processes]}"
+                )
+            assert rank in range(world_size) and rank not in prepared
+            prepared.add(rank)
+        # Both real interpreters have imported the inference stack. Preserve
+        # the original60s ring/compute/result bound after that handshake.
+        deadline = time.monotonic() + 60
+        start_computation.set()
         results: dict[int, mx.array] = {}
         errors: dict[int, str] = {}
         for _ in range(world_size):
@@ -195,6 +228,8 @@ def test_composed_call_works() -> None:
             process.close()
         result_queue.close()
         result_queue.join_thread()
+        startup_queue.close()
+        startup_queue.join_thread()
         os.unlink(hostfile_path)
 
 

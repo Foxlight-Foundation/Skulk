@@ -78,12 +78,21 @@ class MirrorProcess:
         reader = self._reader
         if reader is None:
             raise PreservationHostError("mirror_worker_protocol")
+        exited_group_drained = False
         while True:
             try:
                 line = await asyncio.wait_for(reader.readline(), timeout=2)
             except TimeoutError:
                 if not self.alive():
-                    return
+                    if exited_group_drained:
+                        raise PreservationHostError("mirror_worker_protocol") from None
+                    # A delayed event loop can observe both the read deadline
+                    # and leader exit before delivering its queued final line.
+                    # Drain inherited writers without closing our read pipe,
+                    # then consume that line and EOF under the same read bound.
+                    if await self._stop_group():
+                        raise asyncio.CancelledError from None
+                    exited_group_drained = True
                 continue
             if not line:
                 # EOF alone is not proof of process/group shutdown. The caller
@@ -95,6 +104,17 @@ class MirrorProcess:
 
     async def stop(self) -> None:
         """Cooperatively cancel then drain the actual group, even if cancelled."""
+        interrupted = await self._stop_group()
+        if self._transport is not None:
+            self._transport.close()
+        for stream in (self.process.stdin, self.process.stdout):
+            if stream is not None and not stream.closed:
+                stream.close()
+        if interrupted:
+            raise asyncio.CancelledError
+
+    async def _stop_group(self) -> bool:
+        """Retain the observation pipe until its owner has consumed final output."""
         if self._stopping is None or (
             self._stopping.done()
             and not self._stopping.cancelled()
@@ -110,13 +130,7 @@ class MirrorProcess:
                 interrupted = True
         # Real signal/drain failures propagate and keep this owner retained.
         self._stopping.result()
-        if self._transport is not None:
-            self._transport.close()
-        for stream in (self.process.stdin, self.process.stdout):
-            if stream is not None and not stream.closed:
-                stream.close()
-        if interrupted:
-            raise asyncio.CancelledError
+        return interrupted
 
     async def _drain_owned(self) -> None:
         await asyncio.get_running_loop().run_in_executor(self._control, self._drain)

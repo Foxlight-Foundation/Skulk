@@ -43,6 +43,7 @@ class Capacity(NamedTuple):
 
 def capacity(free: int) -> Callable[[object], Capacity]:
     """Provide a typed disk-space probe for admission-boundary regressions."""
+
     def available(_: object) -> Capacity:
         return Capacity(free, 0, free)
 
@@ -105,8 +106,11 @@ def public_kit(
     return destination.read_bytes(), identity, trust
 
 
-async def settled(host: PreservationHost, job_id: str) -> PreservationJob:
-    async with asyncio.timeout(30):
+async def settled(
+    host: PreservationHost, job_id: str, *, timeout_seconds: float = 30
+) -> PreservationJob:
+    """Return owned terminal state under the caller's bounded fixture wait."""
+    async with asyncio.timeout(timeout_seconds):
         while host.journal.job(job_id).state in {"queued", "running", "cancelling"}:
             await asyncio.sleep(0.025)
     return host.journal.job(job_id)
@@ -128,8 +132,17 @@ async def ready(host: PreservationHost, job_id: str) -> PreservationJob:
 
 
 async def import_copy(
-    host: PreservationHost, content: bytes, operation_id: str = "public-import"
+    host: PreservationHost,
+    content: bytes,
+    operation_id: str = "public-import",
+    *,
+    timeout_seconds: float = 30,
 ) -> PreservationCopy:
+    """Import genuine fixture bytes, optionally allowing longer cold startup.
+
+    Return the verified retained copy. Existing callers keep their default;
+    archive setup may explicitly reserve a longer finite settlement allowance.
+    """
     uploaded = host.uploads.create(len(content))
     uid = str(uploaded["upload_id"])
     host.uploads.append(uid, 0, content)
@@ -147,7 +160,7 @@ async def import_copy(
     )
     job = host.start(request)
     assert host.start(request).job_id == job.job_id
-    result = await settled(host, job.job_id)
+    result = await settled(host, job.job_id, timeout_seconds=timeout_seconds)
     assert result.state == "succeeded", result
     assert result.copy_id is not None
     return host.journal.copy(result.copy_id)

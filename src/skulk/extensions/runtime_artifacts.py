@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal, final
+from typing import Annotated, Literal, Self, final
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -30,6 +30,7 @@ from pydantic import (
     JsonValue,
     TypeAdapter,
     field_validator,
+    model_validator,
 )
 
 from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
@@ -274,11 +275,30 @@ class _InferenceReleaseClaims(_ReleaseFields):
 
 
 class _RuntimeClaims(_Contract):
-    protocol: Annotated[int, AfterValidator(_accepted("runtime", (2,)))]
+    protocol: Annotated[int, AfterValidator(_accepted("runtime", (2, 3)))]
     implementation: Literal["cpython"]
     platform: RuntimePlatform
     release: _ReleaseClaims
     wheels: tuple[RuntimeWheel, ...] = Field(min_length=1, max_length=64)
+    application_roots: tuple[
+        Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=128)],
+        ...,
+    ] = Field(
+        default=(),
+        max_length=8,
+        description="V3 signed application dependency roots in the wheel inventory.",
+    )
+
+    @model_validator(mode="after")
+    def validate_application_roots(self) -> Self:
+        """Keep v2 wire shape intact and require explicit, unique v3 roots."""
+        if self.protocol == 2 and "application_roots" in self.model_fields_set:
+            raise ValueError("runtime v2 cannot declare application roots")
+        if self.protocol == 3 and not self.application_roots:
+            raise ValueError("runtime v3 requires application roots")
+        if len(set(self.application_roots)) != len(self.application_roots):
+            raise ValueError("runtime has duplicate application roots")
+        return self
 
 
 class _NativeRuntimeClaims(_Contract):
@@ -396,7 +416,12 @@ class VerifiedRuntime:
     @property
     def signature_message(self) -> bytes:
         """Keep legacy signing bytes unchanged and domain-separate native records."""
-        return _runtime_signature_prefix(self.claims.protocol) + self.payload
+        return (
+            _runtime_signature_prefix(
+                self.claims.protocol, release_protocol=self.claims.release.protocol
+            )
+            + self.payload
+        )
 
     @property
     def release_digest(self) -> str:
@@ -438,8 +463,34 @@ class VerifiedRuntime:
         return dict(sorted(wheel.distribution for wheel in self.claims.wheels))
 
 
-def _runtime_signature_prefix(protocol: JsonValue) -> bytes:
-    """Keep issued signing bytes intact and separate the explicit call domain."""
+def is_native_runtime(runtime: dict[str, JsonValue]) -> bool:
+    """Recognize explicit native runtime/release version pairs without granting trust.
+
+    Application-root runtime three retains release one and its original signing
+    bytes. Native runtime three carries release two; later native formats also
+    have fixed pairs. Callers must authenticate metadata before admitting effects.
+    """
+    protocol = runtime.get("protocol")
+    release = runtime.get("release")
+    release_protocol = release.get("protocol") if isinstance(release, dict) else None
+    return (
+        type(protocol) is int
+        and type(release_protocol) is int
+        and (protocol, release_protocol) in {(3, 2), (4, 2), (5, 3)}
+    )
+
+
+def _runtime_signature_prefix(
+    protocol: JsonValue, *, release_protocol: JsonValue = None
+) -> bytes:
+    """Preserve each issued signing domain, including legacy application roots."""
+    if (
+        type(protocol) is int
+        and protocol == 3
+        and type(release_protocol) is int
+        and release_protocol == 1
+    ):
+        return b""
     if type(protocol) is int and protocol in (3, 4, 5):
         return f"skulk.runtime/{protocol}\0".encode("ascii")
     return b""
@@ -588,7 +639,16 @@ def verify_runtime(
         raise ValueError("runtime publisher trust refused")
     try:
         protocol = signed.runtime.get("protocol")
-        message = _runtime_signature_prefix(protocol) + payload
+        signed_release = signed.runtime.get("release")
+        release_protocol = (
+            signed_release.get("protocol") if isinstance(signed_release, dict) else None
+        )
+        # These two signed version fields select the original signature scheme,
+        # never a trial-verification fallback or authority-bearing interpretation.
+        message = (
+            _runtime_signature_prefix(protocol, release_protocol=release_protocol)
+            + payload
+        )
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(public)).verify(
             bytes.fromhex(signed.signature), message
         )
@@ -605,7 +665,7 @@ def verify_runtime(
         claims = _InferenceRuntimeClaims.model_validate_json(payload)
     elif type(protocol) is int and protocol == 4:
         claims = _CallRuntimeClaims.model_validate_json(payload)
-    elif type(protocol) is int and protocol == 3:
+    elif type(protocol) is int and protocol == 3 and is_native_runtime(signed.runtime):
         claims = _NativeRuntimeClaims.model_validate_json(payload)
     else:
         claims = _RuntimeClaims.model_validate_json(payload)
@@ -660,6 +720,8 @@ def verify_runtime(
         or sum(wheel.size for wheel in claims.wheels) > 536870912
     ):
         raise ValueError("ambiguous or oversized runtime inventory")
+    if isinstance(claims, _RuntimeClaims) and not set(claims.application_roots) <= set(inventory):
+        raise ValueError("runtime omits an application dependency root")
     if (
         hashlib.sha256(canonical_json(dict(inventory))).hexdigest()
         != release.dependency_lock_sha256
@@ -788,6 +850,8 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
     expanded = 0
     inventory = runtime.inventory
     launchers: list[str] = []
+    providers: set[str] = set()
+    dependencies: dict[str, tuple[str, ...]] = {}
     for wheel in runtime.claims.wheels:
         content = read_private(directory / wheel.filename, wheel.size)
         if (
@@ -834,7 +898,11 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
             # Only after the entry-count, expanded-size and single-metadata
             # bounds hold: a malformed wheel must not get decompression work
             # out of the launcher scan before it is rejected.
-            launchers += runtime_launchers(archive)
+            declared = runtime_launchers(archive)
+            launchers += declared
+            if declared:
+                providers.add(str(name))
+            required: list[str] = []
             for value in parsed.get_all("Requires-Dist", []):
                 requirement = Requirement(str(value))
                 if requirement.marker is not None and not requirement.marker.evaluate(
@@ -849,6 +917,8 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
                     or Version(inventory[dependency]) not in requirement.specifier
                 ):
                     raise ValueError("incomplete or incompatible wheel dependency")
+                required.append(dependency)
+            dependencies[str(name)] = tuple(required)
         result[wheel.filename] = content
     if len(launchers) != len(set(launchers)):
         # Which distribution answers importlib.metadata first is not bound by
@@ -861,4 +931,18 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
         raise ValueError(
             "bundle carries no owner entrypoint and no signed wheel declares one"
         )
+    if isinstance(runtime.claims, _RuntimeClaims) and runtime.claims.protocol == 3:
+        # V3 launchers declare their own dependency edges. The host can verify
+        # the complete graph without importing a plugin or knowing SDK-specific
+        # package names. V2 retains its original admission behavior.
+        pending = [*providers, *runtime.claims.application_roots]
+        visited: set[str] = set()
+        while pending:
+            name = pending.pop()
+            if name in visited:
+                continue
+            visited.add(name)
+            pending.extend(dependencies[name])
+        if visited != set(inventory):
+            raise ValueError("runtime contains undeclared dependency packages")
     return result

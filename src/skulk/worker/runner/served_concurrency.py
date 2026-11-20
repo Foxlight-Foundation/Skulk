@@ -32,8 +32,10 @@ from skulk.shared.types.chunks import ErrorChunk
 from skulk.shared.types.events import ChunkGenerated, Event
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
+    AudioSeparation,
     ImageEdits,
     ImageGeneration,
+    MusicEditing,
     MusicGeneration,
     Shutdown,
     Task,
@@ -78,6 +80,8 @@ type GenerationTask = (
     | TextEmbedding
     | VideoGeneration
     | MusicGeneration
+    | MusicEditing
+    | AudioSeparation
     | ImageGeneration
     | ImageEdits
 )
@@ -302,9 +306,16 @@ class ServedConcurrentDispatch:
                         logger.warning("repeat task - potential error")
                         continue
                     match task:
-                        case TextGeneration() | TextEmbedding() | VideoGeneration() | MusicGeneration() | ImageGeneration() | ImageEdits() if isinstance(
-                            task, self._generation_kinds
-                        ) and isinstance(
+                        case (
+                            TextGeneration()
+                            | TextEmbedding()
+                            | VideoGeneration()
+                            | MusicGeneration()
+                            | MusicEditing()
+                            | AudioSeparation()
+                            | ImageGeneration()
+                            | ImageEdits()
+                        ) if isinstance(task, self._generation_kinds) and isinstance(
                             self.current_status, (RunnerReady, RunnerRunning)
                         ):
                             # Acknowledge acceptance NOW, before any backpressure
@@ -324,10 +335,20 @@ class ServedConcurrentDispatch:
                                 blocking=False
                             ):
                                 if self._queue_admitted:
-                                    if self._max_admitted_queue is not None and len(self._admitted) >= self._max_admitted_queue:
-                                        self.event_sender.send(ChunkGenerated(command_id=task.command_id,
-                                            chunk=ErrorChunk(model=self.shard_metadata.model_card.model_id,
-                                                error_message="Native image engine admission limit reached")))
+                                    if (
+                                        self._max_admitted_queue is not None
+                                        and len(self._admitted)
+                                        >= self._max_admitted_queue
+                                    ):
+                                        self.event_sender.send(
+                                            ChunkGenerated(
+                                                command_id=task.command_id,
+                                                chunk=ErrorChunk(
+                                                    model=self.shard_metadata.model_card.model_id,
+                                                    error_message="Native image engine admission limit reached",
+                                                ),
+                                            )
+                                        )
                                         self.send_task_status(task, TaskStatus.Failed)
                                         self._retire_task_id(task.task_id)
                                         continue
@@ -355,9 +376,8 @@ class ServedConcurrentDispatch:
                                     if self._is_cancelled(task.task_id):
                                         cancelled_while_waiting = True
                                         break
-                                if (
-                                    not cancelled_while_waiting
-                                    and self._is_cancelled(task.task_id)
+                                if not cancelled_while_waiting and self._is_cancelled(
+                                    task.task_id
                                 ):
                                     cancelled_while_waiting = True
                             finally:
@@ -513,7 +533,11 @@ class ServedConcurrentDispatch:
                 failed = task.task_id in self._failed_generation_ids
             self.send_task_status(
                 task,
-                TaskStatus.Cancelled if was_cancelled else TaskStatus.Failed if failed else TaskStatus.Complete,
+                TaskStatus.Cancelled
+                if was_cancelled
+                else TaskStatus.Failed
+                if failed
+                else TaskStatus.Complete,
             )
         finally:
             with self._admission_lock:

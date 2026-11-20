@@ -17,11 +17,13 @@ from skulk.download.download_utils import (
     map_repo_download_progress_to_download_progress_data,
     model_companions_present_on_disk,
     resolve_model_in_path,
+    resolve_native_music_source_directory,
 )
 from skulk.download.shard_downloader import ShardDownloader
 from skulk.routing.router import TelemetrySender
 from skulk.shared.constants import SKULK_MODELS_DIR
 from skulk.shared.models.model_cards import (
+    ModelCard,
     ModelId,
     get_model_cards,
     register_installed_card_record,
@@ -57,6 +59,7 @@ from skulk.store.config import resolve_config_path, update_skulk_config_atomic
 from skulk.store.installed_cards import (
     refresh_registry_installed_card_if_same_artifact,
 )
+from skulk.store.model_store_client import ModelStoreDownloader
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.task_group import TaskGroup
 
@@ -134,6 +137,33 @@ class DownloadCoordinator:
     def _model_dir(self, model_id: ModelId) -> str:
         return str(SKULK_MODELS_DIR / model_id.normalize())
 
+    def _can_reuse_canonical_separator(self, card: ModelCard) -> bool:
+        """Permit index shortcuts only when the separator loads without staging."""
+        return (
+            card.separation is not None
+            and isinstance(self.shard_downloader, ModelStoreDownloader)
+            and not self.shard_downloader.staging_enabled
+        )
+
+    def _is_read_only_path(self, model_id: ModelId, directory: Path) -> bool:
+        """Permit cache deletion only inside actual node cache custody."""
+        staging_root = self.staging_cache_path
+        if isinstance(self.shard_downloader, ModelStoreDownloader):
+            if self.shard_downloader.is_store_owned_path(directory):
+                return True
+            staging_root = self.shard_downloader.staging_cache_path
+        resolved = directory.expanduser().resolve()
+        default_root = Path(self._model_dir(model_id)).resolve()
+        if resolved == default_root or resolved.is_relative_to(default_root):
+            return False
+        if staging_root is not None:
+            root = staging_root.expanduser().resolve()
+            if resolved != root and resolved.is_relative_to(root):
+                return False
+        # A shared Store or other SKULK_MODELS_PATH root is external custody,
+        # even on a worker whose Store client has no local authoritative root.
+        return True
+
     async def _resolve_or_refresh_complete_artifact(
         self,
         shard: ShardMetadata,
@@ -156,10 +186,36 @@ class DownloadCoordinator:
         """
 
         card = shard.model_card
+        if card.native_music_artifact_sources():
+            if card.source_revision is None:
+                return None
+            # Ordinary store generations include source/bundle suffixes that
+            # the legacy model-layout lookup cannot discover. Native readiness
+            # must use recorded complete selections and exact owning policy.
+            native = await asyncio.to_thread(resolve_native_music_source_directory,
+                card, str(card.artifact_repository), card.source_revision,
+                require_card_identity=True,
+            )
+            if native is not None:
+                return native
+            if card.registry_card_id is not None:
+                retained = await asyncio.to_thread(resolve_native_music_source_directory,
+                    card, str(card.artifact_repository), card.source_revision,
+                )
+                if retained is not None:
+                    refreshed = await asyncio.to_thread(
+                        refresh_registry_installed_card_if_same_artifact,
+                        retained, card,
+                    )
+                    if refreshed is not None:
+                        register_installed_card_record(refreshed)
+                        return retained
+            return None
         exact = resolve_model_in_path(
             card.model_id,
             card.source_revision,
             expected_card=card,
+            include_store_index=self._can_reuse_canonical_separator(card),
             artifact_root=(
                 card.artifact_bundle.root if card.artifact_bundle is not None else None
             ),
@@ -168,8 +224,6 @@ class DownloadCoordinator:
             return exact
 
         candidates: list[Path] = []
-        if candidate is not None:
-            candidates.append(candidate.parent if candidate.is_file() else candidate)
         retained_path = resolve_model_in_path(
             card.model_id,
             card.source_revision,
@@ -177,6 +231,19 @@ class DownloadCoordinator:
                 card.artifact_bundle.root if card.artifact_bundle is not None else None
             ),
         )
+        if candidate is not None:
+            directory = candidate.parent if candidate.is_file() else candidate
+            # A byte-complete startup probe is not proof that a cardless loader
+            # can find this copy. Store-direct canonical copies must pass the
+            # exact index lookup above; a supplied path cannot replace it.
+            if (
+                directory.resolve() == Path(self._model_dir(card.model_id)).resolve()
+                or (
+                    retained_path is not None
+                    and directory.resolve() == retained_path.resolve()
+                )
+            ):
+                candidates.append(directory)
         if retained_path is not None:
             candidates.append(retained_path)
         if card.registry_card_id is not None:
@@ -651,6 +718,19 @@ class DownloadCoordinator:
             )
             return
 
+        # Validate grouped native selection before a status probe: malformed
+        # selection must fail this request, not the coordinator's task group.
+        try:
+            native_sources = shard.model_card.native_music_artifact_sources()
+        except ValueError as error:
+            self._begin_attempt(model_id)
+            self._reset_progress_throttle(model_id)
+            await self._emit_status(DownloadFailed(
+                shard_metadata=shard, node_id=self.node_id,
+                error_message=str(error), model_directory=self._model_dir(model_id),
+            ))
+            return
+
         if retrying_failed:
             # Only an explicit operator start consumes this terminal outcome.
             # Periodic planner commands must not create a repeated-failure loop.
@@ -671,7 +751,15 @@ class DownloadCoordinator:
             # clear the stale status and re-download from scratch.
             elif isinstance(status, DownloadCompleted) and status.model_directory:
                 model_dir = Path(status.model_directory)
-                if not model_dir.is_dir() or not (model_dir / "config.json").exists():
+                native_path = await self._resolve_or_refresh_complete_artifact(shard) if native_sources else None
+                if (
+                    not model_dir.is_dir()
+                    or not (model_dir / "config.json").exists()
+                    or (native_sources and (
+                        native_path != model_dir
+                        or not await asyncio.to_thread(model_companions_present_on_disk, shard.model_card, self.offline)
+                    ))
+                ):
                     logger.info(
                         f"DownloadCoordinator: {model_id} was DownloadCompleted but "
                         "its directory is stale; re-downloading"
@@ -707,7 +795,7 @@ class DownloadCoordinator:
         # hiding a loadable base behind a doomed download would produce
         # DownloadFailed for a usable model, but advertising a vision model
         # without its weights would hand out a broken one.
-        if found_path is not None and not model_companions_present_on_disk(
+        if found_path is not None and not await asyncio.to_thread(model_companions_present_on_disk,
             shard.model_card, required_only=self.offline
         ):
             logger.info(
@@ -739,9 +827,19 @@ class DownloadCoordinator:
         await self._emit_status(progress)
 
         # Check initial status from downloader
-        initial_progress = (
-            await self.shard_downloader.get_shard_download_status_for_shard(shard)
-        )
+        try:
+            initial_progress = (
+                await self.shard_downloader.get_shard_download_status_for_shard(shard)
+            )
+        except (FileNotFoundError, ValueError) as error:
+            # A successful listing can still contradict its exact selection.
+            # This request must fail without retiring the shared command loop.
+            self._reset_progress_throttle(model_id)
+            await self._emit_status(DownloadFailed(
+                shard_metadata=shard, node_id=self.node_id,
+                error_message=str(error), model_directory=self._model_dir(model_id),
+            ))
+            return
 
         completed_path = (
             await self._resolve_or_refresh_complete_artifact(
@@ -757,6 +855,7 @@ class DownloadCoordinator:
                 node_id=self.node_id,
                 total=initial_progress.total,
                 model_directory=str(completed_path),
+                read_only=self._is_read_only_path(model_id, completed_path),
             )
             await self._emit_status(completed)
             return
@@ -814,6 +913,7 @@ class DownloadCoordinator:
                         node_id=self.node_id,
                         total=shard.model_card.storage_size,
                         model_directory=str(path.parent if path.is_file() else path),
+                        read_only=self._is_read_only_path(model_id, path),
                     )
                     await self._emit_status(completed)
                     self._reset_progress_throttle(model_id)
@@ -846,12 +946,16 @@ class DownloadCoordinator:
         # waiting for cancellation cleanup to release task ownership.
         self._pending_download_starts.pop(model_id, None)
 
-        # Protect read-only models (from SKULK_MODELS_PATH) from deletion
+        # A retained status can predate custody classification. Never let cache
+        # deletion bypass the authoritative Store's indexed removal lifecycle.
         if model_id in self.download_status:
             current = self.download_status[model_id]
-            if isinstance(current, DownloadCompleted) and current.read_only:
+            if isinstance(current, DownloadCompleted) and (
+                current.read_only
+                or self._is_read_only_path(model_id, Path(current.model_directory))
+            ):
                 logger.warning(
-                    f"Refusing to delete read-only model {model_id} (from SKULK_MODELS_PATH)"
+                    f"Refusing to delete read-only or Store-owned model {model_id}"
                 )
                 return
 
@@ -947,6 +1051,9 @@ class DownloadCoordinator:
                                     shard_metadata=progress.shard,
                                     total=progress.total,
                                     model_directory=str(completed_path),
+                                    read_only=self._is_read_only_path(
+                                        model_id, completed_path
+                                    ),
                                 )
                             else:
                                 status = DownloadPending(
@@ -1012,6 +1119,7 @@ class DownloadCoordinator:
                             mid,
                             card.source_revision,
                             expected_card=card,
+                            include_store_index=self._can_reuse_canonical_separator(card),
                             artifact_root=(
                                 card.artifact_bundle.root
                                 if card.artifact_bundle is not None

@@ -15,12 +15,19 @@ from skulk.recovery.record import (
     ClusterIntentRecord,
     PlacementIntent,
     RecoveryStamp,
+    derive_cluster_intent,
 )
 from skulk.recovery.restore import (
     HOST_WAIT_AFTER_SETTLE_SECONDS,
     INFO_WAIT_AFTER_SETTLE_SECONDS,
 )
-from skulk.recovery.tests.fixtures import KITE1, KITE2, sample_instance, sample_proposal
+from skulk.recovery.tests.fixtures import (
+    KITE1,
+    KITE2,
+    sample_instance,
+    sample_proposal,
+    sample_state,
+)
 from skulk.shared.apply import apply
 from skulk.shared.models.model_cards import ModelCard, ModelTask
 from skulk.shared.session_carryover import seed_state_for_new_session
@@ -696,10 +703,10 @@ async def test_an_instance_dying_with_the_old_master_does_not_count_as_restored(
     assert isinstance(events[-1], RestartRecoveryCompleted)
 
 
-async def test_an_absent_machines_exclusion_is_kept_by_install_id(
+async def test_restored_exclusions_survive_an_excluded_machines_new_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A machine excluded before the restart that has not come back yet."""
+    """A fresh recorder retains exclusions without the old session's identity map."""
     absent = UUID("33333333-3333-4333-8333-333333333333")
     intent = PlacementIntent(
         model_id=ModelId("org/model"),
@@ -721,7 +728,24 @@ async def test_an_absent_machines_exclusion_is_kept_by_install_id(
 
     command = planner.commands[0]
     assert command.excluded_nodes == [PEER]
-    assert command.excluded_install_ids == [absent]
+    assert command.excluded_install_ids == [KITE2, absent]
+
+    restored = sample_instance("restored", "org/model", (str(LOCAL_NODE),))
+    restored = restored.model_copy(
+        update={
+            "excluded_nodes": command.excluded_nodes,
+            "excluded_install_ids": command.excluded_install_ids,
+        }
+    )
+    # A rejoining node sees the excluded machine's new peer ID, not the
+    # historical peer ID stamped on an existing restored instance.
+    fresh_record = derive_cluster_intent(
+        sample_state().model_copy(update={"instances": {restored.instance_id: restored}}),
+        install_ids={LOCAL_NODE: KITE1, NodeId("excluded-new-session"): KITE2},
+        session_id=SessionId(master_node_id=LOCAL_NODE, election_clock=1),
+        written_at=datetime.now(tz=timezone.utc),
+    )
+    assert set(fresh_record.placements[0].excluded_install_ids) == {KITE2, absent}
 
 
 async def test_a_departed_peer_that_may_hold_a_fresher_record_is_waited_for(

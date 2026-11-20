@@ -90,6 +90,8 @@ from skulk.store.installed_cards import (
     InstalledCardRecord,
     build_file_manifest,
     build_installed_card_record,
+    companion_owner_matches,
+    installed_artifact_deleted,
     manifest_sha256,
     read_installed_card,
     unlink_relative_artifact_path_without_following,
@@ -112,8 +114,14 @@ _RECONCILIATION_TOMBSTONES_RELATIVE_PATH = (
 def _remaining_store_download_bytes(
     target_directory: Path,
     file_list: list[FileListEntry],
+    expected_files: dict[str, tuple[int, str | None]] | None = None,
 ) -> int:
-    """Return physical file bytes still needed for one canonical transfer."""
+    """Budget replacement bytes, verifying selected immutable pins off-loop.
+
+    The caller holds the transfer fence until this read has settled. A corrupt
+    same-size file is a replacement, not a complete download. Its other links
+    retain their blocks when the canonical name is removed.
+    """
 
     remaining_bytes = 0
     for file_entry in file_list:
@@ -128,8 +136,21 @@ def _remaining_store_download_bytes(
         partial = target_directory / f"{file_entry.path}.partial"
         target_stat = target.stat() if target.is_file() else None
         target_bytes = target_stat.st_size if target_stat is not None else 0
-        if target_bytes == expected_size:
-            continue
+        # Missing zero-byte members still need the downloader to create them.
+        # Equal byte counts alone must not trigger a hash read of no file.
+        if target_stat is not None and target_bytes == expected_size:
+            selected = expected_files.get(file_entry.path) if expected_files else None
+            object_id = selected[1] if selected is not None else None
+            if object_id is None:
+                continue
+            if object_id.startswith("sha256:"):
+                observed = "sha256:" + _sha256_path(target)
+            elif object_id.startswith("git-sha1:"):
+                observed = _git_object_id(target, expected_size)
+            else:
+                raise ValueError("Cannot budget an unknown immutable object identity")
+            if observed == object_id:
+                continue
         resumable_bytes = partial.stat().st_size if partial.is_file() else 0
         # A mismatched single-link target is removed before download, returning
         # its current blocks to this filesystem. When staging hardlinked the
@@ -144,6 +165,38 @@ def _remaining_store_download_bytes(
             expected_size - reclaimable_target_bytes - resumable_bytes,
         )
     return remaining_bytes
+
+
+async def _settled_store_io[Value](call: Callable[[], Value]) -> Value:
+    """Join owned filesystem work before cancellation releases its store fence."""
+    task = asyncio.create_task(asyncio.to_thread(call))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            failure = task.exception()
+            if failure is not None:
+                logger.debug(
+                    "Store I/O finished after cancellation: {}", type(failure).__name__
+                )
+        raise
+
+
+def _git_object_id(path: Path, size_bytes: int) -> str:
+    """Read one Git-pinned bundle member without importing repository code."""
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(f"blob {size_bytes}\0".encode())
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return "git-sha1:" + digest.hexdigest()
 
 
 def _sha256_path(path: Path) -> str:
@@ -264,17 +317,21 @@ def select_store_gguf_download_files(
 
 
 def transfer_bundle(
-    model_card: ModelCard | None, artifact_role: InstalledArtifactRole
+    model_card: ModelCard | None, artifact_role: InstalledArtifactRole,
+    repository: str | None = None, revision: str | None = None,
 ) -> ArtifactBundleConfig | None:
-    """The signed bundle that selects a transfer's files, for a base artifact only.
+    """Select the exact files of this immutable repository transaction.
 
-    A companion transfer carries its owning card for trust and ownership, but
-    the owner's bundle lists the owner's files, which the companion's
-    repository does not hold; applying it there would refuse every companion.
+    Native groups include every role held by the requested source. Other
+    companions must not inherit the owner's base bundle, whose files do not
+    belong to their repository. Loader roots stay on the owning card.
     """
-    if model_card is None or artifact_role != "base":
+    if model_card is None:
         return None
-    return model_card.artifact_bundle
+    for source in model_card.native_music_artifact_sources():
+        if (source.repository, source.revision) == (repository, revision):
+            return source.download_bundle()
+    return model_card.artifact_bundle if artifact_role == "base" else None
 
 
 def video_companion_selection(
@@ -326,6 +383,25 @@ def select_store_image_files(
         for item in select_store_artifact_bundle_files(file_list, model_card):
             existing.setdefault(item.path, item)
         selected = list(existing.values())
+    return selected
+
+
+def select_store_native_music_files(
+    file_list: list[FileListEntry], model_card: ModelCard, repository: str, revision: str
+) -> list[FileListEntry]:
+    """Select the complete native source group, refusing absent or stale objects."""
+    expected = model_card.native_music_files_for_source(repository, revision)
+    if not expected:
+        raise ValueError("native music source is not declared by its owning card")
+    listed = {item.path: item for item in file_list}
+    selected: list[FileListEntry] = []
+    for item in expected:
+        observed = listed.get(item.path)
+        if observed is None:
+            raise FileNotFoundError(f"Native music component file is absent: {item.path}")
+        if observed.size != item.size_bytes:
+            raise ValueError(f"Native music component size mismatch: {item.path}")
+        selected.append(observed)
     return selected
 
 
@@ -637,6 +713,42 @@ class ModelStore:
         finally:
             self._download_transfer_lock.release()
 
+    @asynccontextmanager
+    async def _download_admission(
+        self, model_id: str, verify_native_cache: Callable[[], bool] | None
+    ) -> AsyncIterator[bool]:
+        """Verify reusable native bytes without blocking transfer cancellation.
+
+        Pending requests and new aliases need only the short admission lock.
+        Cache readers wait for the publication fence without that lock, then
+        recheck the exact status before admitting a result. Keep the fence while
+        using the verified bytes. An off-thread sidecar refresh must also drain
+        before cancellation releases this fence.
+        """
+        if verify_native_cache is None:
+            async with self._download_lock:
+                yield True
+            return
+        while True:
+            async with self._download_lock:
+                observed = self._active_downloads.get(model_id)
+                observed_status = observed.status if observed is not None else None
+                if observed_status in {"pending", "downloading"} or (
+                    observed_status != "complete" and not self.is_in_store(model_id)
+                ):
+                    yield False
+                    return
+            async with self._download_transfer_lock:
+                verified = await _settled_store_io(verify_native_cache)
+                async with self._download_lock:
+                    current = self._active_downloads.get(model_id)
+                    if current is not observed or (
+                        current is not None and current.status != observed_status
+                    ):
+                        continue
+                    yield verified
+                    return
+
     def get_store_path(self, model_id: str) -> Path | None:
         """Return the absolute path to *model_id*'s directory, or ``None``.
 
@@ -724,11 +836,16 @@ class ModelStore:
         source_repository: str | None,
         model_card: ModelCard | None = None,
         artifact_role: InstalledArtifactRole = "base",
+        *, verify_hashes: bool = False,
     ) -> bool:
         """Return whether the canonical entry matches the complete byte source.
 
         A companion is matched by repository and revision: ``model_card`` is its
         owner then, whose bundle describes the owner's bytes, not the companion's.
+        ``verify_hashes`` additionally checks retained digests and original
+        native object pins. Cache admission calls that mode in a background
+        thread while holding the canonical publication fence; inventory probes
+        retain the metadata-only default.
         """
         entry = self.get_entry(model_id)
         if entry is None or entry.source_revision != source_revision:
@@ -737,6 +854,24 @@ class ModelStore:
         requested_repository = source_repository or model_id
         if registered_repository != requested_repository:
             return False
+        if model_card is not None and model_card.native_music_artifact_sources():
+            expected = model_card.native_music_files_for_source(requested_repository, source_revision)
+            installed = entry.installed_card
+            model_path = _resolve_store_child_path(self._store_path, entry.store_path)
+            if not expected or installed is None or model_path is None or installed.artifact_role != artifact_role:
+                return False
+            if (
+                expected != installed.model_card.native_music_files_for_source(requested_repository, source_revision)
+                or not verify_installed_card(model_path, installed, verify_hashes=verify_hashes)
+            ):
+                return False
+            if artifact_role == "base":
+                deleted = read_reconciliation_tombstones(self._store_path)
+                return all(str(source.model_id()) not in deleted and any(self.entry_matches_artifact(
+                    alias, source.revision, source.repository, model_card, "music_component", verify_hashes=verify_hashes
+                ) for alias in (str(source.model_id()), source.repository)) for source in model_card.native_music_artifact_sources()
+                    if source.repository != str(model_card.artifact_repository))
+            return artifact_role == "music_component"
         if artifact_role == "video_companion" and model_card is not None:
             return self._entry_holds_companion_files(
                 entry, model_card, requested_repository, source_revision
@@ -748,7 +883,7 @@ class ModelStore:
         if installed is None or installed.artifact_bundle_id != bundle.bundle_id:
             return False
         model_path = _resolve_store_child_path(self._store_path, entry.store_path)
-        if model_path is None or not verify_installed_card(model_path, installed):
+        if model_path is None or not verify_installed_card(model_path, installed, verify_hashes=verify_hashes):
             return False
         installed_sizes = {item.path: item.size_bytes for item in installed.files}
         requested_sizes = {item.path: item.size_bytes for item in bundle.files}
@@ -1225,7 +1360,7 @@ class ModelStore:
         for model_id, entry in tuple(registry.items()):
             retained = entry.installed_card
             if model_id in tombstoned_aliases or (
-                retained is not None and retained.owner_model_id in tombstoned_aliases
+                retained is not None and installed_artifact_deleted(retained, tombstoned_aliases)
             ):
                 del registry[model_id]
                 changed = True
@@ -1243,6 +1378,22 @@ class ModelStore:
                 )
             except (OSError, ValueError):
                 adjacent = None
+            if (
+                model_directory is not None
+                and adjacent is None
+                and retained.model_card.native_music_artifact_sources()
+                and not (model_directory / INSTALLED_CARD_RELATIVE_PATH).exists()
+                and not (model_directory / INSTALLED_CARD_RELATIVE_PATH).is_symlink()
+                and verify_installed_card(
+                    model_directory, retained, verify_hashes=True
+                )
+            ):
+                # The intact index is another retained copy of this owner's
+                # record. Verify every original object before restoring only
+                # the absent sidecar; otherwise startup would discard the last
+                # metadata needed for an offline repair of healthy bytes.
+                write_installed_card(model_directory, retained)
+                adjacent = retained
             if (
                 model_directory is None
                 or adjacent != retained
@@ -1268,10 +1419,7 @@ class ModelStore:
                 continue
             if record is None:
                 continue
-            if record.artifact_model_id in tombstoned_aliases or (
-                record.owner_model_id is not None
-                and record.owner_model_id in tombstoned_aliases
-            ):
+            if installed_artifact_deleted(record, tombstoned_aliases):
                 logger.info(
                     "ModelStore: suppressing sidecar recovery for "
                     f"operator-deleted alias {record.artifact_model_id}"
@@ -1514,6 +1662,10 @@ class ModelStore:
         cards sharing preprocessors then share one transfer instead of the
         second being refused. Every other artifact belongs to one owner.
         """
+        if existing.artifact_role == "music_component":
+            repository = existing.source_repository or existing.model_id
+            expected = model_card.native_music_files_for_source(repository, existing.source_revision) if model_card is not None else ()
+            return bool(expected) and existing.model_card is not None and expected == existing.model_card.native_music_files_for_source(repository, existing.source_revision)
         if existing.artifact_role == "video_companion":
             repository = existing.source_repository or existing.model_id
             requested = video_companion_selection(
@@ -1563,6 +1715,15 @@ class ModelStore:
             raise ValueError(
                 f"cannot attach a card to unavailable store model {model_id}"
             )
+        if artifact_role == "music_component" and entry.installed_card is not None and (
+            companion_owner_matches(entry.installed_card, model_card)
+            and verify_installed_card(model_path, entry.installed_card, verify_hashes=True)
+        ):
+            # Sharing authenticated data never rewrites another owner's card
+            # or grants that owner's execution policy to the requesting model.
+            if read_installed_card(model_path) != entry.installed_card:
+                write_installed_card(model_path, entry.installed_card)
+            return
         record = build_installed_card_record(
             model_path,
             model_card,
@@ -1626,6 +1787,17 @@ class ModelStore:
         and owning identities instead of synthesizing a bare model card.
         """
         requested_repository = source_repository or model_id
+        native_sources = model_card.native_music_artifact_sources() if model_card is not None else ()
+        if model_card is not None and native_sources:
+            expected_role = "base" if requested_repository == str(model_card.artifact_repository) else "music_component"
+            if artifact_role != expected_role or not model_card.native_music_files_for_source(requested_repository, source_revision):
+                raise ValueError("native music request disagrees with its complete pinned source selection")
+            expected_alias = str(model_card.model_id) if artifact_role == "base" else next(
+                str(source.model_id()) for source in model_card.native_music_artifact_sources()
+                if (source.repository, source.revision) == (requested_repository, source_revision)
+            )
+            if model_id not in {expected_alias, requested_repository} or (artifact_role == "base" and model_id != expected_alias):
+                raise ValueError("native music request disagrees with its exact source alias")
         pinned_projector = (
             model_card.vision.projector_file
             if model_card is not None and model_card.vision is not None
@@ -1663,7 +1835,44 @@ class ModelStore:
             self.entry_file_requires_recovery(model_id, item.path, item.size_bytes)
             for item in image_files
         )
-        async with self._download_lock:
+        if model_card is not None:
+            missing_companion = missing_companion or any(
+                self.entry_file_requires_recovery(model_id, item.path, item.size_bytes)
+                for item in model_card.native_music_files_for_source(requested_repository, source_revision)
+            )
+        def verify_native_cache() -> bool:
+            complete = self.entry_matches_artifact(
+                model_id, source_revision, requested_repository, model_card,
+                artifact_role, verify_hashes=True,
+            )
+            if complete and model_card is not None:
+                if artifact_role == "base":
+                    for source in native_sources:
+                        if source.repository == str(model_card.artifact_repository):
+                            continue
+                        for alias in (str(source.model_id()), source.repository):
+                            if self.entry_matches_artifact(
+                                alias, source.revision, source.repository,
+                                model_card, "music_component",
+                            ):
+                                # The complete hash check above covered this
+                                # source too. Restore its original retained
+                                # owner record before serving cached success.
+                                self._ensure_installed_card(
+                                    alias, model_card, "music_component",
+                                    str(model_card.model_id), model_card.registry_card_id,
+                                    None,
+                                )
+                                break
+                self._ensure_installed_card(
+                    model_id, model_card, artifact_role, owner_model_id,
+                    owner_card_id, pinned_gguf,
+                )
+            return complete
+
+        async with self._download_admission(
+            model_id, verify_native_cache if native_sources else None
+        ) as native_cache_verified:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
                 existing_repository = existing.source_repository or model_id
@@ -1700,6 +1909,7 @@ class ModelStore:
                 # concurrent requests.
                 stale_complete = existing.status == "complete" and (
                     missing_projector
+                    or not native_cache_verified
                     or missing_pinned_gguf
                     or missing_companion
                     or existing.source_revision != source_revision
@@ -1743,27 +1953,18 @@ class ModelStore:
                 and not missing_pinned_gguf
                 and not missing_companion
                 and not artifact_mismatch
+                and native_cache_verified
             ):
-                if model_card is not None:
+                if model_card is not None and not native_sources:
                     await asyncio.to_thread(
-                        self._ensure_installed_card,
-                        model_id,
-                        model_card,
-                        artifact_role,
-                        owner_model_id,
-                        owner_card_id,
-                        pinned_gguf,
+                        self._ensure_installed_card, model_id, model_card,
+                        artifact_role, owner_model_id, owner_card_id, pinned_gguf,
                     )
                 return StoreDownloadStatus(
-                    model_id=model_id,
-                    source_revision=source_revision,
-                    source_repository=requested_repository,
-                    status="complete",
-                    progress=1.0,
-                    model_card=model_card,
-                    artifact_role=artifact_role,
-                    owner_model_id=owner_model_id,
-                    owner_card_id=owner_card_id,
+                    model_id=model_id, source_revision=source_revision,
+                    source_repository=requested_repository, status="complete",
+                    progress=1.0, model_card=model_card, artifact_role=artifact_role,
+                    owner_model_id=owner_model_id, owner_card_id=owner_card_id,
                 )
             if missing_projector:
                 logger.warning(
@@ -1858,6 +2059,19 @@ class ModelStore:
             task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        async with self._download_lock:
+            # A task cancelled before its coroutine starts never reaches the
+            # downloader's cancellation handler/finally block. Settle only this
+            # exact admission; a newer retry must retain its own status/owner.
+            if (
+                task.cancelled()
+                and self._download_tasks_by_model.get(model_id) is task
+                and self._active_downloads.get(model_id) is status
+                and status.status in {"pending", "downloading"}
+            ):
+                status.status = "cancelled"
+                status.error = None
+                del self._download_tasks_by_model[model_id]
         final_status = self.get_download_status(model_id)
         return (
             final_status
@@ -1918,12 +2132,10 @@ class ModelStore:
         parsed = urlsplit(source_base_url)
         if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
             raise ValueError("source_base_url must be an HTTP(S) node API")
+        native_source = bool(record.model_card.native_music_artifact_sources())
         async with self._download_transfer_lock:
             tombstones = read_reconciliation_tombstones(self._store_path)
-            if record.artifact_model_id in tombstones or (
-                record.owner_model_id is not None
-                and record.owner_model_id in tombstones
-            ):
+            if installed_artifact_deleted(record, tombstones):
                 raise ValueError(
                     f"peer import is suppressed by an operator-deletion tombstone "
                     f"for {record.owner_model_id or record.artifact_model_id}"
@@ -1934,6 +2146,8 @@ class ModelStore:
                 if existing is not None
                 else None
             )
+            # Older indexed replicas can predate original Git-pin checks;
+            # reuse must verify the received trusted selection too.
             if (
                 existing is not None
                 and existing.installed_card is not None
@@ -1941,7 +2155,10 @@ class ModelStore:
                 == record.installed_identity
                 and existing.installed_card.manifest_sha256 == record.manifest_sha256
                 and existing_path is not None
-                and verify_installed_card(existing_path, existing.installed_card)
+                and await asyncio.to_thread(
+                    verify_installed_card, existing_path, record,
+                    verify_hashes=native_source,
+                )
             ):
                 return existing
             import_root = self._store_path / ".imports"
@@ -2034,9 +2251,16 @@ class ModelStore:
                             f"peer export size mismatch for {manifest_entry.path}"
                         )
                     partial.replace(destination)
-            imported_files = build_file_manifest(temporary)
+            imported_files = await asyncio.to_thread(build_file_manifest, temporary)
             if manifest_sha256(imported_files) != record.manifest_sha256:
                 raise RuntimeError("peer export manifest digest mismatch")
+            # The peer controls its transfer manifest. Native Git-pinned
+            # metadata must also match the original owning card before any
+            # canonical generation is replaced or marked registry-verified.
+            if native_source and not await asyncio.to_thread(
+                verify_installed_card, temporary, record, verify_hashes=True,
+            ):
+                raise ValueError("native music peer artifact differs from its complete pinned source")
             final_name = (
                 record.artifact_model_id.replace("/", "--")
                 + "--installed-"
@@ -2068,23 +2292,51 @@ class ModelStore:
                 raise RuntimeError("peer import committed without a registry entry")
             return imported
 
+    async def _ensure_native_music_companions(self, card: ModelCard) -> None:
+        """Await every required native source before completing its base download.
+
+        This runs before taking the transfer lock. Child downloads use ordinary
+        store admission and may be shared by another request; cancelling the
+        parent leaves their verified cache usable but never completes the base.
+        """
+        for source in card.native_music_artifact_sources():
+            if source.repository == str(card.artifact_repository):
+                continue
+            alias = str(source.model_id())
+            status = await self.request_download(
+                alias, source_revision=source.revision,
+                source_repository=source.repository, model_card=card,
+                artifact_role="music_component", owner_model_id=str(card.model_id),
+                owner_card_id=card.registry_card_id,
+            )
+            task = self._download_tasks_by_model.get(alias)
+            if task is not None:
+                await asyncio.shield(task)
+            if status.status != "complete" or not self.entry_matches_artifact(
+                alias, source.revision, source.repository, card, "music_component"
+            ):
+                raise RuntimeError(f"Required native music source {source.repository} did not complete: {status.error or status.status}")
+
     async def _reuse_verified_bundle_files(
         self,
         target_directory: Path,
         model_card: ModelCard,
+        *, bundle: ArtifactBundleConfig | None = None,
+        repository: str | None = None, revision: str | None = None,
     ) -> frozenset[str]:
-        """Hardlink exact signed members from registered immutable artifacts.
+        """Hardlink original-pinned members from registered immutable artifacts.
 
         The caller holds the canonical transfer lock through reuse, capacity
         admission and registration. Hashing only reads in a thread; linking
         happens after the await so cancellation cannot leave a background writer
         running after that lock is released.
         """
-        bundle = model_card.artifact_bundle
-        revision = model_card.source_revision
-        if bundle is None or revision is None or model_card.registry_card_id is None:
+        bundle = bundle or model_card.artifact_bundle
+        revision = revision or model_card.source_revision
+        native = bool(model_card.native_music_artifact_sources())
+        if bundle is None or revision is None or (model_card.registry_card_id is None and not native):
             return frozenset()
-        repository = str(model_card.artifact_repository)
+        repository = repository or str(model_card.artifact_repository)
         target_root = target_directory.resolve()
         store_root = self._store_path.resolve()
         if target_root == store_root or not target_root.is_relative_to(store_root):
@@ -2097,7 +2349,7 @@ class ModelStore:
         )
         reused: set[str] = set()
         for member in bundle.files:
-            if member.object_id is None or not member.object_id.startswith("sha256:"):
+            if member.object_id is None or not member.object_id.startswith(("sha256:", "git-sha1:") if native else ("sha256:",)):
                 continue
             destination = target_root / member.path
             if destination.exists() or destination.is_symlink():
@@ -2116,13 +2368,16 @@ class ModelStore:
                 try:
                     if source.stat().st_size != member.size_bytes:
                         continue
-                    digest = await asyncio.to_thread(_sha256_path, source)
+                    if member.object_id.startswith("sha256:"):
+                        observed = "sha256:" + await asyncio.to_thread(_sha256_path, source)
+                    else:
+                        observed = await asyncio.to_thread(_git_object_id, source, member.size_bytes)
                 except OSError as error:
                     logger.debug(
                         f"ModelStore: cannot verify reusable {member.path}: {error}"
                     )
                     continue
-                if f"sha256:{digest}" != member.object_id:
+                if observed != member.object_id:
                     continue
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if not destination.parent.resolve().is_relative_to(target_root):
@@ -2186,7 +2441,7 @@ class ModelStore:
                 :12
             ]
             sanitized = f"{sanitized}--source-{repository_digest}"
-        bundle = transfer_bundle(model_card, artifact_role)
+        bundle = transfer_bundle(model_card, artifact_role, artifact_repository, source_revision)
         if bundle is not None:
             sanitized = (
                 f"{sanitized}--bundle-{bundle.bundle_id.removeprefix('bundle_')[:16]}"
@@ -2200,6 +2455,8 @@ class ModelStore:
         )
 
         try:
+            if artifact_role == "base" and model_card is not None:
+                await self._ensure_native_music_companions(model_card)
             if source_revision is None and (
                 (target_dir / _SOURCE_REVISION_MARKER).exists()
                 or (target_dir / _SOURCE_REVISION_STAGING_MARKER).exists()
@@ -2233,6 +2490,9 @@ class ModelStore:
             # glob is retained by ``gguf_allow_patterns``, so a vision GGUF keeps
             # its ``*mmproj*.gguf``.
             selected_files = (
+                select_store_native_music_files(repo_file_list, model_card, artifact_repository, revision)
+                if model_card is not None and model_card.native_music_artifact_sources()
+                else
                 select_store_image_files(
                     repo_file_list, model_card, artifact_repository, revision
                 )
@@ -2292,32 +2552,16 @@ class ModelStore:
             # after lock acquisition makes that status truthful.
             status.status = "downloading"
             reused_files = (
-                await self._reuse_verified_bundle_files(target_dir, model_card)
+                await self._reuse_verified_bundle_files(target_dir, model_card,
+                    bundle=bundle, repository=artifact_repository, revision=source_revision)
                 if model_card is not None
                 and bundle is not None
-                and model_card.source_revision == source_revision
-                and str(model_card.artifact_repository) == artifact_repository
+                and (model_card.native_music_artifact_sources() or (
+                    model_card.source_revision == source_revision
+                    and str(model_card.artifact_repository) == artifact_repository
+                ))
                 else frozenset()
             )
-            additional_bytes = await asyncio.to_thread(
-                _remaining_store_download_bytes,
-                target_dir,
-                file_list,
-            )
-            if additional_bytes > 0:
-                free_bytes = await asyncio.to_thread(
-                    lambda: shutil.disk_usage(target_dir).free
-                )
-                required_free_bytes = additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
-                if free_bytes < required_free_bytes:
-                    raise ModelStoreCapacityError(
-                        f"Insufficient canonical model-store disk capacity for "
-                        f"{model_id}: need {required_free_bytes / 2**30:.1f} GiB "
-                        "free for the remaining transfer and operating-system "
-                        f"reserve, but only {free_bytes / 2**30:.1f} GiB is "
-                        "available. Free disk space or move the model store."
-                    )
-            downloaded_bytes = 0
             # Exact sizes (and object ids when signed) each selected file must
             # arrive at: the base bundle's, or a video companion's declared sizes.
             expected_files: dict[str, tuple[int, str | None]] = (
@@ -2337,6 +2581,11 @@ class ModelStore:
                     and str(item.repo) == artifact_repository
                 }
             )
+            if model_card is not None:
+                expected_files.update(
+                    (item.path, (item.size_bytes, item.object_id))
+                    for item in model_card.native_music_files_for_source(artifact_repository, revision)
+                )
 
             if model_card is not None and model_card.image is not None:
                 expected_files.update(
@@ -2347,6 +2596,27 @@ class ModelStore:
                         )
                     }
                 )
+
+            additional_bytes = await _settled_store_io(
+                lambda: _remaining_store_download_bytes(
+                    target_dir, file_list, expected_files
+                )
+            )
+            if additional_bytes > 0:
+                free_bytes = await asyncio.to_thread(
+                    lambda: shutil.disk_usage(target_dir).free
+                )
+                required_free_bytes = additional_bytes + MINIMUM_STAGING_FREE_DISK_BYTES
+                if free_bytes < required_free_bytes:
+                    raise ModelStoreCapacityError(
+                        f"Insufficient canonical model-store disk capacity for "
+                        f"{model_id}: need {required_free_bytes / 2**30:.1f} GiB "
+                        "free for the remaining transfer and operating-system "
+                        f"reserve, but only {free_bytes / 2**30:.1f} GiB is "
+                        "available. Free disk space or move the model store."
+                    )
+            downloaded_bytes = 0
+            if model_card is not None and model_card.image is not None:
                 for item in model_card.image.files_for_source(
                     artifact_repository, revision
                 ):

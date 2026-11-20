@@ -32,10 +32,12 @@ from skulk.extensions.tests.test_runtime_service import OWNER_SOURCE, running
 
 
 @pytest.mark.parametrize("action", ["disable", "uninstall"])
+@pytest.mark.parametrize("runtime_protocol", [2, 3])
 async def test_socket_registration_activation_disconnect_and_reconnect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     action: Literal["disable", "uninstall"],
+    runtime_protocol: int,
 ) -> None:
     """The shared terminal/API socket persists accepted work after the client closes."""
     private_directory(tmp_path)
@@ -61,7 +63,7 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
             == manager.settings
         )
         metadata, trust, host = artifacts(
-            tmp_path / "source", owner_source=OWNER_SOURCE
+            tmp_path / "source", owner_source=OWNER_SOURCE, runtime_protocol=runtime_protocol
         )
         monkeypatch.setattr(
             "skulk.extensions.runtime_install.measure_host", lambda: host

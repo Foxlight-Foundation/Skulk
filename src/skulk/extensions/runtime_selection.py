@@ -24,6 +24,7 @@ from skulk.extensions.runtime_artifacts import (
     RuntimePlatform,
     VerifiedRuntime,
     canonical_json,
+    is_native_runtime,
     platform_matches,
 )
 from skulk.extensions.runtime_files import (
@@ -155,9 +156,18 @@ def _manifest(runtime: VerifiedRuntime) -> dict[str, JsonValue]:
 def runtime_contract_identity(payload: dict[str, JsonValue]) -> tuple[str, ...]:
     """Identify interpretation semantics independently of release sequence/version."""
     protocol = payload.get("protocol")
+    release = payload.get("release")
+    release_protocol = release.get("protocol") if isinstance(release, dict) else None
     if type(protocol) is int and protocol == 2:
         return ("legacy",)
-    if type(protocol) is int and protocol in (3, 4, 5):
+    if (
+        type(protocol) is int
+        and protocol == 3
+        and type(release_protocol) is int
+        and release_protocol == 1
+    ):
+        return ("legacy",)
+    if is_native_runtime(payload):
         kernel = _JSON_OBJECT.validate_python(payload["kernel"], strict=True)
         digest: TypeAdapter[str] = TypeAdapter(Digest)
         identity = (

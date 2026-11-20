@@ -124,7 +124,7 @@ def _required_scopes(scope: Scope) -> Sequence[OperatorScope]:
         return (plugin_scope,)
     if path.startswith("/v1/auth/devices"):
         return ("devices:manage",)
-    if path.startswith(_INFERENCE_PREFIXES):
+    if path == "/v1/music/edits" or path.startswith((*_INFERENCE_PREFIXES, "/v1/music/edits/")):
         return ("chat:write",)
     if path.startswith(_MODEL_PREFIXES):
         method = cast(str, scope.get("method", "GET")).upper()

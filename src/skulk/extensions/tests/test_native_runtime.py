@@ -21,6 +21,8 @@ from skulk.extensions.runtime_artifacts import (
     canonical_json,
     verify_runtime,
 )
+from skulk.extensions.runtime_files import RuntimeLock
+from skulk.extensions.runtime_selection import runtime_contract_identity
 from skulk.extensions.tests.test_runtime_install import artifacts
 
 OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -102,6 +104,69 @@ def sign(
             "signature": key.sign(domain + canonical_json(payload)).hex(),
         }
     )
+
+
+def test_version_three_readers_preserve_both_signed_contracts(tmp_path: Path) -> None:
+    """One host keeps legacy application roots and native identity byte-exact."""
+    payload, key, trust, host = native_fixture(tmp_path / "native")
+    metadata, _, _ = artifacts(
+        tmp_path / "application",
+        signing_key=key,
+        runtime_protocol=3,
+        manifest_extra={"skulk_requires": ">=1.5.2,<3"},
+    )
+    legacy = verify_runtime(metadata, trust, host, now=int(time.time()))
+    native = verify_runtime(sign(payload, key), trust, host, now=int(time.time()))
+    assert legacy.native_manifest is None
+    assert legacy.signature_message == legacy.payload
+    assert legacy.digest == hashlib.sha256(legacy.payload).hexdigest()
+    assert runtime_contract_identity(OBJECT.validate_json(legacy.payload)) == ("legacy",)
+    assert native.native_manifest is not None
+    assert native.signature_message == b"skulk.runtime/3\0" + native.payload
+    assert runtime_contract_identity(payload)[0] == "native"
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_version_three_cannot_mix_author_contracts(tmp_path: Path, native: bool) -> None:
+    """Even the trusted signer cannot combine independently versioned claim shapes."""
+    payload, key, trust, host = native_fixture(tmp_path / "native")
+    if native:
+        payload["application_roots"] = ["example-dep"]
+        domain = b"skulk.runtime/3\0"
+    else:
+        metadata, _, _ = artifacts(
+            tmp_path / "application",
+            signing_key=key,
+            runtime_protocol=3,
+            manifest_extra={"skulk_requires": ">=1.5.2,<3"},
+        )
+        payload = OBJECT.validate_python(OBJECT.validate_json(metadata)["runtime"], strict=True)
+        payload["kernel"] = dict(PROFILES)
+        domain = b""
+    with pytest.raises(ValueError):
+        verify_runtime(sign(payload, key, domain), trust, host, now=int(time.time()))
+
+
+def test_application_roots_do_not_accept_native_signing_domain(tmp_path: Path) -> None:
+    """A reader chooses one declared signing scheme, never a trial-verification fallback."""
+    key = Ed25519PrivateKey.generate()
+    metadata, trust, host = artifacts(tmp_path, signing_key=key, runtime_protocol=3)
+    payload = OBJECT.validate_python(OBJECT.validate_json(metadata)["runtime"], strict=True)
+    with pytest.raises(ValueError, match="signature"):
+        verify_runtime(sign(payload, key), trust, host, now=int(time.time()))
+
+
+@pytest.mark.parametrize("name", ["native-policy.lock", "native-host-key.lock"])
+def test_shared_runtime_files_retain_native_fences(tmp_path: Path, name: str) -> None:
+    """Moving utilities cannot drop native authority's exclusive lock ownership."""
+    first = RuntimeLock(tmp_path, name)
+    try:
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(tmp_path, name)
+    finally:
+        first.close()
+    replacement = RuntimeLock(tmp_path, name)
+    replacement.close()
 
 
 def test_native_identity_survives_core_admission(tmp_path: Path) -> None:
