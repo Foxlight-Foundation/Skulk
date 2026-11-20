@@ -503,9 +503,11 @@ the fork's whole history, about 177 MB for mflux). The Rust bindings
 wheel on pull requests and `dev` pushes that touch `rust/**`, the workspace
 manifests or the workflow, checks the wheel's name, then installs it and starts
 the swarm on an isolated `SKULK_LIBP2P_NAMESPACE`. It publishes to the same
-index only on manual dispatch with `publish=true`, which needs the workflow
-file on the default branch; the index is append-only, so republishing needs a
-bindings version bump. macOS and Linux still build the bindings from the
+index only on manual dispatch with `publish=true`. The command line runs it
+against any branch that carries the workflow file
+(`gh workflow run bindings-wheel.yml --ref <branch> -f publish=true`); only the
+website's Run button needs the file on the default branch. The index is
+append-only, so republishing needs a bindings version bump. macOS and Linux still build the bindings from the
 workspace source. The CUDA wheel builds with
 `GGML_CUDA_NO_VMM=ON`: GPU-less CI cannot satisfy the driver API's transitive
 libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
