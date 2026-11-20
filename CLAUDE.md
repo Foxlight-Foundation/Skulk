@@ -505,8 +505,10 @@ manifests or the workflow, checks the wheel's name, then installs it and starts
 the swarm on an isolated `SKULK_LIBP2P_NAMESPACE`. It publishes to the same
 index only on manual dispatch with `publish=true`. The command line runs it
 against any branch that carries the workflow file
-(`gh workflow run bindings-wheel.yml --ref <branch> -f publish=true`); only the
-website's Run button needs the file on the default branch. The index is
+(`gh workflow run bindings-wheel.yml --ref <branch> -f publish=true`), provided
+the workflow has already run once on some branch (its pull-request or push
+trigger registers it with GitHub); only the website's Run button needs the
+file on the default branch. The index is
 append-only, so republishing needs a bindings version bump. macOS and Linux still build the bindings from the
 workspace source. Every Skulk build of `llama-server` (the engine wheels, the
 CUDA pod image and both `install-deps.sh` scripts) passes
