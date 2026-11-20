@@ -44,6 +44,7 @@ from skulk.extensions.runtime_artifacts import (
     RuntimeTrust,
     canonical_json,
     canonical_platform,
+    is_native_runtime,
     measure_host,
 )
 from skulk.extensions.runtime_attachment import (
@@ -188,7 +189,7 @@ def installed_release(staged: Path) -> InstalledRelease | None:
     if not isinstance(release, dict) or not isinstance(manifest, dict):
         return None
     runtime_protocol = runtime.get("protocol") if isinstance(runtime, dict) else None
-    native = runtime_protocol in (3, 4, 5)
+    native = isinstance(runtime, dict) and is_native_runtime(runtime)
     if native:
         try:
             manifest = (
@@ -687,7 +688,7 @@ def _listing_matches(
             return False
     elif listing.native is not None:
         return False
-    if runtime.get("protocol") in (3, 4, 5):
+    if is_native_runtime(runtime):
         # This metadata was authenticated during review. Read its exact native
         # manifest for consent comparison instead of treating the byte wrapper
         # as the legacy declaration.
@@ -1350,7 +1351,7 @@ class RuntimeManager:
             manifest = release.get("manifest") if isinstance(release, dict) else None
             if not isinstance(manifest, dict):
                 raise ValueError("installed contract metadata unavailable")
-            if isinstance(runtime, dict) and runtime.get("protocol") in (3, 4, 5):
+            if isinstance(runtime, dict) and is_native_runtime(runtime):
                 manifest = (
                     InferenceManifest.model_validate_json(canonical_json(manifest))
                     if runtime.get("protocol") == 5

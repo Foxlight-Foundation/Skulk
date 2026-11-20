@@ -27,9 +27,15 @@ from skulk.store.tests.test_mirror_worker import archive, configuration
 from skulk.store.tests.test_preservation_sharing import empty_host, import_copy
 
 
-async def settled(host: PreservationHost, identity: str) -> MirrorJob:
-    """Wait for the owned real child, without simulating a worker receipt."""
-    async with asyncio.timeout(30):
+async def settled(
+    host: PreservationHost, identity: str, *, timeout_seconds: float = 30
+) -> MirrorJob:
+    """Return real terminal state within the caller's fixture allowance.
+
+    Cold archive fixtures may explicitly allow longer interpreter startup;
+    existing active-operation callers retain their thirty-second default.
+    """
+    async with asyncio.timeout(timeout_seconds):
         while True:
             job = host.mirrors.job(identity)
             if job.state not in {"queued", "running", "cancelling"}:
@@ -37,9 +43,15 @@ async def settled(host: PreservationHost, identity: str) -> MirrorJob:
             await asyncio.sleep(0.025)
 
 
-async def ready(host: PreservationHost, identity: str) -> MirrorJob:
-    """Wait for actual controller ownership/listening, not historical metadata."""
-    async with asyncio.timeout(30):
+async def ready(
+    host: PreservationHost, identity: str, *, timeout_seconds: float = 30
+) -> MirrorJob:
+    """Return actual owned listening state within an explicit setup allowance.
+
+    The default remains thirty seconds. A cold worker fixture can choose a
+    separate startup bound without changing active service or stop limits.
+    """
+    async with asyncio.timeout(timeout_seconds):
         while True:
             job = host.mirrors.job(identity)
             assert job.state in {"queued", "running"}, job
@@ -74,13 +86,20 @@ async def test_mirror_operator_journey_preserves_companions_and_only_deletes_sel
             return MirrorJob.model_validate_json(response.text)
 
         async def page() -> MirrorPage:
-            response = await client.get("/preservation/mirror")
-            assert response.status_code == 200, response.text
-            assert (
-                str(tmp_path) not in response.text
-                and "capture.pem" not in response.text
-            )
-            return MirrorPage.model_validate_json(response.text)
+            # Bounded filesystem probes may return a valid busy view even after
+            # the effect succeeds; inspect custody only once observation is available.
+            async with asyncio.timeout(30):
+                while True:
+                    response = await client.get("/preservation/mirror")
+                    assert response.status_code == 200, response.text
+                    assert (
+                        str(tmp_path) not in response.text
+                        and "capture.pem" not in response.text
+                    )
+                    observed = MirrorPage.model_validate_json(response.text)
+                    if observed.available:
+                        return observed
+                    await asyncio.sleep(0.025)
 
         try:
             assert not (await page()).configured

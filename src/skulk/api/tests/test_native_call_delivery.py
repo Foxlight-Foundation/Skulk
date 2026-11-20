@@ -16,6 +16,7 @@ from starlette.types import Message, Receive, Scope, Send
 
 from skulk.api.native_calls import create_native_calls_router
 from skulk.extensions.caller_identity import AuthenticatedOwner
+from skulk.extensions.native_call_contracts import public_call_kernel
 from skulk.extensions.native_calls import NativeCalls
 from skulk.extensions.native_host_budget import NativePayloadBudget
 from skulk.extensions.native_host_protocol import Received, ResponseFrame
@@ -36,7 +37,13 @@ class Delivery:
 async def delivery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[Delivery]:
-    """Inject only invocation output; keep production owner HTTP authentication."""
+    """Use the qualified reader and real owner auth with injected invocation output."""
+    # Resolve the real reader before short cleanup guards so cold package and
+    # cohort metadata reads cannot consume their cancellation assertion budget.
+    kernel = public_call_kernel()
+    monkeypatch.setattr(
+        "skulk.extensions.native_calls.public_call_kernel", lambda: kernel
+    )
     budgets: list[NativePayloadBudget] = []
     connection = ServiceConnection(manager_root=str(tmp_path), profile_id="a" * 32)
     write_private(tmp_path / "connection.json", connection.model_dump_json().encode())

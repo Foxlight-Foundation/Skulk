@@ -136,6 +136,21 @@ class VideoStore:
             # itself fails loudly if the disk is really full.
             return None
 
+    def disk_headroom_bytes(self) -> int | None:
+        """Measure free filesystem bytes after the shared safety reserve.
+
+        In-flight promises are not deducted here. Owners composing several
+        stores must subtract every store's unwritten bytes from this headroom.
+        A negative value means the reserve is already consumed; ``None`` keeps
+        the existing unmeasurable-filesystem policy, with write errors surfaced.
+        """
+        free = self._free_disk_bytes()
+        return None if free is None else free - _DISK_RESERVE_BYTES
+
+    def unwritten_bytes(self) -> int:
+        """Return output promised but not written, including reordered chunks."""
+        return self._unwritten_assembly_bytes()
+
     def _unwritten_assembly_bytes(self) -> int:
         """Bytes open assemblies have declared but not yet written to disk."""
 
@@ -149,13 +164,13 @@ class VideoStore:
 
         if self.reserved_bytes() - released + total_bytes > self._max_total_bytes:
             return False
-        free = self._free_disk_bytes()
-        if free is None:
+        headroom = self.disk_headroom_bytes()
+        if headroom is None:
             return True
         # Free space still counts the unwritten remainder of every open
         # assembly, which is already promised to those transfers.
-        promised = self._unwritten_assembly_bytes() + total_bytes
-        return free + released - promised >= _DISK_RESERVE_BYTES
+        promised = self.unwritten_bytes() + total_bytes
+        return headroom + released >= promised
 
     def _evictable(self, exclude: CommandId, keep: Collection[CommandId]) -> dict[CommandId, float]:
         """Jobs eviction may take, each with its earliest expiry."""

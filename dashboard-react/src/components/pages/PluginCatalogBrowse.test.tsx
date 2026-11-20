@@ -37,6 +37,17 @@ let stopFreshInstall: boolean;
 let failStrayRead: boolean;
 let recoverStaysRunning: boolean;
 let listed: CatalogEntry[];
+let storeListed: CatalogEntry[] | null;
+let catalogReads: number;
+let nextPrivateRead: { entered: () => void; wait: Promise<void> } | null;
+let heldStoreRead: { entered: () => void; wait: Promise<void> } | null;
+
+/** Control a real mocked request's completion without replacing the query hooks. */
+function deferred() {
+  let release!: () => void;
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  return { wait, release };
+}
 
 function makeStore() { return configureStore({ reducer: { [apiSlice.reducerPath]: apiSlice.reducer }, middleware: (defaults) => defaults().concat(apiSlice.middleware) }); }
 function json(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }); }
@@ -79,6 +90,10 @@ beforeEach(async () => {
   failStrayRead = false;
   recoverStaysRunning = false;
   listed = [entry];
+  storeListed = null;
+  catalogReads = 0;
+  nextPrivateRead = null;
+  heldStoreRead = null;
   localStorage.removeItem('skulk-plugin-install-journeys');
   installed = {
     plugin_id: pluginId, release: { bundle_id: 'example.studio', title: 'Example Studio', bundle_version: '0.1.0', publisher: 'example', sequence: 50 },
@@ -148,9 +163,22 @@ beforeEach(async () => {
       return json({ detail: 'unexpected' }, 404);
     }
     if (path === '/v1/plugins/managed/catalog/source') {
-      return json({ revision: configured ? 1 : 0, configured, credential_reference: null, credential_ready: configured, trust_revision: configured ? 1 : null, builtin_store: onStore, builtin_store_available: storeAvailable, ...(assignsRevisions ? { assigns_trust_revisions: true } : {}) });
+      return json({ revision: configured ? (onStore ? 2 : 1) : 0, configured, credential_reference: null, credential_ready: configured, trust_revision: configured ? 1 : null, builtin_store: onStore, builtin_store_available: storeAvailable, ...(assignsRevisions ? { assigns_trust_revisions: true } : {}) });
     }
-    if (path === '/v1/plugins/managed/catalog') return json({ publisher: 'example', revision: 34, created_at: 1_790_000_000, expires_at: 1_800_000_000, catalog_sha256: 'c'.repeat(64), entries: listed });
+    if (path === '/v1/plugins/managed/catalog') {
+      catalogReads += 1;
+      // Capture the selected source when this request starts: a later switch
+      // cannot turn a deliberately delayed private response into store data.
+      const wasStore = onStore;
+      const entries = wasStore && storeListed !== null ? storeListed : listed;
+      const held = wasStore ? heldStoreRead : nextPrivateRead;
+      if (held) {
+        if (!wasStore) nextPrivateRead = null;
+        held.entered();
+        await held.wait;
+      }
+      return json({ publisher: 'example', revision: wasStore ? 35 : 34, created_at: 1_790_000_000, expires_at: 1_800_000_000, catalog_sha256: (wasStore ? 'f' : 'c').repeat(64), entries });
+    }
     if (path === '/v1/plugins/managed') return json({ installations: [...(freshHost ? [] : [installed]), ...(stray ? [stray] : [])] });
     if (path.endsWith('/install')) return json({ operation: installOperationId ? { request: { operation_id: installOperationId, runtime_digest: newDigest, expected_source_revision: 7 }, review, state: 'staged', downloaded_bytes: 12_000_000, error_code: null } : null });
     if (path.includes('/operations/')) return json({ request: { operation_id: activationOperationId, action: 'activate' }, state: 'complete', error_code: null });
@@ -539,4 +567,87 @@ it('opens a link on the list even while this browser follows another install', a
   await renderWithLink({ id: 1, bundleId: 'example.studio', version: '0.1.0', fromLink: true });
   await contains('Review Example Studio');
   expect(host.textContent).not.toContain('Installing Other Tool');
+});
+
+it('resolves the same missing storefront link after a successful catalog switch, preserving consent', async () => {
+  freshHost = true;
+  storeAvailable = true;
+  listed = [];
+  storeListed = [entry];
+  refuseStoreOnce = true;
+  await renderWithLink({ id: 1, bundleId: entry.bundle_id, version: '0.1.0', fromLink: true });
+  await contains('This host’s catalog does not list example.studio.');
+  await click('Use the Foxlight store');
+  await contains('The catalog source changed since its revision was read.');
+  expect(host.textContent).toContain('This host’s catalog does not list example.studio.');
+  expect(host.textContent).not.toContain('Review Example Studio');
+  await click('Use the Foxlight store');
+  await contains('Review Example Studio');
+  expect(button('Install')?.disabled).toBe(true);
+  expect(posts.map((post) => post.path)).toEqual([
+    '/v1/plugins/managed/catalog/source/builtin', '/v1/plugins/managed/catalog/source/builtin',
+  ]);
+});
+
+it('waits for the new catalog rather than consuming a link from a delayed old response', async () => {
+  freshHost = true;
+  storeAvailable = true;
+  storeListed = [{ ...entry, bundle_version: '0.2.0', sequence: 52 }];
+  await renderWithLink({ id: 1, bundleId: entry.bundle_id, version: '0.1.0', fromLink: true });
+  await contains('Review Example Studio');
+  const privateEntered = deferred();
+  const privateRelease = deferred();
+  const storeEntered = deferred();
+  const storeRelease = deferred();
+  nextPrivateRead = { entered: privateEntered.release, wait: privateRelease.wait };
+  heldStoreRead = { entered: storeEntered.release, wait: storeRelease.wait };
+  try {
+    await click('Cancel');
+    await act(async () => { await privateEntered.wait; });
+    await click('Use the Foxlight store');
+    expect(host.textContent).not.toContain('Review Example Studio');
+    await act(async () => { privateRelease.release(); });
+    await act(async () => { await storeEntered.wait; });
+    await contains('Reading and verifying the catalog…');
+    expect(host.textContent).not.toContain('Review Example Studio');
+    await act(async () => { storeRelease.release(); });
+    await contains('This host’s catalog offers 0.2.0, which is the release reviewed here.');
+    expect(posts.map((post) => post.path)).toEqual(['/v1/plugins/managed/catalog/source/builtin']);
+    expect(button('Install')?.disabled).toBe(true);
+  } finally {
+    privateRelease.release();
+    storeRelease.release();
+  }
+});
+
+it('does not reopen a cancelled link review when the same source is refetched', async () => {
+  freshHost = true;
+  await renderWithLink({ id: 1, bundleId: entry.bundle_id, version: '0.1.0', fromLink: true });
+  await contains('Review Example Studio');
+  const readsBeforeCancel = catalogReads;
+  await click('Cancel');
+  await contains('Browse capabilities');
+  await act(async () => { await vi.waitFor(() => expect(catalogReads).toBeGreaterThan(readsBeforeCancel)); });
+  expect(host.textContent).not.toContain('Review Example Studio');
+  expect(posts).toEqual([]);
+});
+
+it('keeps a switched-source install link paused until an unread stopped installation is known', async () => {
+  freshHost = true;
+  storeAvailable = true;
+  listed = [];
+  storeListed = [entry];
+  stray = registered(strayId);
+  strayOperation = stoppedAt('5'.repeat(32));
+  failStrayRead = true;
+  await renderWithLink({ id: 1, bundleId: entry.bundle_id, version: '0.1.0', fromLink: true });
+  await contains('This host’s catalog does not list example.studio.');
+  await click('Use the Foxlight store');
+  await contains('could not be read, so new installs are paused');
+  expect(host.textContent).not.toContain('Review Example Studio');
+  failStrayRead = false;
+  await click('Try again');
+  await contains('An install of Example Studio has not finished on this host.');
+  expect(host.textContent).not.toContain('Review Example Studio');
+  expect(posts.map((post) => post.path)).toEqual(['/v1/plugins/managed/catalog/source/builtin']);
 });

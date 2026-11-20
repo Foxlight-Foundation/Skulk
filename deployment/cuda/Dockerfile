@@ -42,11 +42,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   (cuMemMap, ...) that only the driver's libcuda.so provides, and a GPU-less
 #   runner has no driver. Upstream's own CI images defer resolution to runtime
 #   this way (.devops/cuda.Dockerfile); the pod's real driver satisfies them.
+# - LLAMA_USE_PREBUILT_UI=OFF: llama-server otherwise downloads its built-in
+#   chat page during the build, choosing the bundle by commit count. A shallow
+#   clone counts one commit, so it asked for a bundle that does not exist and
+#   fell back to upstream's newest one, which no longer matches this pin and
+#   fails the build. Skulk only calls the server's API on 127.0.0.1 and never
+#   serves that page, so the image builds without it and without the download.
 ARG LLAMA_CPP_REF=b11669
 RUN git clone --branch "${LLAMA_CPP_REF}" --depth 1 \
          https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
     && cmake -S /opt/llama.cpp -B /opt/llama.cpp/build \
          -DGGML_CUDA=ON -DGGML_RPC=ON -DGGML_NATIVE=OFF \
+         -DLLAMA_USE_PREBUILT_UI=OFF \
          -DCMAKE_BUILD_TYPE=Release \
          -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
          -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \

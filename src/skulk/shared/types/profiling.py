@@ -9,7 +9,14 @@ from typing import Literal, Self, cast, final
 
 import psutil
 from anyio import to_thread
-from pydantic import UUID4, BaseModel, Field, field_serializer, field_validator
+from pydantic import (
+    UUID4,
+    BaseModel,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from skulk.shared.models.engine_memory_settings import (
     EngineMemorySettings,
@@ -20,6 +27,7 @@ from skulk.shared.models.llama_server_settings import (
     resolve_llama_server_settings,
 )
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.native_music import NativeMusicLibraryProbe
 from skulk.shared.types.node_facts import CapabilityConflict
 from skulk.shared.types.thunderbolt import ThunderboltIdentifier
 from skulk.utils.pydantic_ext import CamelCaseModel
@@ -327,6 +335,11 @@ NodeDataTransport = Literal["gossipsub", "zenoh"]
 """Resolved transport used for node-addressed DATA-plane traffic."""
 
 
+def _native_music_probes_are_empty(value: object) -> bool:
+    """Keep inactive native support absent on the strict older telemetry wire."""
+    return isinstance(value, dict) and not value
+
+
 class NodeResources(CamelCaseModel):
     """Inference capability, policy, and transport facts a node advertises.
 
@@ -358,6 +371,12 @@ class NodeResources(CamelCaseModel):
     engine_builds: dict[str, str] = Field(
         default_factory=dict,
         description="Exact installed build identities keyed by engine and backend tag.",
+    )
+    native_music_probes: dict[str, NativeMusicLibraryProbe] = Field(
+        default_factory=dict,
+        max_length=4,
+        exclude_if=_native_music_probes_are_empty,
+        description="Path-free native ACE library/device/precision receipts bound to the same ready backend and exact engine build; neither model readiness nor memory admission.",
     )
     native_image_families: dict[str, tuple[str, ...]] = Field(
         default_factory=dict,
@@ -395,6 +414,53 @@ class NodeResources(CamelCaseModel):
     engine binary override), with its remediation. Cluster health maps these
     one-to-one onto ``nodeHealth`` reasons so the dashboard shows them."""
 
+    @field_validator("native_music_probes", mode="before")
+    @classmethod
+    def coerce_native_music_probe_arrays(cls, value: object) -> object:
+        """Restore CUDA's fixed pair after gossip's JSON-to-Python decoding.
+
+        Strict native probe parsing already supports JSON arrays. The outer
+        telemetry decoder instead supplies a Python dictionary; restore only
+        this tuple shape while retaining native validation of every item.
+        """
+        if not isinstance(value, dict):
+            return value
+        restored: dict[object, object] = {}
+        for backend, item in cast("dict[object, object]", value).items():
+            if isinstance(item, dict):
+                document = cast("dict[str, object]", item)
+                capability = document.get("cuda_compute_capability")
+                if isinstance(capability, list):
+                    item = {
+                        **document,
+                        "cuda_compute_capability": tuple(
+                            cast("list[object]", capability)
+                        ),
+                    }
+            restored[backend] = item
+        return restored
+
+    @model_validator(mode="after")
+    def validate_native_music_probes(self) -> Self:
+        """Refuse mixed or stale native math facts before placement can consume them."""
+        lanes = {
+            "ace_step-cpu": "cpu",
+            "ace_step-metal": "mps",
+            "ace_step-cuda": "cuda",
+            "ace_step-rocm": "rocm",
+        }
+        for backend, probe in self.native_music_probes.items():
+            if (
+                lanes.get(backend) != probe.device
+                or backend not in self.backends
+                or self.engine_builds.get(backend)
+                != "ace_step@sha256:" + probe.payload_sha256
+            ):
+                raise ValueError(
+                    "native music probe differs from its ready backend/build"
+                )
+        return self
+
     @field_validator("backends", "on_demand_backends", mode="before")
     @classmethod
     def _coerce_backends(cls, v: object) -> object:
@@ -412,8 +478,12 @@ class NodeResources(CamelCaseModel):
     def _coerce_native_image_families(cls, value: object) -> object:
         """Restore per-build immutable family lists from the strict gossip wire."""
         if isinstance(value, dict):
-            return {key: tuple(cast("list[object]", families)) if isinstance(families, list) else families
-                    for key, families in cast("dict[str, object]", value).items()}
+            return {
+                key: tuple(cast("list[object]", families))
+                if isinstance(families, list)
+                else families
+                for key, families in cast("dict[str, object]", value).items()
+            }
         return value
 
     @field_validator("hardware_classes", mode="before")
