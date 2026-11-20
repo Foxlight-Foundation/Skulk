@@ -149,9 +149,15 @@ jobs:
             # ggml's portable x86 baseline: AVX2, FMA, F16C, AVX-512 off.
             BACKEND_FLAGS="-DGGML_VULKAN=ON -DGGML_NATIVE=OFF"
           fi
+          # LLAMA_USE_PREBUILT_UI=OFF: without it the build downloads
+          # llama-server's built-in chat page, picking the bundle by commit
+          # count. This shallow clone counts one commit, so the build fell
+          # back to upstream's newest bundle, which stops matching the pin.
+          # Skulk never serves that page; the wheel ships without it.
           cmake -S /tmp/llama-cpp-src -B /tmp/build \
             $BACKEND_FLAGS \
             -DGGML_RPC=ON \
+            -DLLAMA_USE_PREBUILT_UI=OFF \
             -DBUILD_SHARED_LIBS=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_RPATH='$ORIGIN' \

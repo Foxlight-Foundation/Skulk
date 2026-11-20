@@ -7,6 +7,12 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Engine builds
+
+- Fix the CUDA image build, which had started failing: `llama-server` is now built without
+  llama.cpp's built-in chat page. Skulk never served that page, and fetching it at build time
+  made the image and the engine wheels depend on whatever upstream published that day.
+
 ### Peer discovery
 
 - Nodes on the same network find each other more reliably. Each node now repeats its

@@ -235,7 +235,10 @@ build_llama_server() {
       # GGML_RPC=ON also produces ggml-rpc-server, the memory-donor daemon
       # that multi-node GGUF pooling launches on donor nodes; Skulk finds it
       # as a sibling of SKULK_LLAMA_SERVER_BIN (or via SKULK_RPC_SERVER_BIN).
-      cmake -B build -DGGML_VULKAN=ON -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release
+      # No embedded chat page: Skulk only uses the server's API, so skip the
+      # page's build-time download.
+      cmake -B build -DGGML_VULKAN=ON -DGGML_RPC=ON -DLLAMA_USE_PREBUILT_UI=OFF \
+        -DCMAKE_BUILD_TYPE=Release
       cmake --build build --target llama-server ggml-rpc-server -j"$(nproc)" )
     [ -x "$bin" ] || die "llama-server did not build at $bin"
     [ -x "$rpc_bin" ] || die "ggml-rpc-server did not build at $rpc_bin (multi-node pooling needs it)"
