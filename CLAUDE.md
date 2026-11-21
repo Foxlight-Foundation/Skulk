@@ -511,7 +511,12 @@ trigger registers it with GitHub); only the website's Run button needs the
 file on the default branch. The index is
 append-only, so republishing needs a bindings version bump. A Windows install takes the bindings from
 that index (pyproject pins the version for `win32`); macOS and Linux still build
-them from `rust/`. The CUDA wheel builds with
+them from `rust/`. Every Skulk build of `llama-server` (the engine wheels, the
+CUDA pod image and both `install-deps.sh` scripts) passes
+`LLAMA_USE_PREBUILT_UI=OFF`: llama.cpp otherwise downloads its built-in chat
+page at build time, choosing the bundle by commit count, which is wrong on a
+shallow clone and made builds depend on upstream's newest bundle. Skulk calls
+only the server's API on 127.0.0.1 and never serves that page. The CUDA wheel builds with
 `GGML_CUDA_NO_VMM=ON`: GPU-less CI cannot satisfy the driver API's transitive
 libcuda.so.1 link (stubs ship only libcuda.so), so never reintroduce
 driver-API-dependent flags to that build. The aarch64 lane uses CUDA 12.9 and
@@ -1124,7 +1129,13 @@ The system uses event sourcing for state management:
 ### Rust Components
 Rust code in `rust/` provides:
 - `networking`: libp2p networking (gossipsub, peer discovery)
-- `skulk_pyo3_bindings`: PyO3 bindings exposing Rust to Python
+- `skulk_pyo3_bindings`: PyO3 bindings exposing Rust to Python. Its tokio
+  threads outlive the interpreter, so code that runs on them must never call
+  `Python::attach`: log through `log`/`tracing` (the bridge in
+  `src/exit_safety.rs` drops records once Python is exiting), start futures
+  with `exit_safety::future_into_py`, and return plain Rust data that becomes
+  a Python object in `IntoPyObject`. `routing/tests/test_bindings_interpreter_exit.py`
+  covers it.
 - `system_custodian`: System-level operations
 
 Windows (`win32`) is a non-compute target: the entry point forces management
