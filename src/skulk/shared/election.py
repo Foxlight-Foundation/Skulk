@@ -84,10 +84,13 @@ class Election:
         # ordinary candidate wins over it, and it masters a cluster only when
         # every node is last-resort (a management node alone, or a cluster of
         # management nodes). It still gains seniority when it wins, counted up
-        # from the floor, so an established last-resort master keeps the role
-        # when another last-resort node joins; without that, each join would
-        # hand mastership, and with it the authoritative cluster config, to
-        # whichever node ID sorted higher.
+        # from the floor, exactly as an ordinary candidate does from zero: a
+        # last-resort master that has won a round against another node keeps
+        # the role when a further last-resort node joins. Without that, every
+        # join would hand mastership, and with it the authoritative cluster
+        # config, to whichever node ID sorted higher. Two nodes that each
+        # started alone still tie on seniority and fall through to commands
+        # seen and node ID, in this band as in the ordinary one.
         self._seniority_floor = 0 if is_candidate else LAST_RESORT_SENIORITY_FLOOR
         self.seniority = seniority if is_candidate else LAST_RESORT_SENIORITY_FLOOR
         self.clock = 0

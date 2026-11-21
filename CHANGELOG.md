@@ -14,8 +14,10 @@ This project records release notes here and mirrors public-facing notes in
   master election to any inference node and becomes master only when the cluster has no
   inference node. A newly elected master's `skulk.yaml` replaces every follower's, including
   the model-store host, so before this a freshly installed management machine could win an
-  election on node ID alone and repoint the whole cluster's model store at itself. An
-  established management master keeps the role when another management node joins.
+  election on node ID alone and repoint the whole cluster's model store at itself. Among
+  management nodes the election works as it does among inference nodes: a master that has
+  already won against another node keeps the role when a further one joins, and two nodes
+  that each started alone are still decided by commands seen and then node ID.
   `--force-master` still makes any node the master.
 
 ### Clean shutdown
