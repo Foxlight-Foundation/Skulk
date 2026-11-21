@@ -1204,8 +1204,16 @@ class Node:
         )
 
         er_send, er_recv = channel[ElectionResult]()
+        master_candidate = is_master_candidate(args, os.environ)
+        if not master_candidate:
+            logger.info(
+                "Management node: last-resort master candidate. It masters the "
+                "cluster only while no inference node is present; --force-master "
+                "overrides."
+            )
         election = Election(
             node_id,
+            is_candidate=master_candidate,
             # If someone manages to assemble 1 MILLION devices into a Skulk cluster then. well done. good job champ.
             seniority=1_000_000 if args.force_master else 0,
             # nb: this DOES feedback right now. i have thoughts on how to address this,
@@ -2422,6 +2430,33 @@ def apply_platform_participation(
         )
     environ[NODE_PARTICIPATION_ENV_VAR] = "management"
     return args.model_copy(update={"no_worker": True})
+
+
+def is_master_candidate(args: "Args", environ: "Mapping[str, str]") -> bool:
+    """Return whether this node is an ordinary master candidate.
+
+    A node with management participation (started with ``--no-worker``, or
+    declaring ``SKULK_NODE_PARTICIPATION=management``, which Windows always
+    does) is a last-resort candidate instead: it becomes master only when the
+    cluster holds no ordinary candidate. A newly elected master's
+    ``skulk.yaml`` replaces every follower's, model-store host included, so a
+    management machine that joins with a default configuration must not win an
+    election against the inference nodes it joined. ``--force-master`` keeps
+    its meaning on any node, for a dedicated always-on coordinator.
+
+    Args:
+        args: Parsed launch arguments, after platform participation is applied.
+        environ: Process environment carrying the declared participation.
+
+    Returns:
+        ``True`` for an ordinary candidate, ``False`` for a last-resort one.
+    """
+    if args.force_master:
+        return True
+    if args.no_worker:
+        return False
+    declared = environ.get(NODE_PARTICIPATION_ENV_VAR, "").strip().lower()
+    return declared != "management"
 
 
 def _raise_open_file_limit() -> None:

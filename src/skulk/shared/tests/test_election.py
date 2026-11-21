@@ -3,10 +3,15 @@ import pytest
 from anyio import create_task_group, fail_after, move_on_after
 
 from skulk.routing.connection_message import ConnectionMessage
-from skulk.shared.election import Election, ElectionMessage, ElectionResult
+from skulk.shared.election import (
+    LAST_RESORT_SENIORITY_FLOOR,
+    Election,
+    ElectionMessage,
+    ElectionResult,
+)
 from skulk.shared.types.commands import ForwarderCommand, TestCommand
 from skulk.shared.types.common import NodeId, SessionId, SystemId
-from skulk.utils.channels import channel
+from skulk.utils.channels import Receiver, channel
 
 # ======= #
 # Helpers #
@@ -667,3 +672,193 @@ async def test_late_same_round_candidate_corrects_completed_result() -> None:
                 unexpected = await result_receiver.receive()
                 pytest.fail(f"unexpected repeated election result: {unexpected}")
         tasks.cancel_scope.cancel()
+
+
+# ---------------------------------------------------------------------------
+# Last-resort candidates (management nodes)
+# ---------------------------------------------------------------------------
+
+
+async def _result_for_clock(
+    results: Receiver[ElectionResult], clock: int
+) -> ElectionResult:
+    """Return the election result of one round, skipping earlier rounds."""
+    while True:
+        result = await results.receive()
+        if result.won_clock == clock:
+            return result
+
+
+@pytest.mark.anyio
+async def test_last_resort_candidate_alone_masters_itself() -> None:
+    """A management node with no peers still has a master: itself."""
+    em_out_tx, _em_out_rx = channel[ElectionMessage]()
+    em_in_tx, em_in_rx = channel[ElectionMessage]()
+    er_tx, er_rx = channel[ElectionResult]()
+    cm_tx, cm_rx = channel[ConnectionMessage]()
+    co_tx, co_rx = channel[ForwarderCommand]()
+    election = Election(
+        node_id=NodeId("ME"),
+        election_message_receiver=em_in_rx,
+        election_message_sender=em_out_tx,
+        election_result_sender=er_tx,
+        connection_message_receiver=cm_rx,
+        command_receiver=co_rx,
+        is_candidate=False,
+    )
+
+    async with create_task_group() as tg:
+        with fail_after(2):
+            tg.start_soon(election.run)
+            initial = await er_rx.receive()
+            assert initial.session_id.master_node_id == NodeId("ME")
+            em_in_tx.close()
+            cm_tx.close()
+            co_tx.close()
+
+    assert election.seniority == LAST_RESORT_SENIORITY_FLOOR + 1
+
+
+@pytest.mark.anyio
+async def test_new_ordinary_candidate_beats_established_last_resort_master() -> None:
+    """Every other tie-break favours the management node, and it still loses.
+
+    The management node has won a two-node round, has seen commands, and has
+    the higher node ID. A brand-new inference node must become master anyway,
+    because the new master's configuration replaces every follower's.
+    """
+    em_out_tx, em_out_rx = channel[ElectionMessage]()
+    em_in_tx, em_in_rx = channel[ElectionMessage]()
+    er_tx, er_rx = channel[ElectionResult]()
+    cm_tx, cm_rx = channel[ConnectionMessage]()
+    co_tx, co_rx = channel[ForwarderCommand]()
+    election = Election(
+        node_id=NodeId("Z"),
+        election_message_receiver=em_in_rx,
+        election_message_sender=em_out_tx,
+        election_result_sender=er_tx,
+        connection_message_receiver=cm_rx,
+        command_receiver=co_rx,
+        is_candidate=False,
+    )
+
+    async with create_task_group() as tg:
+        with fail_after(3):
+            tg.start_soon(election.run)
+            _ = await _result_for_clock(er_rx, 0)
+            # Round 1: another management node joins and loses on node ID.
+            await em_in_tx.send(
+                em(clock=1, seniority=LAST_RESORT_SENIORITY_FLOOR + 1, node_id="Y")
+            )
+            first = await _result_for_clock(er_rx, 1)
+            assert first.session_id.master_node_id == NodeId("Z")
+            for _ in range(3):
+                await co_tx.send(
+                    ForwarderCommand(origin=SystemId("SYS"), command=TestCommand())
+                )
+            await anyio.sleep(0.01)
+
+            # Round 2: a fresh inference node joins.
+            await em_in_tx.send(em(clock=2, seniority=0, node_id="A"))
+            while True:
+                status = await em_out_rx.receive()
+                if status.clock == 2:
+                    assert status.seniority == LAST_RESORT_SENIORITY_FLOOR + 2
+                    assert status.commands_seen == 3
+                    break
+            second = await _result_for_clock(er_rx, 2)
+            assert second.session_id.master_node_id == NodeId("A")
+            assert second.is_new_master is True
+
+            em_in_tx.close()
+            cm_tx.close()
+            co_tx.close()
+
+
+@pytest.mark.anyio
+async def test_ordinary_candidate_beats_last_resort_peer() -> None:
+    """An inference node keeps mastership against any management node vote."""
+    em_out_tx, _em_out_rx = channel[ElectionMessage]()
+    em_in_tx, em_in_rx = channel[ElectionMessage]()
+    er_tx, er_rx = channel[ElectionResult]()
+    cm_tx, cm_rx = channel[ConnectionMessage]()
+    co_tx, co_rx = channel[ForwarderCommand]()
+    election = Election(
+        node_id=NodeId("A"),
+        election_message_receiver=em_in_rx,
+        election_message_sender=em_out_tx,
+        election_result_sender=er_tx,
+        connection_message_receiver=cm_rx,
+        command_receiver=co_rx,
+        is_candidate=True,
+    )
+
+    async with create_task_group() as tg:
+        with fail_after(2):
+            tg.start_soon(election.run)
+            # A long-established management master: many rounds won, many
+            # commands seen, higher node ID.
+            await em_in_tx.send(
+                em(
+                    clock=1,
+                    seniority=LAST_RESORT_SENIORITY_FLOOR + 500,
+                    node_id="Z",
+                    commands_seen=10_000,
+                )
+            )
+            result = await _result_for_clock(er_rx, 1)
+            assert result.session_id.master_node_id == NodeId("A")
+            assert result.is_new_master is False
+
+            em_in_tx.close()
+            cm_tx.close()
+            co_tx.close()
+
+
+@pytest.mark.anyio
+async def test_established_last_resort_master_keeps_the_role() -> None:
+    """A joining management node does not take mastership on node ID alone.
+
+    Without seniority inside the last-resort band, every join in a cluster of
+    management nodes would be decided by node ID, and node IDs are new on every
+    start.
+    """
+    em_out_tx, _em_out_rx = channel[ElectionMessage]()
+    em_in_tx, em_in_rx = channel[ElectionMessage]()
+    er_tx, er_rx = channel[ElectionResult]()
+    cm_tx, cm_rx = channel[ConnectionMessage]()
+    co_tx, co_rx = channel[ForwarderCommand]()
+    election = Election(
+        node_id=NodeId("B"),
+        election_message_receiver=em_in_rx,
+        election_message_sender=em_out_tx,
+        election_result_sender=er_tx,
+        connection_message_receiver=cm_rx,
+        command_receiver=co_rx,
+        is_candidate=False,
+    )
+
+    async with create_task_group() as tg:
+        with fail_after(3):
+            tg.start_soon(election.run)
+            _ = await _result_for_clock(er_rx, 0)
+            # Round 1: win a two-node round against a lower node ID.
+            await em_in_tx.send(
+                em(clock=1, seniority=LAST_RESORT_SENIORITY_FLOOR + 1, node_id="A")
+            )
+            first = await _result_for_clock(er_rx, 1)
+            assert first.session_id.master_node_id == NodeId("B")
+
+            # Round 2: a freshly started management node with a higher node ID.
+            await em_in_tx.send(
+                em(clock=2, seniority=LAST_RESORT_SENIORITY_FLOOR + 1, node_id="Z")
+            )
+            second = await _result_for_clock(er_rx, 2)
+            assert second.session_id.master_node_id == NodeId("B")
+            assert second.is_new_master is False
+
+            em_in_tx.close()
+            cm_tx.close()
+            co_tx.close()
+
+    assert election.seniority == LAST_RESORT_SENIORITY_FLOOR + 2
