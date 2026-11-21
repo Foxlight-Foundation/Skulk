@@ -523,9 +523,13 @@ the fork's whole history, about 177 MB for mflux). The Rust bindings
 wheel on pull requests and `dev` pushes that touch `rust/**`, the workspace
 manifests or the workflow, checks the wheel's name, then installs it and starts
 the swarm on an isolated `SKULK_LIBP2P_NAMESPACE`. It publishes to the same
-index only on manual dispatch with `publish=true`, which needs the workflow
-file on the default branch; the index is append-only, so republishing needs a
-bindings version bump. macOS and Linux still build the bindings from the
+index only on manual dispatch with `publish=true`. The command line runs it
+against any branch that carries the workflow file
+(`gh workflow run bindings-wheel.yml --ref <branch> -f publish=true`), provided
+the workflow has already run once on some branch (its pull-request or push
+trigger registers it with GitHub); only the website's Run button needs the
+file on the default branch. The index is
+append-only, so republishing needs a bindings version bump. macOS and Linux still build the bindings from the
 workspace source. Every Skulk build of `llama-server` (the engine wheels, the
 CUDA pod image and both `install-deps.sh` scripts) passes
 `LLAMA_USE_PREBUILT_UI=OFF`: llama.cpp otherwise downloads its built-in chat
@@ -1357,7 +1361,13 @@ The system uses event sourcing for state management:
 ### Rust Components
 Rust code in `rust/` provides:
 - `networking`: libp2p networking (gossipsub, peer discovery)
-- `skulk_pyo3_bindings`: PyO3 bindings exposing Rust to Python
+- `skulk_pyo3_bindings`: PyO3 bindings exposing Rust to Python. Its tokio
+  threads outlive the interpreter, so code that runs on them must never call
+  `Python::attach`: log through `log`/`tracing` (the bridge in
+  `src/exit_safety.rs` drops records once Python is exiting), start futures
+  with `exit_safety::future_into_py`, and return plain Rust data that becomes
+  a Python object in `IntoPyObject`. `routing/tests/test_bindings_interpreter_exit.py`
+  covers it.
 - `system_custodian`: System-level operations
 
 ### Extension API (plugins)
@@ -1447,6 +1457,13 @@ client/policy management. Credentials alone grant no effects, and provider login
 never grants host permission. `native_inference_calls.py` and
 `native_inference_hosts.py` serve `/v1/native-inference`: exact unary read/inference
 calls and delegated calls over the existing role-authenticated owner channel.
+The matching SDK 1 owner/Core candidate also forwards delegated streams. Reverse
+`describe_inference` resolves one exact destination under an active parent;
+`delegate_inference_stream` binds its original scope ID to raw media packets.
+Core independently attenuates current caller and signed destination ceilings,
+guards every media response, and retains parent custody through target cleanup.
+These private operations require the matching owner candidate; they do not
+change the published native profile bytes or grant ambient discovery authority.
 `api/native_inference_service.py` shares a single broker across API adapters,
 serializes protected host-generation replacement and drains before shutdown.
 The owning API task retires an injected broker after all local/relay listeners

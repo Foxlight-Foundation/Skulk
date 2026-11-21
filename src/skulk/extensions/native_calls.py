@@ -342,7 +342,17 @@ class NativeCalls:
                 peer = Peer(
                     AuthenticatedStream(reader, writer, keys, self.budget),
                     self._handle,
-                    frozenset({"delegate", "delegate_inference"})
+                    frozenset(
+                        {
+                            "delegate",
+                            "delegate_inference",
+                            "delegate_inference_stream",
+                            "describe_inference",
+                            "stream_ready",
+                            "stream_input",
+                            "stream_next",
+                        }
+                    )
                     if self.inference_handler is not None
                     else frozenset({"delegate"}),
                     lambda: self._current(binding),
@@ -358,7 +368,15 @@ class NativeCalls:
         if request.operation == "delegate":
             return await self._delegate(peer, request, payload)
         if (
-            request.operation == "delegate_inference"
+            request.operation
+            in (
+                "delegate_inference",
+                "delegate_inference_stream",
+                "describe_inference",
+                "stream_ready",
+                "stream_input",
+                "stream_next",
+            )
             and self.inference_handler is not None
         ):
             return await self.inference_handler(peer, request, payload)

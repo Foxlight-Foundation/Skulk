@@ -70,6 +70,17 @@ class InferenceDelegation(BaseModel):
 
 
 @final
+class InferenceDestinationQuery(BaseModel):
+    """Read-only exact-target resolution under the actual active source parent."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    parent_call_id: Digest = Field(description="Actual source call on this role peer.")
+    destination: InferenceTarget = Field(
+        description="Exact compiled target to resolve."
+    )
+
+
+@final
 @dataclass(slots=True, repr=False)
 class _Active:
     peer: Peer
@@ -89,6 +100,19 @@ class _Active:
 
 
 @final
+@dataclass(slots=True)
+class _DelegatedMedia:
+    stream: NativeInferenceStream
+    authorize: Callable[[], None]
+    withdraw: Callable[[], None]
+    expires_at: float | None
+    deadline: int | None
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+    pull: asyncio.Lock = field(default_factory=asyncio.Lock)
+    failed: bool = False
+
+
+@final
 class NativeInferenceCalls:
     """Own exact inference dispatch and a bounded active original-caller tree."""
 
@@ -97,7 +121,7 @@ class NativeInferenceCalls:
         self.connection, self.issuer_node_id = connection, issuer_node_id
         self.kernel = public_inference_kernel()
         self.hosts = NativeCalls(
-            connection, issuer_node_id, inference_handler=self._delegate
+            connection, issuer_node_id, inference_handler=self._handle_delegation
         )
         self.callers = InferenceCallers(
             self.hosts.root, connection.profile_id, issuer_node_id
@@ -105,6 +129,7 @@ class NativeInferenceCalls:
         self.callers.check()
         self.directory = InferenceHosts(self.hosts)
         self.active: dict[tuple[Peer, str], _Active] = {}
+        self.delegated: dict[tuple[Peer, str], _DelegatedMedia] = {}
         self.closed = False
         self.watch: asyncio.Task[None] | None = None
 
@@ -329,6 +354,8 @@ class NativeInferenceCalls:
         consume: Callable[[NativeInferenceStream], Awaitable[None]] | None = None,
         caller_guard: Callable[[], None] | None = None,
         complete_delivery: NativeCompletionDelivery | None = None,
+        *,
+        delegated_call_id: str | None = None,
     ) -> Received:
         fields = _OBJECT.validate_json(context.canonical())
         if (
@@ -357,7 +384,9 @@ class NativeInferenceCalls:
             caller_guard=caller_guard,
         )
         self._permitted(active)
-        call_id = secrets.token_hex(32)
+        call_id = delegated_call_id or secrets.token_hex(32)
+        if (peer, call_id) in self.active:
+            raise ValueError("inference active call identity already owned")
         self.active[peer, call_id] = active
         if self.watch is None:
             self.watch = asyncio.create_task(self._watch_authority())
@@ -501,6 +530,137 @@ class NativeInferenceCalls:
             ),
         )
 
+    async def _handle_delegation(
+        self, peer: Peer, request: RequestFrame, payload: bytes
+    ) -> Reply:
+        if request.operation == "describe_inference":
+            return await self._describe_destination(peer, request, payload)
+        if request.operation in ("stream_ready", "stream_input", "stream_next"):
+            return await self._delegated_media(peer, request, payload)
+        return await self._delegate(peer, request, payload)
+
+    async def _describe_destination(
+        self, peer: Peer, request: RequestFrame, payload: bytes
+    ) -> Reply:
+        try:
+            if payload:
+                raise ValueError("native descriptor query has a body")
+            query = InferenceDestinationQuery.model_validate(request.parameters)
+            parent = self.active.get((peer, query.parent_call_id))
+            if (
+                parent is None
+                or parent.uncertain
+                or parent.execution_complete
+                or parent.delegating
+            ):
+                raise ValueError("native descriptor parent unavailable")
+            self._permitted(parent)
+            allowed = _OBJECT.validate_json(parent.context.canonical())[
+                "allowed_targets"
+            ]
+            if (
+                not isinstance(allowed, list)
+                or query.destination.model_dump(mode="json") not in allowed
+            ):
+                raise ValueError("native descriptor target is outside parent authority")
+            directory = await self.directory.directory(streaming=True)
+            self._permitted(parent)
+            if self.active.get((peer, query.parent_call_id)) is not parent:
+                raise ValueError("native descriptor parent changed")
+            matches = [
+                entry for entry in directory if entry.target == query.destination
+            ]
+            if len(matches) != 1:
+                raise ValueError("native descriptor target unavailable")
+            listing = matches[0]
+            self.callers.authorize(parent.caller, listing.grant())
+            return Reply(
+                "complete",
+                {"descriptor": listing.descriptor.model_dump(mode="json")},
+                check=lambda: self._permitted(parent),
+            )
+        except (OSError, ValueError, TimeoutError):
+            # Resolution is read-only: refusal does not dispatch or consume a
+            # delegation sequence, and never returns ambient catalog metadata.
+            return Reply("pre_dispatch", {})
+
+    async def _delegated_media(
+        self, peer: Peer, request: RequestFrame, payload: bytes
+    ) -> Reply:
+        if set(request.parameters) != {"call_id"}:
+            return Reply("pre_dispatch", {})
+        identifier = request.parameters["call_id"]
+        media = (
+            self.delegated.get((peer, identifier))
+            if isinstance(identifier, str)
+            else None
+        )
+        if media is None:
+            return Reply("pre_dispatch", {})
+        try:
+            media.authorize()
+            if request.operation == "stream_ready":
+                if payload:
+                    return Reply("pre_dispatch", {})
+                remaining = (
+                    None
+                    if media.expires_at is None
+                    else min(
+                        media.expires_at - asyncio.get_running_loop().time(),
+                        (media.deadline - time.time_ns() // 1_000_000) / 1000
+                        if media.deadline is not None
+                        else float("inf"),
+                    )
+                )
+                if remaining is not None and remaining <= 0:
+                    raise ValueError("delegated stream expired")
+                return Reply(
+                    "complete",
+                    {
+                        "ready": True,
+                        "remaining_seconds": remaining,
+                        "deadline_unix_ms": media.deadline,
+                    },
+                    check=media.authorize,
+                    cancelled=media.withdraw,
+                )
+            if request.operation == "stream_input":
+                await media.stream.send_input(payload)
+                return Reply(
+                    "complete", {}, check=media.authorize, cancelled=media.withdraw
+                )
+            if payload or media.pull.locked():
+                return Reply("pre_dispatch", {})
+            async with media.pull:
+                value = await media.stream.next_output()
+                if value is None:
+                    raise ValueError("delegated output already completed")
+                transferred = False
+                try:
+                    terminal = value.kind != "chunk"
+
+                    def released() -> None:
+                        value.release()
+                        if terminal:
+                            media.done.set()
+
+                    reply = Reply(
+                        "complete",
+                        {"kind": value.kind},
+                        value.packet,
+                        released,
+                        media.authorize,
+                        media.withdraw,
+                    )
+                    transferred = True
+                    return reply
+                finally:
+                    if not transferred:
+                        value.release()
+        except (OSError, ValueError, TimeoutError, asyncio.CancelledError):
+            media.withdraw()
+            raise
+
     async def _delegate(
         self, peer: Peer, request: RequestFrame, payload: bytes
     ) -> Reply:
@@ -532,7 +692,8 @@ class NativeInferenceCalls:
             parent.delegating = claimed = True
             parent.children.add(current)
             destination = InferenceTarget.model_validate(fields["destination"])
-            directory = await self.directory.directory()
+            streaming = request.operation == "delegate_inference_stream"
+            directory = await self.directory.directory(streaming=streaming)
             self._permitted(parent)
             if self.active.get((peer, delegation.parent_call_id)) is not parent:
                 raise ValueError("inference parent was withdrawn")
@@ -540,6 +701,8 @@ class NativeInferenceCalls:
             if len(matches) != 1:
                 raise ValueError("inference exact destination unavailable")
             listing = matches[0]
+            if (listing.descriptor.io_mode == "unary") == streaming:
+                raise ValueError("inference delegated mode differs")
             candidate = self.kernel.CompositionV3Contract.from_json(
                 "Context", json.dumps(delegation.context)
             )
@@ -574,13 +737,113 @@ class NativeInferenceCalls:
                 )
                 if value is not None
             ]
+            expiry = min(expiries) if expiries else None
+            consume: Callable[[NativeInferenceStream], Awaitable[None]] | None = None
+            delegated_id: str | None = None
+            if streaming:
+                authorization = self.callers.authorize(parent.caller, listing.grant())
+                now = asyncio.get_running_loop().time()
+                for ceiling in (
+                    authorization.access.maximum_seconds,
+                    listing.inference_seconds,
+                ):
+                    if ceiling is not None:
+                        expiries.append(now + ceiling)
+                expiry = min(expiries) if expiries else None
+                actual_deadline = None
+                if expiry is not None:
+                    actual_deadline = time.time_ns() // 1_000_000 + int(
+                        (expiry - now) * 1000
+                    )
+                    if actual_deadline <= time.time_ns() // 1_000_000:
+                        raise TimeoutError
+                    policy_value = _OBJECT.validate_json(
+                        self._policy_record(parent).canonical()
+                    )
+                    policy_value["deadline_unix_ms"] = actual_deadline
+                    admitted = parent.context.admit(
+                        public,
+                        self.kernel.CompositionV3Contract.from_json(
+                            "Policy", json.dumps(policy_value)
+                        ),
+                        parent.listing.target.model_dump_json(),
+                        payload,
+                        time.time_ns() // 1_000_000,
+                        _TEXT.validate_python(
+                            candidate_fields["scope_id"], strict=True
+                        ),
+                    )
+                    actual_deadline = _DEADLINE.validate_python(
+                        _OBJECT.validate_json(admitted.canonical())["deadline_unix_ms"],
+                        strict=True,
+                    )
+                    assert actual_deadline is not None
+                    expiry = min(
+                        expiry,
+                        now + (actual_deadline - time.time_ns() // 1_000_000) / 1000,
+                    )
+                delegated_id = _TEXT.validate_python(
+                    candidate_fields["scope_id"], strict=True
+                )
+                if delegated_id == delegation.parent_call_id:
+                    raise ValueError("delegated media identity is the parent")
+                key = peer, delegated_id
+
+                async def consume_stream(stream: NativeInferenceStream) -> None:
+                    assert parent is not None
+                    if key in self.delegated:
+                        raise ValueError("delegated media identity is already owned")
+
+                    def authorize() -> None:
+                        assert parent is not None
+                        if (
+                            media.failed
+                            or current.cancelling()
+                            or self.active.get((peer, delegation.parent_call_id))
+                            is not parent
+                            or self.delegated.get(key) is not media
+                        ):
+                            raise ValueError("delegated stream was withdrawn")
+                        self._permitted(parent)
+                        stream.authorize()
+
+                    def withdraw() -> None:
+                        assert parent is not None
+                        media.failed = True
+                        parent.uncertain = True
+                        if (
+                            current is not asyncio.current_task()
+                            and not current.done()
+                            and not current.cancelling()
+                        ):
+                            current.cancel()
+                        media.done.set()
+
+                    media = _DelegatedMedia(
+                        stream, authorize, withdraw, expiry, actual_deadline
+                    )
+                    self.delegated[key] = media
+                    try:
+                        await media.done.wait()
+                        authorize()
+                        if not stream.finished:
+                            raise ValueError(
+                                "delegated stream has no verified terminal"
+                            )
+                    finally:
+                        if self.delegated.get(key) is media:
+                            del self.delegated[key]
+
+                consume = consume_stream
             response = await self._dispatch(
                 listing,
                 admitted,
                 parent.caller,
                 payload,
-                min(expiries) if expiries else None,
+                expiry,
+                consume,
                 caller_guard=parent.caller_guard,
+                delegated_call_id=delegated_id,
             )
             transferred = True
             return Reply("complete", {}, response.payload, response.release)

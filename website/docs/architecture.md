@@ -2820,6 +2820,16 @@ The frozen reader carries all four cohort receipts, retaining both issued infere
 requiring readiness. `/v1/inference-access` supplies direct-owner revision-fenced
 client/policy management. Credentials alone grant no effects, and provider login
 never grants host permission. `native_inference_calls.py` and
+the matching SDK 1 owner support delegated streaming over the protected role
+channel. Exact-target resolution is read-only and requires the active parent's
+authority. Core independently admits each child, intersects nullable parent,
+request, caller and signed destination ceilings, and relays original binary
+packets under the admitted scope ID. Terminal delivery still waits for target
+end, control completion and cleanup; revocation cancels the owned call tree.
+The private reverse operations require a matching owner/Core candidate and
+preserve the issued native profile and signature bytes.
+
+`native_inference_calls.py` and
 `native_inference_hosts.py` serve `/v1/native-inference`: exact unary read/inference
 calls and delegated calls over the existing role-authenticated owner channel.
 `api/native_inference_service.py` shares a single broker across API adapters,

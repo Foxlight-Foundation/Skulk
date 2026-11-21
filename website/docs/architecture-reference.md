@@ -3473,6 +3473,23 @@ Native inference WebSocket: sole receive/disconnect task starts after the initia
   belong to the owner. Opening the UI grants no inference or remote authority.
 
 
+### Delegated native streaming (SDK 1 candidate)
+
+- `NativeInferenceCalls._handle_delegation` separates read-only exact-target
+  `describe_inference`, `delegate_inference_stream`, and reverse media operations
+  from the existing unary delegation path. Parent lookup uses the actual role
+  peer and call ID; public context metadata grants no caller authority.
+- Child media uses the admitted scope ID without rewriting packet bytes.
+  Collision checks precede dispatch. Each readiness/input/output operation
+  repeats original-caller and current target authority; leases survive physical
+  response delivery, and failed delivery withdraws the parent.
+- Finite caller or signed target ceilings narrow the compiled child context and
+  monotonic timer; null introduces no generation deadline. Terminal delivery
+  requires target end/control/cleanup and exact child completion. Repeated
+  cancellation cannot detach target retirement or release the root early.
+- Requires the matching owner candidate. This adds no HTTP endpoint and changes
+  no issued native contract digest, signature domain, or provider custody.
+
 ### Native unified chat adapter (experimental)
 
 `api/native_chat_catalog.py` reads only this authenticated caller's metadata,

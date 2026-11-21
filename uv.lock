@@ -2635,7 +2635,7 @@ wheels = [
 
 [[package]]
 name = "skulk-pyo3-bindings"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "rust/skulk_pyo3_bindings" }
 
 [package.dev-dependencies]

@@ -7334,6 +7334,16 @@ Changing a signed runtime or descriptor requires an explicit new enrollment.
 
 ### Exact native inference invocation
 
+The matching SDK 1 owner/Core candidate also allows an admitted capability to
+delegate a streaming child under the original caller. This uses the protected
+owner channel, not a new HTTP endpoint. The child must be an exact allowed
+destination with current permission and compatible signed declarations. Its
+duration intersects any parent, request, caller and signed owner ceilings;
+absent ceilings add no generation cap. Revocation or disconnect drains owned
+work, and a media terminal alone cannot complete the parent before target
+control and cleanup finish. This requires the matching owner candidate;
+previously issued native packages do not acquire this feature implicitly.
+
 Invocation accepts an authenticated direct owner or an enrolled
 `Authorization: Bearer <token>` client. Bearers require a direct HTTPS connection,
 an actual loopback socket, or a verified Tailscale peer. Forwarding headers,

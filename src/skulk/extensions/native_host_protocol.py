@@ -46,6 +46,7 @@ type Operation = Literal[
     "stream_input",
     "stream_next",
     "delegate_inference",
+    "delegate_inference_stream",
 ]
 
 
