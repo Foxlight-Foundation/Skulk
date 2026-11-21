@@ -47,6 +47,8 @@ CAPABILITY_STORE_CATALOG_DOCUMENT: Final = "catalog.json"
 
 CAPABILITY_STORE_EXTENDED_CATALOG_DOCUMENT: Final = "catalog-v3.json"
 """Separate signed catalog carrying expanded declarations; the old address stays readable."""
+CAPABILITY_STORE_NATIVE_CATALOG_DOCUMENT: Final = "catalog-v4.json"
+"""Native-aware catalog with full manifest and ABI consent identities."""
 
 CAPABILITY_STORE_TRUST_TARGET: Final = "v1/publisher-trust.json"
 """The one TUF target the store signs: its publisher trust document."""

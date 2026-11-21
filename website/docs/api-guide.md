@@ -2176,21 +2176,65 @@ weight/runtime overhead: 10 GiB for ACE-Step and 2 GiB for MiniMax. MiniMax Meta
 reserves 5 GiB beyond weight/runtime overhead against its system-RAM ceiling.
 The same estimate governs mounting and worker admission; a matching hardware
 class with insufficient capacity cannot place the model.
-CUDA music preparation requires the package's compiled GPU class in both
-live node facts and the signed support claim: SM 8.9 for Linux amd64 and
-SM 12.1 for Linux arm64. The signed claim must name the platform's exact managed
-build. Managed packages require one observed NVIDIA device with a known matching
+Audio.cpp CUDA music preparation requires the package's compiled GPU class in
+live node facts: SM 8.9 for Linux amd64 and SM 12.1 for Linux arm64.
+Signed qualification records retain their exact tested build and hardware;
+missing qualification does not prohibit an otherwise compatible runtime.
+Managed packages require one observed NVIDIA device with a known matching
 compute class; multiple devices, mixed classes, and unknown classes cannot be
 admitted until execution and memory accounting can select the same physical
 device. Each published native build retains those restrictions when restored
 from cache. A generic NVIDIA claim cannot widen a managed package's compiled
 target, and package availability alone cannot place a model. A qualified
-operator-provided primary CUDA binary can use its own exact signed build claim.
+operator-provided primary CUDA binary uses its own verified build identity.
 When a dedicated CUDA wheel is already cached, configure
 `SKULK_AUDIO_CPP_CUDA_BIN` for that operator binary as well; startup cache
 rehydration otherwise prefers the dedicated build over a primary-only override.
 
 Music generation is an asynchronous job API for a mounted `TextToMusic` card.
+Native ACE base card metadata can also describe intrinsic editing modes in
+`music.native`. Those safetensors components cannot be loaded by the audio.cpp
+runner. This section documents generation; native editing has its separate
+contract below.
+Native-profile Download requests retain all selected primary, text-encoder and
+autoencoder files at their pinned revisions, grouping shared sources into one
+required transfer. Missing components fail the download with an actionable reason;
+the node and its download command processor remain available for other work.
+Offline reuse and preservation require the complete recorded data closure.
+Downloaded native bytes alone do not establish a mounted or ready engine.
+
+Under the Music Studio initiative, `POST /place_instance` and `POST /instance`
+prepare native ACE libraries separately from audio.cpp. The ordinary request
+uses `model_id` and `excluded_nodes`; an exact request uses its single specified
+node and optional explicit `resolved_backend`. Native lanes are `ace_step-cpu`,
+`ace_step-metal`, `ace_step-cuda` and `ace_step-rocm`; native Vulkan is not
+implemented. A bare engine requirement identifies compatibility but never a
+ready device. Native safetensors and GGUF music use distinct loaders.
+
+Preparation selects an advertised fixed package matching the worker's OS/CPU
+and generic device requirements. At most four mount preparations can wait on an
+accepting API node. One thirty-minute budget includes every candidate attempt,
+command queue, verification and device probe; another candidate does not reset
+it. Offline workers may reuse independently verified cached bytes only. The
+worker's ordered completion must match the request, accepting API, worker,
+package digest and device before the API can forward placement. That response
+must include the actual ready build, math policy and a fresh actual device-zero
+memory observation. Installable package metadata alone is insufficient.
+
+Native memory admission accounts for complete model loading and forward phases,
+all existing placements and idle future workspace across host/device/shared
+physical pools. It does not reuse generic already-reserved memory inputs or
+borrow another GPU's capacity. Explicit backend overrides cannot silently fall
+back to another lane. Preparation failures return an actionable `503`; invalid
+explicit native lanes return `400`. Other engines and worker health remain
+available. Insufficient disk reserve returns **503** with `error.message`
+identifying insufficient space on the selected worker and asking the operator
+to free storage and retry. No instance is created or unverified engine advertised
+as ready; the worker and its other engines stay running. Private exception paths
+and command details are kept in worker logs rather than the public error.
+Preparation does not itself load the model or establish qualification;
+installed acceptance and distribution remain separate from this source integration.
+
 The model's `/v1/models` `music` object identifies its family, lyric rule,
 accepted `min_seconds` and `max_seconds`, and `wav` output format. Music uses
 the existing API authentication policy. Jobs and WAV content belong to the
@@ -2236,6 +2280,10 @@ its expiration.
 If the ordered task terminates but its final music frame is lost, the API
 fails the job after a 45-second grace and the next 15-second sweep; it does
 not retain an active job indefinitely.
+For native ACE generation, execution-task cleanup after the terminal report
+does not cancel a registered WAV that is still being verified and delivered.
+The job remains in progress until both completion conditions hold; explicit
+cancellation or delivery failure still ends it without partial downloadable audio.
 
 ### Download music
 
@@ -2256,6 +2304,259 @@ whose WAV is still being delivered.
 **DELETE** `/v1/music/{music_id}` cancels a live job, removes its WAV, and
 forgets its record. It returns
 `{ "id": "...", "object": "music.deleted", "deleted": true }`.
+
+## Native music editing
+
+These routes describe the native edit service under the Music Studio initiative.
+Native ACE mounting and execution use the preparation and supervised native
+runner paths above; signed distribution and installed-platform acceptance remain
+separate initiative gates. Downloading a native card or engine package alone
+does not create an executable editing instance. Existing audio.cpp generation
+continues to use the music API above.
+
+Edits are asynchronous and local to the accepting API node. Use that same node
+for polling, cancellation and content. The existing API authentication policy
+applies; operator gateway access requires the inference (`chat:write`) scope.
+Raw source/result audio uses directed media transport and stays outside
+replicated State and event logs.
+After a verified native result is registered, ordinary execution-task cleanup
+does not cancel its pending media delivery. Explicit cancellation, failure and
+the bounded delivery deadline still apply.
+
+### Create an edit
+
+**POST** `/v1/music/edits` accepts `multipart/form-data` with exactly two fields:
+
+- `request`: one closed JSON object, at most 256 KiB.
+- `file`: the original encoded WAV, at most 64 MiB, one to 120 seconds, mono or
+  stereo, finite PCM/float samples, 8–192 kHz. The original is never overwritten.
+
+The response is **202** with a `music.edit` resource. Four edits, including
+unfinished source/return drains, may be active on one API node. One native model
+instance admits one generation or edit at a time. A prepared package alone does
+not satisfy model readiness.
+
+| Common field | Type | Contract |
+| --- | --- | --- |
+| `task` | string, required | `add_part`, `repaint`, or `continue` |
+| `model` | string, required | Selected native card alias |
+| `prompt` | string, required | Original nonblank caption, up to 8,000 characters |
+| `lyrics` | string, optional | Original nonblank lyrics, up to 20,000 characters; obeys the card's lyric rule. Omission resolves to `[Instrumental]` |
+| `source_sample_rate` | integer, required | Clock for all request frame coordinates; must equal the measured WAV sample rate |
+| `seed` | integer, optional | 0–4294967295, including zero. The API selects a missing seed once and durably records it before dispatch |
+
+Operation-specific fields are closed:
+
+| Task | Additional controls |
+| --- | --- |
+| `add_part` | Required `part_class`, limited to the card's declared classes. Optional `region_start_frame` (default 0) and `region_end_frame` (default complete source) |
+| `repaint` | Required `region_end_frame`; optional `region_start_frame` (default 0). The nonempty half-open region must be inside the original |
+| `continue` | Required `target_frames`: total extent including the complete original, strictly larger than it. Only the appended tail is reworked; region/part fields are rejected |
+
+Inputs use the source clock. The API maps starts down and ends up to the native
+48 kHz frame grid using integer arithmetic. The resource explicitly returns
+`frame_sample_rate: 48000`, resolved `target_frames`, `region_start_frame`, and
+`region_end_frame`. In-place edits preserve the original extent after that
+mapping. Continue includes the original and the extension. The selected card's
+duration maximum and the global 120-second ceiling both apply.
+
+Unknown or task-inappropriate fields, caller paths, arbitrary native options,
+blank text, invalid clocks/ranges and disallowed card controls return **422**.
+Malformed multipart requests return **400**, wrong content type **415**, a
+bounded upload exceeding its declared/streamed limit **413**, and an upload
+exceeding 180 seconds **408**. Capacity/storage admission failure returns **503**.
+An interrupted or ambiguous submission is never automatically resubmitted;
+inspect the accepting node's retained jobs before choosing to try again.
+
+```bash
+curl -X POST "$SKULK_URL/v1/music/edits" \
+  -F 'request={"task":"repaint","model":"native-model-id","prompt":"A gentle cello response","source_sample_rate":48000,"region_start_frame":480000,"region_end_frame":960000,"seed":0}' \
+  -F 'file=@context.wav;type=audio/wav'
+```
+
+### List and retrieve edits
+
+**GET** `/v1/music/edits` accepts `limit` (1–63, default 20) and optional `after`
+(the previous page's retained `last_id`). The response has `object: "list"`,
+`data`, `first_id`, `last_id`, and `has_more`, newest first. Invalid/stale cursors
+return **400**. Up to 64 records are retained; completed unexpired results are
+protected from implicit eviction to admit more work.
+
+**GET** `/v1/music/edits/{edit_id}` returns the accepted caption, lyrics, fixed
+seed, measured original, resolved native extent, status and terminal times.
+`output` remains null until native render completion, independently verified and
+synced WAV custody, and drained reverse acceptance all agree. The API
+retains its native task until that return acknowledgement has drained; render
+metadata alone cannot retire the worker's result producer. Completed output
+records exact source lineage, runtime/model identities, observed device/precision,
+conditioning gain/padding, render latency and WAV geometry/size/SHA-256/peak.
+Paths and raw audio bytes are excluded. A missing node-local job returns **404**.
+
+Failed jobs retain the available placement or native error in `error`, bounded
+to 1,024 characters, including when final task status arrives before its DATA
+error frame. When all matching native instances are busy, the job fails
+with the idle-capacity reason and `output: null`. Callers can submit a new request
+after capacity returns. A **202** response confirms the job receipt; it does not
+reserve a busy model or promise queued inference.
+
+Placement waits are bounded to 45 seconds, the full placed edit to two hours, and
+post-render return delivery to five minutes, checked by a one-second sweeper.
+The native cooperative timeout and runner hard deadline use the same two-hour
+render ceiling. This accommodates slower CPU execution; it is not a completion
+time estimate. Earlier cancellation, failure and source-transfer limits still
+apply.
+Restart or cluster-session replacement fails interrupted work without replay or
+seed changes. Previously completed results are reverified before serving.
+
+### Download, cancel and delete edits
+
+**GET** `/v1/music/edits/{edit_id}/content` returns the completed **PCM24 stereo
+48 kHz WAV**, at most 64 MiB, with `Content-Length`, attachment filename and a
+quoted SHA-256 `ETag`. Content is retained for 24 hours. Unsettled/failed/cancelled
+jobs return **409**; absent/expired content returns **404**. Eight downloads are
+admitted per API node; excess readers return **503**. Deleting a job does not
+truncate a download whose descriptor was already leased.
+Native Repaint and Continue candidates blend across a 25 ms join. Headroom
+normalization can also scale the whole candidate, as recorded in its output
+metadata. The retained original asset stays unchanged; candidate samples outside
+the requested interval are not promised to be bit-identical to that asset.
+If removing expired content fails, its storage reservation remains in place and
+later sweeps retry cleanup without interrupting unrelated API work.
+
+**POST** `/v1/music/edits/{edit_id}/cancel` records cancellation, stops native
+work and source/result delivery, and removes partial copies. Terminal jobs are
+unchanged. **POST** `/v1/cancel/{edit_id}` also cancels an active edit. Late native
+frames cannot revive cancelled work.
+Terminal status does not release a cleanup reservation: original copies,
+partial results and their admission slot remain owned until both stores drain.
+Filesystem failures are retried in the background without stopping unrelated
+API work. Completed WAVs remain available while an original-only cleanup drains.
+
+**DELETE** `/v1/music/edits/{edit_id}` cancels active work, removes only API-owned
+content and forgets the record. It returns
+`{"id":"...","object":"music.edit.deleted","deleted":true}`. Missing jobs
+return **404**. Creator originals and Studio project assets remain independently
+owned. WAV output is never silently truncated or transcoded.
+Incomplete physical cleanup returns **503** and retains the job record; retry
+delete after cleanup completes. Startup likewise refuses edit storage readiness
+while an orphan cleanup failure leaves unaccounted content behind.
+If recording a source/result transport failure encounters an uncertain index
+write, the edit service cancels its retained work and returns **503** until its
+index is reopened. Unrelated API serving continues; an unwritten terminal outcome
+is never reported as durably committed.
+
+## Source separation
+
+Source separation creates an asynchronous, **API-node-local** four-stem job for
+an already mounted `AudioSeparation` model. The initial native adapter estimates
+drums, bass, other accompaniment and vocals with HTDemucs. These are model
+estimates; the original is preserved independently and is never overwritten.
+Use the same API node for creation, status, cancellation and downloads. Jobs
+are not forwarded to another API node when it restarts or becomes unavailable.
+These routes use the existing API access policy; the authenticated operator
+gateway requires the existing inference (`chat:write`) scope.
+
+### Create a job
+
+**POST** `/v1/audio/separations` accepts `multipart/form-data` containing exactly:
+
+| Field | Type | Contract |
+| --- | --- | --- |
+| `request` | JSON encoded as a text field, at most 4 KiB | `{"model":"mounted-model-id"}`. Extra fields, native options and server-local paths are rejected. |
+| `file` | One WAV upload | 1–120 seconds, mono or stereo, 8–192 kHz. The complete original is at most 64 MiB and its decoded float32 geometry at most 128 MiB. PCM8/16/24/32 and float32/64 are accepted; samples must be finite and supported WAV structure must be valid. The supplied filename is ignored. |
+
+The body has a streaming limit of 64 MiB plus 32 KiB multipart overhead, even
+without `Content-Length`. At most four upload handlers and four active jobs are
+admitted on an API node. A slot remains reserved while its bounded reverse
+acknowledgements or cancellation terminals drain, including after cancellation.
+A model selection or ordinary mount prepares its engine
+separately; creating a separation does not install or mount a model implicitly.
+
+```bash
+curl -X POST http://localhost:52415/v1/audio/separations \
+  -F 'request={"model":"adefossez/HTDemucs"}' \
+  -F 'file=@original.wav;type=audio/wav'
+```
+
+Success returns **202** with an `audio.separation` object containing `id`,
+`model`, independently measured `source`, `status`, `created_at`, nullable
+`completed_at`, `expires_at`, `error` and `output`. Status is `queued`,
+`in_progress`, `completed`, `failed` or `cancelled`. `source` contains the complete
+encoded SHA-256 and size, sample rate, channels, frames, encoding and bit depth;
+it contains no file path or samples. `output` remains null until successful
+rendering, all four verified local files agree with the complete manifest, and
+their return-path acknowledgements have been admitted. An unavailable return
+transport or acknowledgement deadline fails the job, including when every WAV
+has already verified; it cannot silently report completion.
+Repeated completion packets also require manifest verification; arrival of the
+manifest rechecks settlement after any previously admitted acknowledgements.
+The manifest's JSON `stems` array contains `drums`, `bass`, `other`, and `vocals`
+exactly once in that order. The same complete-set, strict field and WAV geometry
+checks apply when the worker and accepting API run on different nodes.
+The native task remains owned until every stem acknowledgement drains. Render
+metadata alone cannot retire the worker's result producer. Failure or cancellation
+submits task cancellation before finalizing its metadata stream.
+
+Uploads have a three-minute deadline; a stalled body returns 408 and its partial
+spooled files are closed. Requests with invalid metadata or WAV data return 422; malformed multipart
+returns 400, an unsupported request content type 415, and byte-limit violations
+413. Capacity or unavailable storage returns 503. An unavailable model or a
+later placement/execution failure is recorded as an actionable terminal error.
+The available placement or native reason is retained in `error`, bounded to
+1,024 characters. When every matching separator is occupied, the job fails with
+the idle-capacity reason and `output: null`; callers can submit a new request
+after capacity returns. The initial `queued` receipt does not promise an inference
+queue on an occupied model.
+Submission occurs once: after an interrupted response, inspect the retained job
+before retrying. The API never automatically replays an uncertain edit.
+
+### Inspect and retrieve content
+
+**GET** `/v1/audio/separations` lists newest-first jobs. `limit` is 1–63
+(default 20); `after` is a retained last-ID cursor. The response has `object:
+"list"`, `data`, `first_id`, `last_id` and `has_more`. An unknown cursor returns
+400. At most 64 job records are retained; unexpired complete results are not
+silently evicted to admit another job.
+
+**GET** `/v1/audio/separations/{separation_id}` returns committed metadata or
+404 when this API node does not retain that ID. A completed `output` has the
+original `source`, ordered `stems`, shared `common_gain` and `pre_gain_peak`.
+Each stem reports its name, MIME type, size, SHA-256, sample rate, complete frame
+count, channels, bit depth and measured peak. All four stems share the original
+timebase, including any explicit resampling to the model's native 44.1 kHz.
+
+**GET** `/v1/audio/separations/{separation_id}/content/{stem}` downloads
+`drums`, `bass`, `other` or `vocals` as **PCM24 stereo WAV at 44.1 kHz**.
+There is no per-stem automatic normalization: one shared attenuation avoids
+clipping while preserving relationships between the stems. Increasing export
+precision does not recover details absent from the source. Each complete WAV is
+capped at 64 MiB, and the four-file set at 256 MiB. `ETag` is the quoted complete
+WAV SHA-256. Partial sets return 409; absent or expired content returns 404.
+An already opened download holds its file descriptor, so deleting the job cannot
+truncate that download. At most eight downloads run concurrently per API node.
+
+Verified content is retained for 24 hours, under a 2 GiB aggregate API media
+budget. Capacity exhaustion requires deletion or content expiry; results are
+never truncated. Complete retained sets are independently verified on API
+restart. Interrupted jobs become failed, partial files remain unservable, and
+no native generation is replayed automatically.
+
+### Cancel and delete
+
+**POST** `/v1/audio/separations/{separation_id}/cancel` requests native-task and
+media cancellation, removes partial API content and retains terminal metadata.
+An already terminal job is unchanged. The response is the current job object;
+unknown IDs return 404. Native readers and active file senders drain before
+their Worker-owned copies are reclaimed.
+
+**DELETE** `/v1/audio/separations/{separation_id}` cancels active work, removes
+owned content and forgets the record. It returns `id`, `object:
+"audio.separation.deleted"` and `deleted: true`, or 404 for an unknown ID.
+Neither route deletes the creator's original Studio asset. Admission waits at
+most 45 seconds for placement, the full placed job has a 40-minute ceiling, and
+completed-output delivery has a five-minute budget. Source transfer is bounded
+to three minutes. Bytes and local paths never enter replicated State or event
+logs.
 
 ## Benchmark Endpoints
 
@@ -2359,6 +2660,11 @@ cards retain final override precedence.
 
 Each entry also separates discovery truth from runtime truth:
 
+- `separation`, when present, describes an explicit `AudioSeparation` model's
+  `family`, ordered `stems`, `sample_rate`, `audio_channels`, and
+  `trained_segment_seconds`. It is independent of speech's
+  `audio` and text-to-music's `music` metadata. This optional object describes
+  model truth and does not imply a mounted separator or grant execution.
 - `registry_architecture` is the trusted open architecture identifier retained
   from the signed catalog.
 - `capability_claims` reports signed model/artifact capabilities even when no
@@ -2988,7 +3294,9 @@ returns HTTP 400 with `X-Skulk-Placement-Failure:
 model_card_identity_mismatch`, and no instance state is created.
 The instance's optional `excludedInstallIds` accepts an array of UUID strings
 and retains these persistent machine exclusions in the placement and subsequent
-repairs. Malformed UUIDs, numeric entries, and a scalar instead of an array
+repairs. Restart recovery retains every original stable exclusion even while
+the machine is connected, so a later rejoin or a fresh recovery recorder does
+not lose the setting. Malformed UUIDs, numeric entries, and a scalar instead of an array
 return HTTP 422 before a placement command is sent.
 For vLLM, exact placement fills a missing shard `resolvedEngineBuild` from the
 node's advertised installed or first-use runtime, just like automatic placement.
@@ -3473,6 +3781,16 @@ calling the destructive delete endpoint.
 
 **DELETE** `/download/{node_id}/{model_id}`
 
+Path parameters select the target node and repository-form model ID; there is
+no request body. The response contains a `command_id` acknowledging dispatch,
+not confirmation that deletion has finished. Observe node download progress
+for the result.
+
+This removes the model's ordinary default or staging cache, including flat or
+nested GGUF files. Read-only external search roots and canonical Model Store
+artifacts are protected even if an older download status labels them writable.
+Canonical artifact removal uses the Model Store lifecycle instead.
+
 ## Model Store Endpoints
 
 These endpoints are available when the model store is configured.
@@ -3644,8 +3962,10 @@ The optional JSON body accepts the following fields:
   Omit it only for installed or custom owner cards without a registry identity.
 - `artifact_role`: one of `base`, `vision_weights`, `mtp_sidecar`, `assistant`,
   `served_draft`, `vllm_draft`, `video_companion` (a video card's externally
-  hosted companion, such as guide preprocessor weights), or `image_component`
-  (an image card's external component repository/revision group); defaults to
+  hosted companion, such as guide preprocessor weights), `image_component`
+  (an image card's external component repository/revision group), or
+  `music_component` (a native music card's external encoder/autoencoder source
+  group); defaults to
   `base`.
 
 A complete companion request names the companion repository and immutable
@@ -3697,6 +4017,42 @@ the component transfer; an undeclared source revision returns 409. Missing files
 listing-size conflicts, or failed object verification fail the transaction;
 unrelated quants and projectors are excluded. A cached base GGUF alone does not
 mark the group complete: missing components trigger recovery.
+
+For a native music card, a base Download also acquires every required external
+source before returning a complete transfer state. A `music_component` request
+names its owner and exact source revision, omits `gguf_file`, and selects all
+declared encoder/autoencoder files at that source. The store verifies both the
+role and revision against the owning card; mismatches return 409. Shared sources
+transfer once. Missing files, incorrect sizes or object pins fail the request.
+Completed source groups remain reusable after cancellation of the base request;
+an incomplete base is never reported complete. Offline reuse requires all source
+records and files. This operation downloads model data, not an engine package,
+and does not mount or advertise native music execution capacity.
+
+Native `music_component` path aliases are `skulk-native/<digest>`, derived from
+the exact repository, immutable revision and complete grouped bundle identity;
+`source_repository` still names the upstream repository. A mismatched alias is
+rejected with 409. Existing repository-only aliases remain accepted for legacy
+caches, with the same complete-selection checks. Shared data reuse does not
+replace another owner's installed card or transfer its execution permissions.
+Different selections have independent active transfers and cache generations.
+An already completed native Download rechecks the exact owning card and every
+required source before repeating success; lost files cause repair online or an
+actionable offline failure. A deleted source alias is not resurrected through a
+legacy-cache fallback. Failed or cancelled replacements retain the previously
+registered complete generation.
+Completed native store-cache reuse verifies retained digests and original object
+pins before accepting success. A native source's retained `owner_model_id` is
+historical provenance: deleting that base model preserves other models' shared
+source discovery and preservation. Deleting the source alias itself still
+suppresses automatic recovery and peer import.
+Cache verification waits for the publication fence and hashes outside the short
+download-admission lock, then rechecks the selected status before returning.
+Unrelated admission and active-transfer cancellation remain available. Cancelled
+verification drains its file thread before releasing that fence. Pinned existing
+files are checked against their original object identity during download reuse:
+online retries replace corrupt bytes; offline reuse refuses them.
+Cancellation settles queued downloads even before their transfer coroutine starts.
 
 The response reports `modelId`, nullable `sourceRevision`, `status`, and
 `progress`; transport or store rejection additionally reports `error`. The
@@ -3920,7 +4276,7 @@ Important fields:
 | `remote_code_approved_on_this_node` | boolean | Deprecated compatibility alias for `remote_code_approved_for_cluster` |
 | `remote_code_automatically_trusted` | boolean | Whether repository code is authorized by signed publication, explicit addition, or the earlier Skulk release that shipped an installed card, for this exact card |
 | `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, built-in `voices`, `default_voice`, voice/reference-audio flags, translation support, and sample rates |
-| `music` | object or null | Text-to-music family, lyric requirement, declared duration bounds, and WAV output format; null for non-music cards |
+| `music` | object or null | Intrinsic music family, lyric requirement, declared duration bounds and WAV output format; native ACE base additionally has `native` variant, `editing_modes`, `part_classes`, `sample_rate`, and `audio_channels`. Metadata does not imply ready execution capacity. Null for non-music cards. |
 | `image` | object or null | Native image family, immutable `components`, optional SDXL `unetStructure`, default canvas/steps/guidance, dimension and area limits, reference-image limit, alpha support and optional fixed sigma schedule; null for legacy or non-image cards |
 | `video` | object or null | Declared video generation contract from a video model card: `modes` (`t2va`, `fl2va`, `ref2va`), `min_seconds`/`max_seconds`, `fps`, frame grid (`frame_grid_multiple`, `frame_grid_offset`), `canvas_multiple`, `default_short_edge`, `max_pixels`, `aspect_ratios`, `audio_output` with `audio_sample_rate`/`audio_channels`, `default_steps`, `reference_limits`, `adapters` (named LoRAs with `modes`, `steps`, `strength`, and the `video_shift`/`audio_shift` a render with the adapter uses when the request sets none, selectable through the video job `lora` field), `styles` (the card's style embeddings with `modes`, selectable through the video job `styles` field), and every engine setting the job accepts with its default: `samplers` and `default_sampler`, `schedulers` and `default_scheduler`, the card's trained `video_shift`/`audio_shift` (null keeps the model's built-in value) with `shift_bounds`, `reference_fidelities` and `default_reference_fidelity` (empty and null unless the card serves `ref2va`), `codecs` and `default_codec`, `guides` (each guide the card derives from a `control` clip: `kind`, the `modes` it applies to, and the preprocessor `weights` it loads with their `repository` and `license`; empty without a ControlNet), `default_guide` (the guide a `control` clip gives when `control_kind` is omitted), and the ControlNet's own settings: `control_strength_bounds`, `default_control_strength` (the card's ControlNet's strength, else 1; null without a ControlNet), and `default_control_window` (the `control_start`/`control_end` a render takes when omitted). The lists are the engine's own, not a recommendation. Null for non-video cards |
 | `license` | object or null | Operator-facing license facts from the card: `name`, `url`, `spdx_id`, `notice`, and `display_name` (a product name the license requires in a UI). Informational; nothing is enforced |
@@ -4171,6 +4527,15 @@ which also covers a peer that missed the host's withdrawal reading. The
 dashboard mutes a satellite at the same age. The dashboard draws each summary
 as a satellite of its host in the topology and opens its surfaces from a
 flyout. Hosts with no capability nodes are absent from the map.
+
+On the experimental native host, a declared management proxy also becomes a
+`kind: "link"` opening action after its owner supplies an answering, isolated
+loopback facade. The URL belongs to the owner host and is intended for a browser
+on that host. It carries no credential and does not disclose the child's private
+listener port. Native health withdrawal, process retirement or owner shutdown
+withdraws that origin and its active connections. Application scripts are served
+on the separate facade origin, never below the Core dashboard origin; opening a
+management page grants no inference permission or remote operator delegation.
 
 The response carries a live `nodeResources` map as well. Each node entry includes
 its placement `backends`, declared `participation`, `apiAvailable` (whether the
@@ -4752,7 +5117,7 @@ without restart. Missing setup returns an actionable unavailable response.
 | GET | `/v1/plugins/managed` | Requires `plugins:read`. Returns `installations`, at most sixteen entries, with `plugin_id`, `release`, `selected_digest`, `selection_revision`, `enabled`, `service`, `stale`, `error_code`, `operation_id` and `operation_state`. `release` names the selected signed release from its staged metadata: `bundle_id`, `title` (null when the manifest declares none), `bundle_version`, `publisher` and `sequence`. It is null before a release is staged or when that metadata cannot be read, and it is display information only, never a trust or compatibility decision. `reload_runtime` is true when the manager can select a staged runtime and restart on request; a host reads it before asking, so a manager from before that request is told apart from one refusing a generation. `store_trust_retry` is true while installations following the built-in capability store were busy when its trust was last followed (by any caller, a terminal catalog read included); the host then renews that trust again within five minutes. Pending or selected operation references allow reconnect to resume observation without repeating a mutation. |
 | POST | `/v1/plugins/managed/installations` | Requires `plugins:manage`. Body: `plugin_id` in the `managed.*` namespace. Registers an empty installation and returns its observation. Does not download, stage or enable a release. |
 | GET | `/v1/plugins/managed/capabilities` | Requires `plugins:read` or direct owner authority. No parameters. Reads declarations from this API host's configured local manager without attaching, repairing setup, enabling or invoking a child. Returns `source`, `observedAt`, `scope: local_api_host`, and at most sixteen `installations`: selected metadata plus independent `reachable` (nullable) and exact `readyCapabilities`. A ready provisioning capability does not establish allocated inference capacity. `release.registration`, also additive to the existing manager inventory, contains at most eight purpose/version/operation-digest summaries, declared Skulk/Python/platform requirements, configuration requirement and required credential identifiers only. Optional registration is unavailable when malformed or outside the 8 KiB per-registration or manager response budget; the installed identity remains visible. Uninstalled retained metadata does not imply usable capacity. |
-| GET | `/v1/plugins/managed/{plugin_id}/capabilities/{qualified_id}` | Requires `plugins:read` or direct owner authority. Path: exact installed plugin and declared `id@version` (at most 256 characters). Required query: `revision`, sixteen lowercase hexadecimal characters from registration. Returns the selected generation digest, exact descriptor and revision, including input/output/media schemas. The current selected declaration must still match; a changed/unavailable contract is refused. Reads are bounded to 256 KiB per descriptor and work with disabled children. No operation is invoked and declaration grants no execution authority. |
+| GET | `/v1/plugins/managed/{plugin_id}/capabilities/{qualified_id}` | Requires `plugins:read` or direct owner authority. Path: exact installed plugin and declared `id@version` (at most 256 characters). Required query: `revision`, the exact lowercase hexadecimal digest from registration (16 characters for legacy descriptors, 64 for native descriptors). Returns the selected generation digest, exact descriptor and revision, including input/output/media schemas. The current selected declaration must still match; a changed/unavailable contract is refused. Reads are bounded to 256 KiB per descriptor and work with disabled children. No operation is invoked and declaration grants no execution authority. |
 | GET | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:read`. Returns `installation` observation and `selection`, nullable before a release is selected. |
 | DELETE | `/v1/plugins/managed/installations/{plugin_id}` | Requires `plugins:manage`. No body. Removes one installation that is uninstalled, or that never selected a release, together with everything it retained: lifecycle records, staged generations, feed credentials and cleanup state. Returns `plugin_id` and `purged: true`; the installation leaves the inventory. A live installation, or one with an operation or a release download under way, is refused with 409 and left unchanged. The terminal equivalent is `skulk-plugin-service purge-plugin <plugin_id>`. |
 | POST | `/v1/plugins/managed/installations/{plugin_id}/operations` | Requires `plugins:manage`. Body: `operation_id` (32 lowercase hexadecimal characters), `action` (`activate`, `select`, `disable` or `uninstall`), `expected_revision` (nonnegative integer), and activation/selection-only `runtime_digest`, optional `rollback` and `accept_permissions` booleans. Returns the retained `LifecycleOperation`. Activation and stopped selection accept only an already staged, verified generation. A generation whose configuration schema differs from the selected one is refused with `configuration schema requires migration`, unless its owner speaks plugin protocol 3 or later and the new schema still accepts every stored setting: only descriptions, titles, defaults, examples or comments changed, optional settings were added to a closed object, or required settings became optional. `select` keeps its owner stopped until a later explicit `activate` request. An explicit `disable` can withdraw a stalled activation/selection, including a revoked release, using the current selection revision. Live work and a pending withdrawal cannot be superseded. `activate` and `select` revalidate the staged metadata; a runtime that a host update has moved outside the protocol window answers `409` with the sentence the guided installer prints (which protocol the host accepts, which the runtime offers, and that the fix is to update Skulk on this host or choose a release published for it). |
@@ -4805,7 +5170,19 @@ staging. It resolves no dependency versions and does not modify Skulk's environm
 | GET | `/v1/plugins/managed/installations/{plugin_id}/install` | Requires `plugins:read`. Returns `operation`, nullable before installation. The retained operation contains exact `request`, signed `review`, `state`, `downloaded_bytes`, sanitized `error_code`, `attempt` (zero initially) and nullable `attempt_source_revision` for explicit recovery. Reconnect polls this route, never resubmits an uncertain request. |
 | POST | `/v1/plugins/managed/installations/{plugin_id}/install/{operation_id}/recover` | Requires `plugins:manage`. `operation_id` is the original 32-character lowercase hexadecimal ID. Body: `expected_source_revision` from current source readiness, including any explicit credential rotation. Revalidates the original signed metadata against current trust and host compatibility, retains prior attempt evidence, and journals another download/staging attempt for the same exact digest. Only `recovery_required` work is retried; other states return unchanged. Refuses busy installers, changed source revisions and more than eight recovery attempts. Does not activate or approve spending. A verified release outside this host's protocol window answers `409` with the sentence the guided installer prints: which protocol the host accepts, which the release offers, and that the fix is to update Skulk on this host or choose a release published for it. |
 
-Built-in Store catalog reads prefer the separately signed protocol 3 document
+Native-aware built-in Store readers first probe the separately signed protocol 4
+`catalog-v4.json`. Each native entry adds `native` with `runtime_protocol: 5`,
+`release_protocol: 3`, full `manifest_revision`, exact `kernel` source/version
+and ABI profiles, and sorted unique `processing_domains`. Legacy entries return
+`native: null`. Release inspection and retained install reviews carry the same
+nullable `native` binding, so retry and direct-source consent retain these facts
+without requiring the original catalog. Installation binds them to the independently
+authenticated runtime before selecting or staging anything. The native catalog
+uses a separate `skulk.catalog/4\0` signature domain. Once accepted, its version
+and revision floors survive restart and source switches; it never silently
+downgrades. A genuine initial 404 may probe the older documents.
+
+Older built-in Store catalog reads prefer the separately signed protocol 3 document
 `catalog-v3.json`, which supports sixteen capability identifiers per release.
 The original `catalog.json` retains its protocol 2 schema and eight-identifier
 bound. Only an initial HTTP 404 before v3 acceptance permits legacy fallback;
@@ -4875,8 +5252,10 @@ installations expose **Configure release source** for settings and credential
 rotation. Credential inputs are cleared before submission and excluded from Redux,
 browser storage and ordinary errors. Changed source revisions require an explicit
 status refresh before saving. **Retry this installation** recovers only the original
-failed installation after checking current source readiness; reconnect only reads
-the retained operation. Release activation still requires separate permission
+failed installation after checking current source readiness. During recovery the
+dashboard shows that retained release's identity, permissions and processing
+locations even if a different configured release has been inspected; reconnect
+only reads the retained operation. Release activation still requires separate permission
 acceptance, and paid-capacity approval remains a separate plugin operation.
 
 The dashboard's **Choose another release** controls (under **Details** in a plugin's drawer) inspect the configured release,
@@ -4917,6 +5296,17 @@ for automation, source rotation and advanced lifecycle operations.
 
 
 ### Stable local manager runtime
+
+Managed capability installation accepts runtime envelopes 2 and 3. The release
+inspection, stage and activation routes retain their existing methods, parameters,
+authentication and explicit consent flow. V3's signed metadata adds
+`application_roots`, one to eight unique canonical distribution names contained
+in the exact wheel inventory. Before installation, the host verifies the complete
+dependency graph from those roots and launcher-provider wheels; it refuses missing,
+incompatible, URL/extra-dependent or undeclared packages without contacting an
+index. Existing v2 releases retain their signed shape and behavior. A host outside
+the declared protocol window returns the authenticated update-or-select-another-
+release diagnostic; a compatible reader must be deployed before publishing v3.
 
 The local setup implementation stages a separate service copy through
 `stage_service_runtime(root)` and selects it through
@@ -5235,6 +5625,28 @@ with a `configure_catalog` document, or the owner-only
 `POST /v1/plugins/managed/catalog/source`), and the `use_builtin_catalog`
 request (or the owner-only `POST /v1/plugins/managed/catalog/source/builtin`)
 returns the host to the built-in store.
+
+The managed release inspection, installation and recovery endpoints accept legacy
+runtime envelope 2 / release envelope 1 and native runtime envelope 3 / release
+envelope 2. Native records retain exact canonical protocol-five manifests, full
+public-kernel profile identities and pinned native binaries; their signatures and
+generation digests use `skulk.runtime/3\0`. Installation repeats native-reader
+identity checks in the fresh offline runtime before completion. Staging does not
+activate the capability or migrate its protected state.
+Runtime envelope 4 adds an explicit `control_profile: "skulk.calls/1"`, all six
+public kernel 0.6.0rc1 profile fingerprints, exact native wheel bytes, and the
+separate `skulk.runtime/4\0` signature/digest domain. The installed interpreter
+must verify all six fingerprints and the compiled call codec before completion.
+The bounded migration window accepts runtime envelopes 2, 3 and 4; existing
+signed closures and signature bytes remain unchanged. Reader compatibility never
+authorizes changing an issued generation's binary.
+Ordinary selection/activation refuses a change between legacy, native transport
+and native calls interpretations, or different profile fingerprints, even when
+state/schema labels match. Such a transition requires separately qualified
+explicit state migration. Existing disable and recovery remain available.
+Native call startup does not make native capabilities invocable or delegable.
+Catalog consent, installed inventory and exact contract reads unwrap the native
+manifest for both runtime envelopes 3 and 4 while retaining full descriptor IDs.
 
 `skulk-plugin-service install-plugin --from-catalog BUNDLE_ID [--sequence N]
 [--platform FAMILY] [MANAGED_ID]` installs a listed release. The terminal reads
@@ -6853,3 +7265,274 @@ instance-constrained, Responses or Claude adapters.
 Rejected provider events or invalid function-call deltas abort the dashboard's
 active HTTP request so the provider cancellation path runs without waiting for
 further output.
+
+## Installed native capability reads
+
+These routes admit installed applications that explicitly select the public
+`skulk.calls/1` profile and have a compatible owner host bridge. They currently
+serve local unary reads. Discovery does not enroll an application or grant it
+execution authority. Existing managed inference and legacy plugin routes retain
+their separate contracts.
+
+Every route requires direct owner dashboard authentication: an actual loopback
+or verified Tailscale socket peer, `X-Skulk-Dashboard: pairing-v1`, and an `Origin`
+or `Referer` matching the request URL's scheme, hostname and port. Paired bearer
+credentials, relay ingress and forwarding headers are refused with 403. The
+original principal is this node's direct owner realm, rather than an individual
+human or an identity supplied in the request body.
+
+| Method and path | Parameters and behavior |
+| --- | --- |
+| `GET /v1/native-capabilities` | Return ready installed native unary read descriptors, their full descriptor revisions, signed runtime digests, actual child node IDs and current process incarnations. Each declaration must match its signed installed manifest and current publisher trust. At most 64 registered installations are probed concurrently across the host, under a shared three-second observation deadline per discovery request; cancellation cleanup may add up to three seconds. Each installation admits one probe at a time before reserving shared slots, so duplicate waiters cannot consume other owners' capacity. Slow metadata verification retains one bounded task and installer fence per installation after an observer times out; completed results are not cached and shutdown drains workers. Invalid, unavailable or unfinished owners are omitted, preserving successfully verified results in installed-path order. Discovery uses the installer's 512 KiB signed-envelope bound and grants no authority or stale cached capacity. An unavailable service returns 503. |
+| `GET /v1/native-capabilities/policy` | Return `protocol`, `revision`, `enabled` and `grants`. The initial policy is disabled, has no grants and uses a zero revision. An unavailable service returns 503. |
+| `PUT /v1/native-capabilities/policy` | JSON object containing `expected_revision`, `enabled` and a `grants` array of at most 64 exact enrollments. Each grant contains `plugin_id`, `runtime_digest`, `capability_id`, `version`, `descriptor_revision` and `processing_domain: "local"`. Enabling requires each grant to match a live signed unary read. Every successful update creates a new revision, fences queued contexts and cancels active work. A stale revision, conflicting update or unavailable enrollment returns 409. Disabling remains possible while applications are offline. |
+| `POST /v1/native-capabilities/{plugin_id}/{capability_id}/{version}/call` | Send an exact raw JSON object with `Content-Type: application/json`. Path parameters select one enrolled live implementation. Optional `timeout_seconds` defaults to 10 and must be greater than zero and at most 30; it covers admission, discovery and execution. Return the application's JSON object. Caller, policy, root and parent fields in user data or custom headers confer no authority. |
+
+Call input and output use the native profile's 16 MiB raw body bound. Concurrent
+byte/frame admission is a host resource bound, separate from request allowances
+or inference output settings. Content-type refusal returns 415, an oversized
+input returns 413 and invalid path/query/model parameters return 422. An
+unavailable or uncertain execution returns 503 with a no-replay message. Calls
+are never automatically retried. A lost reply cannot establish that execution
+never happened. HTTP disconnection cancels and drains the active call tree.
+
+The operator enrolls trusted signed code as a local read. This same-account
+process boundary is not an OS sandbox against malicious installed code. It does
+not admit governed/write operations, inference routing, native streaming,
+remote Fabric calls or paired-client native grants. Native context parsing alone
+never authenticates a caller or authorizes a delegation.
+
+### Native inference caller access
+
+On a compatible experimental host, open **Settings → Inference access**. Review the signed capability choices for this dashboard or a separately created API client, explicitly enable approved inference access, and save. Read and inference effects and external processing are shown separately. This is immediate access management, independent of the general Settings draft. Account connection and model selection remain in the capability. New client keys are disclosed once, remain unprivileged until separately approved, and can be revoked here. Updates need approval for the exact new release. A stale save returns a conflict: reload and review instead of automatically replaying it. Retained permissions for revoked callers can be explicitly removed.
+
+The native inference adapter explicitly selects signed runtime envelope 5,
+release envelope 3, `skulk.calls/2` and `skulk.composition/3`. It keeps original
+caller authentication separate from publisher trust, application readiness and
+provider accounts. Existing read, operator and chat endpoints retain their own
+authentication and invocation contracts.
+
+Owners manage access using the direct dashboard authority described above.
+Management bodies are authenticated before parsing, limited to 128 KiB and have
+a ten-second upload deadline. Responses use `Cache-Control: no-store`.
+
+| Method and path | Parameters and behavior |
+| --- | --- |
+| `GET /v1/inference-access/owner` | Return the currently authenticated direct-owner `principal` fields (`identifier`, `kind`, `issuer_node_id`) using this host's durable manager-profile issuer. Metadata only: no credential, permission or provider identity is created. Direct-owner authentication and no-store headers apply; stale/unavailable host custody returns 503. |
+| `GET /v1/inference-access/clients` | Return `revision` and enrolled client metadata: server-issued `identifier`, owner `label` and optional `expires_unix_ms`. No bearer, bearer digest or digest seed is returned. Unavailable custody returns 503. |
+| `POST /v1/inference-access/clients` | JSON containing `expected_revision`, `label` (1–128 characters), and optional future `expires_unix_ms` (integer Unix milliseconds; omission/null adds no scheduled expiry). Return 201 with `client`, new `revision` and a standard bearer `token`, disclosed once. The new client has no execution permission. Stale revisions, expired requests or unavailable enrollment return 409. At most 256 active credentials are retained. |
+| `DELETE /v1/inference-access/clients/{identifier}` | JSON body containing `expected_revision`. Remove that exact credential lifetime and return the new inventory. Stale revisions or unknown clients return 409. Revocation shares the owner's physical dispatch fence and cancels active caller work through bounded authority observation. |
+| `GET /v1/inference-access/policy` | Return `protocol: 1`, `revision`, `enabled` and `callers`. An absent policy is disabled with no callers and a zero revision. Provider login and legacy read enrollment do not enable it. |
+| `PUT /v1/inference-access/policy` | JSON containing `expected_revision`, `enabled`, and up to 64 `callers`. Each entry contains `principal: {identifier, kind, issuer_node_id}`, exact `grants`, and optional positive `maximum_seconds`; null adds no owner duration ceiling. A grant contains `plugin_id`, signed `runtime_digest`, persisted child `node_id`, `capability_id`, `version`, full `descriptor_revision`, `behavior` (`read` or `inference`), `processing_domain` (`local`, `private_site`, `external`) and signed `io_mode`. At most 64 grants are retained across the policy. Enabling verifies current credentials and exact selected signed declarations, including persisted child identity, independently of readiness. Disabling may retain stale entries for inspection. Stale, mismatched or unavailable enrollment returns 409. |
+
+The direct owner's principal is `{identifier: "direct-owner", kind: "operator",
+issuer_node_id: <serving Core identity>}`. An enrolled client's identifier is
+`client:<server-issued identifier>` with kind `client` and that same authenticating
+Core issuer. Neither is read from prompts, custom caller headers or provider
+account claims. Client creation and permission enrollment are separate changes.
+Changing a signed runtime or descriptor requires an explicit new enrollment.
+
+### Exact native inference invocation
+
+The matching SDK 1 owner/Core candidate also allows an admitted capability to
+delegate a streaming child under the original caller. This uses the protected
+owner channel, not a new HTTP endpoint. The child must be an exact allowed
+destination with current permission and compatible signed declarations. Its
+duration intersects any parent, request, caller and signed owner ceilings;
+absent ceilings add no generation cap. Revocation or disconnect drains owned
+work, and a media terminal alone cannot complete the parent before target
+control and cleanup finish. This requires the matching owner candidate;
+previously issued native packages do not acquire this feature implicitly.
+
+Invocation accepts an authenticated direct owner or an enrolled
+`Authorization: Bearer <token>` client. Bearers require a direct HTTPS connection,
+an actual loopback socket, or a verified Tailscale peer. Forwarding headers,
+duplicated/invalid credentials and operator-relay ingress are refused. Invalid
+credentials never fall back to direct owner authority. A client cannot administer
+enrollment, and owner access does not inherit another client's permissions.
+
+| Method and path | Parameters and behavior |
+| --- | --- |
+| `GET /v1/native-inference` | Observe exact signed, selected, ready inference/read destinations and their current child incarnations. Owners may inspect all declarations for enrollment; clients see only their permitted destinations. A listing includes the full descriptor, target, signed runtime, optional signed `inference_seconds` ceiling and signed-derived `startup_seconds`, `stream_seconds` and `cleanup_seconds` resource bounds. Stream modes appear only when the actual owner and reader support them. Discovery uses shared bounded host admission; unavailable owners supply no executable capacity and discovery grants no permission. |
+| `POST /v1/native-inference/{plugin_id}/{capability_id}/{version}/call` | Send the exact JSON object as raw `application/json`. The path selects an exact implementation. Optional positive finite `timeout_seconds` adds a request duration ceiling; omission adds none. Intersect request, current credential, per-caller owner and signed application ceilings. Return the application's JSON object. Both Core and owner verify original caller, effect, domain, runtime, descriptor, mode, request bytes and active parent bindings. This adapter admits unary `read`/`inference`, including authorized delegation between installed applications. It does not select a model or implement a router. |
+
+JSON input and schema-validated results obey the frozen portable/2 64 KiB
+value bound. Larger request content uses declared caller input media. Uploads have an
+independent ten-second deadline. Resource, health and partial-I/O bounds do not
+become generation timeouts or request allowances. Unsupported modes and governed
+effects are not advertised by this adapter. The JSON call endpoint remains unary;
+qualified stream modes use the separate WebSocket contract below.
+
+#### Native models in Chat and the unified API
+
+The experimental native chat adapter uses the same protected broker as the
+exact native inference endpoints. `GET /models` and `GET /v1/models` append
+caller-authorized native model entries unless `status=downloaded`. Responses
+are `Cache-Control: no-store`. The caller needs exact current grants for the
+metadata read and chat destination. Invalid or dummy API keys contribute no
+native models and do not become owner authority; ordinary local model listing
+continues. Direct dashboard reads send `X-Skulk-Dashboard: pairing-v1` and must
+meet the existing protected peer/origin rules. Enrolled clients use their own
+bearer. Native discoveries are never shared through an owner-wide caller cache.
+
+Model addresses have the form
+`native/{plugin_id}/{native_capability_id}@{version}/{model_slug}`. They select
+an explicit implementation, not a task classifier or model router.
+`POST /v1/chat/completions` accepts that address in `model` with normal chat
+parameters, streaming or collected responses, function tools and declared media
+features. Unknown request fields are refused. Hard `local_only` and
+`included_only` inference policies still apply. Authentication failures return
+401/403; an unavailable or unauthorized model returns 403. Each call pins the
+entire freshly observed runtime/child/declaration and independently checks
+current caller permission at dispatch and physical delivery. An application may
+refuse a request before accepting its input body. Core stops uploading and exposes
+that refusal only after validating the original output terminal, end and control
+completion. Unaccepted input cannot produce a successful response or receipt;
+missing or invalid transport completion remains an uncertain outcome. No inference call
+is automatically retried or redirected to a legacy address.
+
+`POST /v1/chat/continuation/receipt` accepts the existing independently signed
+receipt JSON plus optional query `native_model`, the exact discovered native
+model address. With that query, metadata and continuation grants are required;
+the gateway chat grant is not needed for a receipt-only lookup. Omitting it
+selects the existing owner-only legacy transport. A native refusal never falls
+back. The model's continuation metadata includes `native_model` separately
+from the application's signed `target`. Native transport identities remain
+full 64-character digests; existing application proof revisions remain their
+independent 16-character identities. Application signatures, account/settings
+policy, nonces and continuation authorization are still enforced by the app.
+
+To expose these contracts, signed native annotations declare
+`inference.envelope=skulk.application-envelope@1.0.0`, an opaque
+`inference.envelope.contract`, and independent `inference.application.id`,
+`.version` and `.revision` values. The envelope is exactly
+`{"contract": "<opaque contract>", "revision": "<application revision>", "payload": {}}`.
+The existing generic `inference.catalog`, `inference.contract`,
+`inference.authorization` and `inference.chat` annotations identify supported
+catalog/chat/continuation roles. Metadata and callable declarations must belong
+to the same plugin, signed runtime, child and incarnation; their application
+bindings and processing domains must match the catalog. These annotations do
+not grant permission or replace native or application schema validation.
+
+HTTP output stays inside the native invocation's task and retains byte leases
+through physical writes. Revocation and disconnect cancel blocked delivery.
+Native terminal, end, control and descendant completion must be verified before
+successful completion. A valid semantic refusal also drains terminal/end/control
+completion before its safe error is delivered. Caller custody and disconnect ownership remain live
+through the final physical success write after native retirement drains;
+completed execution cannot delegate again. If collected JSON already started
+and native retirement or authority then fails, the HTTP transport aborts rather
+than cleanly acknowledging that body. A parseable partial body is not success.
+Receipt lookup never regenerates assistant text. A
+fixed `native_outcome_unavailable` error means uncertainty, not permission to
+replay. The dashboard retains an unavailable native selection and disables
+submission until it is available or the user explicitly selects another model.
+The adapter adds no generation lifetime, output allowance or usage cap;
+existing upload, per-write, frame and collected-response memory bounds remain
+independent resources. Paired/relay or remote-Fabric native authority is not
+established by these local adapters.
+
+#### Native inference WebSocket
+
+`WS /v1/native-inference/{plugin_id}/{capability_id}/{version}/stream` invokes
+one exact signed `server_streaming`, `client_streaming` or `bidirectional`
+destination. Optional positive finite `timeout_seconds` has the same intersection
+semantics as the JSON endpoint; omission adds no generation ceiling. The actual
+installed owner and host reader must support the explicit 0.7.0rc4 stream cohort.
+The issued 0.7.0rc3 cohort keeps its original closure and unary behavior.
+
+The handshake requires one `Authorization: Bearer <enrolled token>` header over
+direct WSS, an actual loopback socket, or a verified Tailscale peer. It does not
+inherit ambient dashboard owner authority. Paired/operator credentials, duplicate
+or invalid bearers, forwarded transport and operator-relay ingress are refused
+before acceptance. There are no query-string, cookie or subprotocol credentials.
+Origin alone supplies no authority. Use a WebSocket client that can set the
+authorization header; browser JavaScript cannot set it through the standard
+WebSocket constructor. Authentication/host failures before acceptance result in
+a refused handshake (normally HTTP 403).
+
+After acceptance the client sends exactly one text message containing the raw
+JSON input object, within ten seconds and at most 64 KiB. The production server
+retains its 2 MiB message bound; individual native binary packets use at most
+1 MiB media plus 64 KiB metadata. Larger contexts use multiple media packets
+under the application's declared input contract. These exact bytes bind
+the original caller context. Core then sends one text event:
+`{"type":"ready","call_id":"<host-assigned ID>","mode":"<signed mode>"}`.
+This event observes the existing admitted call; polling never creates fresh work.
+One receiver observes disconnects from initial JSON admission through discovery,
+startup and active streaming. Caller media uses an eight-frame, shared-byte-budget
+queue plus the current write; queue saturation withdraws the call. A blocked
+owner write cannot block disconnect observation. Socket liveness is rechecked at
+protected dispatch/delivery fences and inherited by delegated calls.
+
+Subsequent application messages are **binary** packets from the public
+`skulk.transport/2` codec (protocol six), not JSON text or base64 wrappers. Use the
+public native `encode_transport_v2_packet` / `decode_transport_v2_packet` APIs.
+Each packet contains a four-byte big-endian header length, at most 64 KiB of JSON
+metadata and at most 1 MiB of separate inline media. No aggregate output allowance
+is imposed. Blob metadata does not cause Core to fetch URLs or paths.
+
+- In input modes, send the returned `call_id`, direction `caller_to_provider`,
+  consecutive sequences starting at zero, `started`, zero or more `chunk` frames,
+  and one `completed` input half-close. A half-close leaves output open. A
+  server-streaming call accepts no input frames.
+- Provider `chunk` and `completed` / `failed` / `cancelled` frames have direction
+  `provider_to_caller`, the same call ID and consecutive sequences starting at one.
+  Input/output chunks and completed payloads must match the signed portable
+  schemas. Inline bytes remain separate from their media metadata.
+- A terminal is followed by exactly one native `end` packet. Core delivers a
+  terminal only after matching native end, application control completion and
+  owned call-tree cleanup have all been verified. Declared failure/cancellation
+  codes contain an empty sanitized message. Terminal kind alone is no success
+  proof, and an unavailable channel never produces a synthetic successful end.
+
+Normal verified completion closes with 1000. Oversized initial input closes with
+1009; active authority withdrawal closes with 1008; invalid frames, incomplete
+outcomes or unavailable execution close with 1011 and a sanitized no-replay
+reason. A peer disconnect cancels and drains only this call. Signed connect,
+partial-I/O, write and cleanup bounds remain resource fences; quiet generation
+does not acquire an implicit idle-output deadline. Current authority is checked
+again at guarded socket writes. Neither side automatically replays an uncertain
+request. WebSockets are documented here because OpenAPI cannot describe them.
+
+Each protected readiness, input and output RPC carries the selected application's
+signed-derived cleanup grace. Cancellation within that grace preserves the
+authenticated owner channel and unrelated calls. Owner authority also fences
+pending terminal/end delivery after the application's execution scope has ended;
+withdrawal cancels that captured root and releases its retained media.
+The protected channel reserves a separate 96-request media lane alongside its
+32-request root/metadata lane, so admitted roots retain readiness/input/output
+capacity. The same independent lane bounds apply at sending and receiving peers;
+shared byte/frame budgets still apply to every request and response.
+Cancelling a queued response before any physical write withdraws that call and
+retains its reply resources until a sanitized cancellation acknowledgment is
+delivered. It preserves healthy siblings. Cancellation after a potentially partial
+authenticated write fences the connection because its framing is uncertain.
+
+The owner rechecks current permission and credential lifetime under the shared
+policy lock immediately before writing to the application. Active work observes
+authority changes every 250 milliseconds and is cancelled on withdrawal. Child
+incarnations and selected destinations are revalidated independently of the
+permission snapshot: an unrelated offline application cannot remove a lawful
+permission or redirect work. A read executor cannot delegate inference even if
+its original caller has broader rights.
+
+Content-type refusal returns 415; oversized input or management bodies return
+413; upload expiry returns 408; malformed typed parameters return 422. Invalid
+client credentials return 401, and unsafe transport or owner-only access returns
+403. Unavailable/uncertain execution returns 503 with an explicit no-replay
+message. HTTP disconnect cancels and drains active work. No host retry is made;
+revocation or a lost reply cannot prove that earlier execution never occurred.
+
+Credential and permission files belong to the Core manager, outside capability
+backups. Restoring application state cannot recreate a revoked client. Native
+profile changes also require a separate qualified state migration even when
+application schema labels match. This same-account process boundary does not
+claim an OS sandbox against malicious installed code.
+
+Inference `principal.issuer_node_id` names the durable authenticating manager as
+`core-profile:<profile_id>`, independently of the current Core transport ID.
+Normal same-profile Core restart/reattachment preserves existing enrollments
+and revocations. The current serving transport is checked separately before
+credential access and dispatch; a stale attachment or foreign profile refuses.
+Credential and policy records use their explicit 128 KiB storage bound.

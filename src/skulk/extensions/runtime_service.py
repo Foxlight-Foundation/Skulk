@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from skulk.extensions.native_host_binding import provision_native_host
 from skulk.extensions.runtime_artifacts import Digest
 from skulk.extensions.runtime_files import RuntimeLock, write_private
 from skulk.extensions.runtime_install import finish_runtime_work
@@ -124,6 +125,7 @@ class RuntimeService:
     async def _spawn(self, lock: RuntimeLock) -> None:
         assert self.selection is not None
         generation = self.root / "generations" / self.selection.runtime_digest
+        provision_native_host(self.root, self.selection.runtime_digest, self.instance)
         reader, self.writer = os.pipe()
         try:
             # The owner inherits the service fence, but only the read end of its
@@ -211,8 +213,11 @@ class RuntimeService:
                 ):
                     success = True
                 else:
+                    # Discovery may still own a metadata measurement after
+                    # its observer times out. Brief installer contention
+                    # before execution must not consume crash backoff.
                     async with self.selector.installer.locked_generation(
-                        self.selection.runtime_digest
+                        self.selection.runtime_digest, wait_for_ownership=True
                     ):
                         if self.selector.current() != self.selection:
                             raise ValueError("runtime selection changed")

@@ -27,7 +27,9 @@ import skulk.store.mirror_host as mirror_host
 import skulk.store.model_store_server as store_server
 from skulk.main import Node
 from skulk.shared.types.common import NodeId
-from skulk.store.mirror_contracts import MirrorJob, MirrorRequest
+from skulk.store.mirror_contracts import MirrorJob, MirrorPage, MirrorRequest
+from skulk.store.mirror_process import MirrorProcess
+from skulk.store.mirror_worker import MirrorWorkerEvent
 from skulk.store.model_store import ModelStore
 from skulk.store.model_store_server import ModelStoreServer
 from skulk.store.preservation_contracts import (
@@ -46,7 +48,9 @@ from skulk.utils.task_group import TaskGroup
 async def complete(host: PreservationHost, request: MirrorRequest) -> MirrorJob:
     """Submit to the real owner and wait through actual owned child drain."""
     job = await host.mirrors.start(request)
-    async with asyncio.timeout(30):
+    # This fixture includes cold subprocess imports and durable filesystem work.
+    # Shutdown tests below retain their separate public-withdrawal deadlines.
+    async with asyncio.timeout(120):
         while host.mirrors.job(job.job_id).state in {"queued", "running", "cancelling"}:
             await asyncio.sleep(0.025)
     result = host.mirrors.job(job.job_id)
@@ -62,6 +66,16 @@ async def listening(host: PreservationHost, identity: str) -> MirrorJob:
             assert job.state in {"queued", "running"}, job
             if job.activity and job.activity.running and job.activity.http_port:
                 return job
+            await asyncio.sleep(0.025)
+
+
+async def configured_page(host: PreservationHost) -> MirrorPage:
+    """Wait for a policy observation when a busy filesystem returns unavailable."""
+    async with asyncio.timeout(30):
+        while True:
+            page = await host.mirrors.page()
+            if page.configured and page.available and page.policy_id is not None:
+                return page
             await asyncio.sleep(0.025)
 
 
@@ -482,6 +496,7 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     finite_kind: Literal["http_share", "torrent_share"],
 ) -> None:
+    """Drain real listeners promptly after a separate bounded cold-worker setup."""
     if finite_kind == "torrent_share":
         pytest.importorskip("libtorrent")
     host = empty_host(tmp_path)
@@ -515,7 +530,7 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
         kit = tmp_path / "complete.foxkit"
         export_kit(source, identity, trust, kit)
         copy = await import_copy(host, kit.read_bytes())
-        page = await host.mirrors.page()
+        page = await configured_page(host)
         await complete(
             host,
             MirrorRequest(
@@ -528,7 +543,7 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
                 confirm_redistribution=True,
             ),
         )
-        page = await host.mirrors.page()
+        page = await configured_page(host)
         controller = await host.mirrors.start(
             MirrorRequest(
                 owner_id="library",
@@ -546,7 +561,9 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
                 kind=finite_kind,
                 location_id=copy.location_id,
                 copy_id=copy.copy_id,
-                duration_seconds=60,
+                # Keep this participant live while the model worker cold-starts;
+                # its cancellation below must come from shutdown, not expiry.
+                duration_seconds=180,
                 upload_limit_bytes=1024**2,
             )
         )
@@ -572,7 +589,12 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
             ),
         )
         selected = model.job_id
-        assert await asyncio.to_thread(entered.wait, 5)
+        # Child imports and filesystem work precede cleanup. They are setup;
+        # the original five-second public-withdrawal limit starts below.
+        async with asyncio.timeout(120):
+            while not entered.is_set():
+                assert host.mirrors.job(model.job_id).state in {"queued", "running"}
+                await asyncio.sleep(0.025)
         cancelled = asyncio.create_task(host.mirrors.cancel(model.job_id))
         async with asyncio.timeout(5):
             while host.mirrors.job(model.job_id).state != "cancelling":
@@ -622,6 +644,7 @@ async def test_close_drains_controller_before_unrelated_cancelled_model_cleanup(
 async def test_successful_stop_retry_reconciles_retained_failed_task_and_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Reconcile an expired real worker after a fault installed before launch."""
     host = empty_host(tmp_path)
     try:
         await complete(
@@ -634,17 +657,26 @@ async def test_successful_stop_retry_reconciles_retained_failed_task_and_request
             ),
         )
         page = await host.mirrors.page()
-        job = await host.mirrors.start(
-            MirrorRequest(
-                owner_id="library",
-                operation_id="first",
-                kind="run",
-                policy_id=page.policy_id,
-                public_participation=True,
-                seconds=1,
-            ),
-        )
-        await listening(host, job.job_id)
+        ready = asyncio.Event()
+        original_observations = MirrorProcess.observations
+
+        async def observe_ready(
+            process: MirrorProcess, receive: Callable[[MirrorWorkerEvent], None]
+        ) -> None:
+            """Keep the real owner callback and retain its worker's readiness event."""
+
+            def receive_ready(event: MirrorWorkerEvent) -> None:
+                """Record the real HTTP announcement even if the finite worker exits."""
+                receive(event)
+                if (
+                    event.event in {"ready", "activity"}
+                    and event.activity is not None
+                    and event.activity.running
+                    and event.activity.http_port is not None
+                ):
+                    ready.set()
+
+            await original_observations(process, receive_ready)
 
         def unconfirmed(_identity: int) -> bool:
             return True
@@ -653,6 +685,22 @@ async def test_successful_stop_retry_reconciles_retained_failed_task_and_request
             observation.setattr(
                 "skulk.utils.process_groups._group_is_running", unconfirmed
             )
+            # Install the fault before the one-second worker can finish.
+            # Readiness is witnessed from its real event, not a later poll.
+            observation.setattr(MirrorProcess, "observations", observe_ready)
+            job = await host.mirrors.start(
+                MirrorRequest(
+                    owner_id="library",
+                    operation_id="first",
+                    kind="run",
+                    policy_id=page.policy_id,
+                    public_participation=True,
+                    seconds=1,
+                ),
+            )
+            async with asyncio.timeout(30):
+                await ready.wait()
+
             async with asyncio.timeout(10):
                 while (
                     host.mirrors.job(job.job_id).error_code != "mirror_stop_incomplete"
@@ -707,7 +755,7 @@ async def test_failed_shutdown_can_reconcile_workers_and_release_journal(
                 configuration=configuration(),
             ),
         )
-        page = await host.mirrors.page()
+        page = await configured_page(host)
         expires = int(time.time()) + 300
         await complete(
             host,

@@ -468,6 +468,9 @@ async def test_explicit_disable_withdraws_stalled_revoked_activation(
     write_private(selector.root / "receipts", b"synthetic outstanding cleanup")
     controller = RuntimeController(selector.root)
     await controller.start()
+    assert controller.service is not None
+    # Isolate interrupted publication from the fixture owner's startup fence.
+    await running(controller.service)
     request = LifecycleRequest(operation_id="8" * 32, action="activate", expected_revision=1, runtime_digest=initial.runtime_digest)
 
     def fail_selection(path: Path, content: bytes) -> None:

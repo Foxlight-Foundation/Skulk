@@ -33,11 +33,18 @@ from skulk.extensions.managed_limits import (
     MAX_MANAGED_DISCOVERY_BYTES,
     MAX_RUNTIME_METADATA_BYTES,
 )
+from skulk.extensions.native_contracts import NativeDescriptor, NativeManifest
+from skulk.extensions.native_inference_contracts import (
+    InferenceDescriptor,
+    InferenceManifest,
+)
 from skulk.extensions.runtime_artifacts import (
     ProtocolUnsupportedError,
     QualifiedHost,
     RuntimeTrust,
+    canonical_json,
     canonical_platform,
+    is_native_runtime,
     measure_host,
 )
 from skulk.extensions.runtime_attachment import (
@@ -79,6 +86,7 @@ from skulk.extensions.runtime_files import (
     is_desktop_metadata,
     private_directory,
     read_private,
+    remove_private,
     write_private,
 )
 from skulk.extensions.runtime_install import finish_runtime_work
@@ -180,12 +188,37 @@ def installed_release(staged: Path) -> InstalledRelease | None:
     manifest = release.get("manifest") if isinstance(release, dict) else None
     if not isinstance(release, dict) or not isinstance(manifest, dict):
         return None
+    runtime_protocol = runtime.get("protocol") if isinstance(runtime, dict) else None
+    native = isinstance(runtime, dict) and is_native_runtime(runtime)
+    if native:
+        try:
+            manifest = (
+                InferenceManifest.model_validate_json(canonical_json(manifest))
+                if runtime_protocol == 5
+                else NativeManifest.model_validate_json(canonical_json(manifest))
+            ).value()
+        except ValueError:
+            return None
     title = manifest.get("title")
     registration = None
     try:
-        descriptors = TypeAdapter(tuple[CapabilityDescriptor, ...]).validate_json(
-            json.dumps(manifest.get("descriptors"))
-        )
+        if native:
+            contracts = _OBJECT.validate_python(manifest["contracts"], strict=True)
+            descriptors = (
+                TypeAdapter(tuple[InferenceDescriptor, ...]).validate_json(
+                    json.dumps(contracts["descriptors"])
+                )
+                if runtime_protocol == 5
+                else TypeAdapter(tuple[NativeDescriptor, ...]).validate_json(
+                    json.dumps(contracts["descriptors"])
+                )
+            )
+            configuration = contracts.get("configuration_schema")
+        else:
+            descriptors = TypeAdapter(tuple[CapabilityDescriptor, ...]).validate_json(
+                json.dumps(manifest.get("descriptors"))
+            )
+            configuration = manifest.get("configuration_schema")
         credential_inputs = TypeAdapter(list[dict[str, JsonValue]]).validate_json(
             json.dumps(manifest.get("credential_inputs") or [])
         )
@@ -205,8 +238,7 @@ def installed_release(staged: Path) -> InstalledRelease | None:
                     "skulk_requires": manifest.get("skulk_requires"),
                     "python_requires": release.get("python_requires"),
                     "platforms": release.get("platforms"),
-                    "configuration_required": manifest.get("configuration_schema")
-                    is not None,
+                    "configuration_required": configuration is not None,
                     "required_credential_ids": [
                         value.get("credential_id")
                         for value in credential_inputs
@@ -266,7 +298,8 @@ class InstalledContractRequest(_Request):
         min_length=1, max_length=256, description="Exact declared id@version."
     )
     revision: str = Field(
-        pattern=r"^[a-f0-9]{16}$", description="Observed exact descriptor digest."
+        pattern=r"^(?:[a-f0-9]{16}|[a-f0-9]{64})$",
+        description="Observed exact legacy or full native descriptor digest.",
     )
 
 
@@ -614,6 +647,56 @@ def _listing_matches(
     runtime = _OBJECT.validate_python(signed["runtime"])
     release = _OBJECT.validate_python(runtime["release"])
     manifest = _OBJECT.validate_python(release["manifest"])
+    if runtime.get("protocol") == 5:
+        declaration = InferenceManifest.model_validate_json(canonical_json(manifest))
+        binding = listing.native
+        if (
+            binding is None
+            or release.get("protocol") != binding.release_protocol
+            or declaration.digest != binding.manifest_revision
+            or _OBJECT.validate_python(runtime["kernel"], strict=True)
+            != _OBJECT.validate_json(binding.kernel.model_dump_json())
+            or tuple(sorted({d.processing_domain for d in declaration.descriptors}))
+            != binding.processing_domains
+            or tuple(f"{d.id}@{d.version}" for d in declaration.descriptors)
+            != listing.descriptors
+        ):
+            return False
+        value = declaration.value()
+        surfaces = value.get("surfaces")
+        steward = value.get("steward")
+        if (
+            value.get("title") != listing.title
+            or not isinstance(surfaces, list)
+            or tuple(
+                _OBJECT.validate_python(surface, strict=True).get("title")
+                for surface in surfaces
+            )
+            != listing.surfaces
+            or (value.get("operations") is not None) != listing.operations
+            or not isinstance(steward, list)
+            or tuple(
+                sorted(
+                    {
+                        str(_OBJECT.validate_python(exposure, strict=True)["risk"])
+                        for exposure in steward
+                    }
+                )
+            )
+            != listing.steward_risks
+        ):
+            return False
+    elif listing.native is not None:
+        return False
+    if is_native_runtime(runtime):
+        # This metadata was authenticated during review. Read its exact native
+        # manifest for consent comparison instead of treating the byte wrapper
+        # as the legacy declaration.
+        manifest = (
+            InferenceManifest.model_validate_json(canonical_json(manifest))
+            if runtime.get("protocol") == 5
+            else NativeManifest.model_validate_json(canonical_json(manifest))
+        ).value()
     platforms = TypeAdapter(list[str]).validate_python(release["platforms"])
     return (
         review.runtime_digest == listing.release_digest
@@ -1268,9 +1351,26 @@ class RuntimeManager:
             manifest = release.get("manifest") if isinstance(release, dict) else None
             if not isinstance(manifest, dict):
                 raise ValueError("installed contract metadata unavailable")
-            descriptors = TypeAdapter(tuple[CapabilityDescriptor, ...]).validate_json(
-                json.dumps(manifest.get("descriptors"))
-            )
+            if isinstance(runtime, dict) and is_native_runtime(runtime):
+                manifest = (
+                    InferenceManifest.model_validate_json(canonical_json(manifest))
+                    if runtime.get("protocol") == 5
+                    else NativeManifest.model_validate_json(canonical_json(manifest))
+                ).value()
+                contracts = _OBJECT.validate_python(manifest["contracts"], strict=True)
+                descriptors = (
+                    TypeAdapter(tuple[InferenceDescriptor, ...]).validate_json(
+                        json.dumps(contracts["descriptors"])
+                    )
+                    if runtime.get("protocol") == 5
+                    else TypeAdapter(tuple[NativeDescriptor, ...]).validate_json(
+                        json.dumps(contracts["descriptors"])
+                    )
+                )
+            else:
+                descriptors = TypeAdapter(
+                    tuple[CapabilityDescriptor, ...]
+                ).validate_json(json.dumps(manifest.get("descriptors")))
             matching = [
                 value
                 for value in descriptors
@@ -1371,6 +1471,11 @@ class RuntimeManager:
                 # The directory goes before the manager forgets the installation:
                 # a removal that fails on disk leaves a closed, still-listed
                 # installation that the same purge can be asked for again.
+                # A purged installation must not retain an old host role seed
+                # or consume the native directory's bounded binding inventory.
+                binding = self.root / "native-host-bindings" / (identifier + ".json")
+                if binding.parent.exists():
+                    remove_private(binding)
                 await asyncio.to_thread(shutil.rmtree, root)
                 descriptor = os.open(self.installations, os.O_RDONLY | os.O_DIRECTORY)
                 try:

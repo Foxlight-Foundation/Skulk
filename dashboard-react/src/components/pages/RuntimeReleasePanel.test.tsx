@@ -99,6 +99,25 @@ it('requires distinct permission acceptance and activation after installation', 
   expect(posts[1]).toMatchObject({ action: 'activate', runtime_digest: review.runtime_digest, expected_revision: 0, accept_permissions: true, rollback: false });
 });
 
+it('shows native processing and identities before direct-source activation consent', async () => {
+  const nativeReview: RuntimeRelease = { ...review, native: {
+    runtime_protocol: 5, release_protocol: 3, manifest_revision: 'c'.repeat(64),
+    kernel: { version: '0.7.0rc4', source_commit: 'f'.repeat(40), calls: 'd'.repeat(64) },
+    processing_domains: ['external'],
+  } };
+  operation = { request: { operation_id: 'c'.repeat(32), runtime_digest: review.runtime_digest, expected_source_revision: 1 }, review: nativeReview, state: 'staged', downloaded_bytes: 100, error_code: null };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('External services');
+  await contains('Requests and their content may be sent to external services.');
+  const activate = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Activate release');
+  expect(activate?.disabled).toBe(true);
+  await act(async () => host.querySelector('summary')?.click());
+  expect(host.querySelector('details')?.open).toBe(true);
+  expect(host.querySelector('details')?.textContent).toContain(nativeReview.native?.manifest_revision);
+  await click('Activate release');
+  expect(posts).toHaveLength(0);
+});
+
 it('does not transfer permission acceptance to another release observed after reconnect', async () => {
   operation = { request: { operation_id: 'c'.repeat(32), runtime_digest: review.runtime_digest, expected_source_revision: 1 }, review, state: 'staged', downloaded_bytes: 100, error_code: null };
   await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
@@ -144,6 +163,31 @@ it('withholds recovery when source readiness is unavailable and permits an expli
   await act(async () => { await vi.waitFor(() => expect([...host.querySelectorAll('button')].find((item) => item.textContent === 'Retry this installation')?.disabled).toBe(false)); });
   await click('Retry this installation');
   await contains('Ready for activation');
+  expect(posts).toEqual([{ expected_source_revision: 2 }]);
+});
+
+it('discloses the retained recovery release after a different configured release is inspected', async () => {
+  const retained: RuntimeRelease = { ...review, version: '0.9.0', runtime_digest: 'e'.repeat(64), permissions: ['Send requests to an external provider'], native: {
+    runtime_protocol: 5, release_protocol: 3, manifest_revision: 'c'.repeat(64),
+    kernel: { version: '0.7.0rc4', source_commit: 'f'.repeat(40), calls: 'd'.repeat(64) },
+    processing_domains: ['external'],
+  } };
+  const original = { operation_id: 'c'.repeat(32), runtime_digest: retained.runtime_digest, expected_source_revision: 1 };
+  operation = { request: original, review: retained, state: 'recovery_required', downloaded_bytes: 0, error_code: 'download_failed' };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('example.plugin 0.9.0');
+  await click('Inspect configured release');
+  await act(async () => { await vi.waitFor(() => expect([...host.querySelectorAll('button')].find((item) => item.textContent === 'Inspect configured release')?.disabled).toBe(false)); });
+  expect(host.textContent).toContain('example.plugin 0.9.0');
+  expect(host.textContent).not.toContain('example.plugin 1.2.3');
+  expect(host.textContent).toContain(retained.runtime_digest);
+  expect(host.textContent).toContain('Send requests to an external provider');
+  expect(host.textContent).not.toContain('Read provider inventory');
+  expect(host.textContent).toContain('Requests and their content may be sent to external services.');
+  expect(host.querySelector('details')?.textContent).toContain(retained.native?.manifest_revision);
+  await click('Retry this installation');
+  await contains('Ready for activation');
+  expect(recoveryPaths).toEqual([`/v1/plugins/managed/installations/${runtime.plugin_id}/install/${original.operation_id}/recover`]);
   expect(posts).toEqual([{ expected_source_revision: 2 }]);
 });
 

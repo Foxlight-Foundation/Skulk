@@ -32,10 +32,12 @@ from skulk.extensions.tests.test_runtime_service import OWNER_SOURCE, running
 
 
 @pytest.mark.parametrize("action", ["disable", "uninstall"])
+@pytest.mark.parametrize("runtime_protocol", [2, 3])
 async def test_socket_registration_activation_disconnect_and_reconnect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     action: Literal["disable", "uninstall"],
+    runtime_protocol: int,
 ) -> None:
     """The shared terminal/API socket persists accepted work after the client closes."""
     private_directory(tmp_path)
@@ -61,7 +63,7 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
             == manager.settings
         )
         metadata, trust, host = artifacts(
-            tmp_path / "source", owner_source=OWNER_SOURCE
+            tmp_path / "source", owner_source=OWNER_SOURCE, runtime_protocol=runtime_protocol
         )
         monkeypatch.setattr(
             "skulk.extensions.runtime_install.measure_host", lambda: host
@@ -138,11 +140,14 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
         # Purge ends the retention of an uninstall and nothing else: a disabled
         # installation is refused unchanged, an uninstalled one leaves with its
         # directory, and a second purge finds nothing.
+        native_binding = tmp_path / "native-host-bindings" / (identifier + ".json")
+        write_private(native_binding, b"synthetic retired host attachment")
         purge = InstallationRequest(action="purge", plugin_id=identifier)
         reply = await manager_request(tmp_path, purge)
         if action == "uninstall":
             assert reply == {"result": {"plugin_id": identifier, "purged": True}}
             assert not (tmp_path / "installations" / identifier).exists()
+            assert not native_binding.exists()
             assert identifier not in manager.controllers
             assert identifier not in manager.downloads
             assert await manager_request(tmp_path, InventoryRequest()) == {
@@ -151,6 +156,7 @@ async def test_socket_registration_activation_disconnect_and_reconnect(
             assert "error" in await manager_request(tmp_path, purge)
         else:
             assert "error" in reply
+            assert native_binding.exists()
             assert (tmp_path / "installations" / identifier).exists()
             assert manager.controllers[identifier] is controller
     finally:

@@ -161,6 +161,8 @@ export interface ManagedOperation {
 
 /** Signed review returned before artifact download; no credentials or executable paths. */
 export interface RuntimeRelease {
+  /** Native consent facts; absent on older hosts and null for legacy releases. */
+  native?: NativeCatalogBinding | null;
   runtime_digest: string;
   source_revision: number;
   publisher: string;
@@ -225,8 +227,20 @@ export interface CatalogSourceStatus extends RuntimeSourceStatus {
   assigns_trust_revisions?: boolean;
 }
 
-/** One release a signed catalog lists: the consent facts, never an address or credential. */
+/** Authenticated native declaration, processing locations and exact ABI identity. */
+export interface NativeCatalogBinding {
+  runtime_protocol: 5;
+  release_protocol: 3;
+  manifest_revision: string;
+  /** Full immutable source and all selected public ABI fingerprints. */
+  kernel: Readonly<Record<string, string>> & { version: string; source_commit: string };
+  processing_domains: ('local' | 'private_site' | 'external')[];
+}
+
+/** One listed release: consent facts, never an address or credential. */
 export interface CatalogEntry {
+  /** Native identity and processing facts; absent on older hosts and null for legacy entries. */
+  native?: NativeCatalogBinding | null;
   bundle_id: string;
   bundle_version: string;
   /** Title from the signed record; null when the release declares none. */
@@ -467,9 +481,10 @@ const pluginsApi = apiSlice.injectEndpoints({
       query: ({ pluginId, operationId }) => ({ url: `/v1/plugins/managed/installations/${encodeURIComponent(pluginId)}/operations/${encodeURIComponent(operationId)}/recover`, method: 'POST', headers }),
       invalidatesTags: ['Plugins'],
     }),
-    getPluginCatalog: build.query<CatalogListing, void>({
+    getPluginCatalog: build.query<CatalogListing, number | void>({
       // Each read fetches and verifies the signed document on the host, so it
-      // is read on demand and never polled.
+      // is read on demand and never polled. The optional source revision is
+      // only a client cache key; it grants no catalog or server-side authority.
       query: () => ({ url: '/v1/plugins/managed/catalog', headers, cache: 'no-store' }),
       providesTags: ['PluginCatalog'],
       keepUnusedDataFor: 0,

@@ -12,6 +12,7 @@ from typing import cast
 import pytest
 
 from skulk.api.main import API
+from skulk.api.native_inference_service import NativeInferenceService
 from skulk.extensions import (
     CapabilityDescriptor,
     ExtensionContext,
@@ -260,9 +261,23 @@ async def test_api_runtime_owns_extension_startup_and_shutdown(
 
     provider = LifecycleProvider()
     api = _build_api(TelemetryView(), extensions=LoadedExtensions([provider]))
+    closed: list[NativeInferenceService] = []
+    original_close = NativeInferenceService.close
+
+    async def close(service: NativeInferenceService) -> None:
+        """Observe real API-owned retirement even before listener startup succeeds."""
+        await original_close(service)
+        closed.append(service)
+
+    monkeypatch.setattr(NativeInferenceService, "close", close)
     assert provider.started_with == []
     monkeypatch.setattr(TaskGroup, "__aenter__", fail_before_serving)
     with pytest.raises(RuntimeError, match="injected serving startup failure"):
         await api.run()
     assert len(provider.started_with) == 1
     assert provider.stopped
+    assert len(closed) == 1
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException, match="stopped"):
+        await closed[0].host()

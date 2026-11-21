@@ -33,6 +33,8 @@ from skulk.shared.types.worker.runners import RunnerFailed
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata
 from skulk.utils.channels import ClosedResourceError, MpReceiver, MpSender
 from skulk.utils.stack_dump import install_stack_dump_signal
+from skulk.worker.runner.ace_step.context import NativeMusicRunnerContext
+from skulk.worker.runner.demucs.context import SeparationRunnerContext
 from skulk.worker.runner.diagnostics import (
     configure_runner_diagnostics,
     record_runner_phase,
@@ -182,9 +184,7 @@ Override with SKULK_GROUP_CONNECT_DEADLINE_SECONDS.
 
 def resolve_group_connect_deadline_seconds() -> float:
     """Resolve the group-connect deadline, honoring the operator override."""
-    raw = preferred_env_value(
-        "SKULK_GROUP_CONNECT_DEADLINE_SECONDS"
-    )
+    raw = preferred_env_value("SKULK_GROUP_CONNECT_DEADLINE_SECONDS")
     if raw is not None:
         try:
             parsed = float(raw)
@@ -213,9 +213,7 @@ wedge, so the watchdog's default Metal guidance would mislead operators."""
 
 def resolve_warmup_deadline_seconds() -> float:
     """Resolve the warmup deadline, honoring the operator env override."""
-    raw = preferred_env_value(
-        "SKULK_WARMUP_DEADLINE_SECONDS"
-    )
+    raw = preferred_env_value("SKULK_WARMUP_DEADLINE_SECONDS")
     if raw is not None:
         try:
             parsed = float(raw)
@@ -433,6 +431,10 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
 
     shard = bound_instance.bound_shard
     require_remote_code_approval(shard.model_card)
+    if shard.model_card.music is not None and shard.model_card.music.native is not None:
+        # A missing engine must fail explicitly even for legacy/manual assignments;
+        # returning None would fall through to MLX with incompatible native files.
+        raise RuntimeError("Native ACE-Step execution requires the native music runner")
     if shard.resolved_backend is not None:
         return engine_of(shard.resolved_backend)
 
@@ -468,12 +470,19 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
                     lambda: engine_build_inventory(derivation.backends, facts)
                 ),
                 hardware_class_inventory(facts),
-                image_family=shard.model_card.image.family if shard.model_card.image is not None else None,
+                image_family=shard.model_card.image.family
+                if shard.model_card.image is not None
+                else None,
                 native_image_families=native_image_family_inventory(facts),
             ),
             card_serves_vision=shard.model_card.vision is not None,
             card_serves_speech=card_serves_speech(shard.model_card),
             card_serves_music=shard.model_card.music is not None,
+            card_has_native_music_profile=(
+                shard.model_card.music is not None
+                and shard.model_card.music.native is not None
+            ),
+            card_serves_separation=shard.model_card.separation is not None,
             card_serves_embeddings=card_serves_embeddings(shard.model_card),
             card_has_native_image_profile=shard.model_card.image is not None,
             card_has_pinned_projector=(
@@ -509,6 +518,35 @@ def safe_engine_build_inventory(
         return {}
 
 
+def run_native_music(
+    bound_instance: BoundInstance,
+    event_sender: MpSender[Event],
+    task_receiver: MpReceiver[Task],
+    cancel_receiver: MpReceiver[TaskId],
+    context: NativeMusicRunnerContext,
+) -> None:
+    """Run only an explicitly prepared native binding, retaining source custody."""
+    from skulk.worker.runner.ace_step.runner import Runner as NativeMusicRunner
+
+    model = context.model(bound_instance)
+    try:
+        NativeMusicRunner(
+            bound_instance,
+            event_sender,
+            task_receiver,
+            cancel_receiver,
+            model,
+            lambda: context.model(bound_instance),
+        ).main()
+    finally:
+        try:
+            model.close()
+        finally:
+            # Native descendants retain their own duplicate through guardian
+            # drain, including when closing this binding reports uncertainty.
+            context.source_fence.close()
+
+
 def entrypoint(
     bound_instance: BoundInstance,
     event_sender: MpSender[Event],
@@ -518,6 +556,8 @@ def entrypoint(
     realtime_audio_receiver: MpReceiver[RealtimeAudioInputFrame],
     _logger: "loguru.Logger",
     context_token_limit: int | None = None,
+    separation_context: SeparationRunnerContext | None = None,
+    native_music_context: NativeMusicRunnerContext | None = None,
 ) -> None:
     global logger
     logger = _logger
@@ -570,21 +610,63 @@ def entrypoint(
         # failure-reporting boundary so a denied card becomes an actionable
         # RunnerFailed state rather than an unreported process-exit retry loop.
         require_remote_code_approval(shard.model_card)
-        if bound_instance.is_music_model:
-            from skulk.shared.backends import engine_of
-            from skulk.worker.runner.audio_cpp.runner import Runner as AudioCppRunner
+        native_music = (
+            shard.model_card.music.native
+            if shard.model_card.music is not None
+            else None
+        )
+        if native_music_context is not None and native_music is None:
+            raise RuntimeError("native music context belongs to another model family")
+        if bound_instance.is_separation_model:
+            from skulk.worker.runner.demucs.runner import Runner as SeparationRunner
 
+            if separation_context is None:
+                raise RuntimeError(
+                    "native separation placement has no prepared worker context"
+                )
+            model = separation_context.model(bound_instance)
+            try:
+                SeparationRunner(
+                    bound_instance,
+                    event_sender,
+                    task_receiver,
+                    cancel_receiver,
+                    model,
+                ).main()
+            finally:
+                # A failed drain leaves the inherited descriptor in the native
+                # process. Replacement-worker cleanup must still acquire its
+                # independent reader fence before touching the original.
+                try:
+                    model.close()
+                finally:
+                    separation_context.source_fence.close()
+            return
+        if bound_instance.is_music_model:
+            if native_music is not None:
+                if native_music_context is None:
+                    raise RuntimeError(
+                        "native music placement has no prepared worker context"
+                    )
+                run_native_music(
+                    bound_instance,
+                    event_sender,
+                    task_receiver,
+                    cancel_receiver,
+                    native_music_context,
+                )
+                return
             resolved = shard.resolved_backend
-            music_engine = (
-                engine_of(resolved)
-                if resolved is not None
-                else _resolve_text_engine(bound_instance)
-            )
+            # Validate the artifact contract for stamped and fallback music
+            # assignments before importing the specialized runner.
+            music_engine = _resolve_text_engine(bound_instance)
             if music_engine != "audio_cpp":
                 raise RuntimeError(
                     "no audio.cpp engine serves this music placement on this node "
                     f"(resolved backend {resolved!r})"
                 )
+            from skulk.worker.runner.audio_cpp.runner import Runner as AudioCppRunner
+
             runner = AudioCppRunner(
                 bound_instance, event_sender, task_receiver, cancel_receiver
             )
@@ -626,7 +708,9 @@ def entrypoint(
                     Runner as MlxVideoRunner,
                 )
 
-                MlxVideoRunner(bound_instance, event_sender, task_receiver, cancel_receiver).main()
+                MlxVideoRunner(
+                    bound_instance, event_sender, task_receiver, cancel_receiver
+                ).main()
                 return
             # Fail loudly with the reason instead of letting a text runner
             # try to load a diffusion stack and report something unrelated.
@@ -642,10 +726,14 @@ def entrypoint(
                     Runner as NativeImageRunner,
                 )
 
-                NativeImageRunner(bound_instance, event_sender, task_receiver, cancel_receiver).main()
+                NativeImageRunner(
+                    bound_instance, event_sender, task_receiver, cancel_receiver
+                ).main()
                 return
             if shard.model_card.image is not None:
-                raise RuntimeError("no qualified native image engine serves this placement")
+                raise RuntimeError(
+                    "no qualified native image engine serves this placement"
+                )
             from skulk.worker.runner.image_models.runner import Runner as ImageRunner
 
             runner = ImageRunner(

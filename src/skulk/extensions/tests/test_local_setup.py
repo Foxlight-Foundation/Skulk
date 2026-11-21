@@ -217,6 +217,7 @@ with (root/'installer/installer.lock').open('rb') as stream:
     try: fcntl.flock(stream.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError: pass
     else: raise RuntimeError('generation fence lost on exec')
+print('entrypoint-ready',flush=True)
 print('setup:'+input(),flush=True)
 """
     metadata, trust, host = artifacts(
@@ -259,9 +260,20 @@ service_setup.main()
         stderr=asyncio.subprocess.PIPE,
     )
     try:
+        assert process.stdin is not None and process.stdout is not None
+        # Input must already be present before verification and exec, so an
+        # accidental read in the launcher cannot be hidden by a readiness wait.
+        process.stdin.write(b"ordinary input\n")
+        await process.stdin.drain()
+        process.stdin.close()
+        # The real ownership wait alone permits 30 seconds. Separate cold
+        # verification/startup from the terminal I/O deadline below.
+        async with asyncio.timeout(120):
+            readiness = await process.stdout.readline()
         async with asyncio.timeout(20):
-            output, errors = await process.communicate(b"ordinary input\n")
+            output, errors = await process.communicate()
         assert process.returncode == 0, errors.decode()
+        assert readiness == b"entrypoint-ready\n"
         assert output == b"setup:ordinary input\n"
     finally:
         if process.returncode is None:

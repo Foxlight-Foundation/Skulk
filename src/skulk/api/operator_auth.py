@@ -21,6 +21,7 @@ from skulk.api.remote_pairing import (
     RemotePairingStatus,
 )
 from skulk.connectivity.tailscale import is_tailscale_peer
+from skulk.extensions.caller_identity import AuthenticatedOwner
 from skulk.operator.pairing import (
     OperatorCredentialExpiredError,
     OperatorCredentialInvalidError,
@@ -55,6 +56,7 @@ from skulk.operator.relay_registration import (
     RelayRegistrationError,
     RelayRegistrationFailure,
 )
+from skulk.shared.types.common import NodeId
 
 _BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
 _PAIRING_INVITATION_PATH = "/pairing-invitations"
@@ -371,6 +373,30 @@ async def authorize_plugin_owner_request(
     await _require_direct_dashboard_authority(
         request, tailnet_peer_verifier, _PLUGIN_OWNER_AUTHORITY_DETAIL
     )
+
+
+async def authenticate_capability_owner(
+    request: Request,
+    issuer_node_id: NodeId,
+    tailnet_peer_verifier: TailnetPeerVerifier = is_tailscale_peer,
+) -> AuthenticatedOwner:
+    """Identify the original direct owner after actual host request admission.
+
+    Args:
+        request: Incoming HTTP request with its actual socket and ASGI context.
+        issuer_node_id: This API server's node identity, supplied by the host.
+        tailnet_peer_verifier: Resolve a Tailscale socket peer when applicable.
+
+    Returns:
+        A process-local owner identity. Caller headers, payloads and provider
+        account claims never supply its fields. Execution still needs current
+        policy and an exact signed destination; this is no inference grant.
+
+    Raises:
+        HTTPException: 403 for paired, forwarded or unverified owner requests.
+    """
+    await authorize_plugin_owner_request(request, tailnet_peer_verifier)
+    return AuthenticatedOwner(issuer_node_id=issuer_node_id)
 
 
 def _remote_pairing_error(

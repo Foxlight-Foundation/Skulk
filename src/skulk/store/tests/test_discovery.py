@@ -54,6 +54,7 @@ from skulk.store.discovery_contracts import (
     DiscoveryResults,
     SourceReview,
 )
+from skulk.store.discovery_host import METADATA_WORKER_SECONDS
 from skulk.store.model_store import ModelStore
 from skulk.store.preservation_contracts import (
     KitUploadStatus,
@@ -211,7 +212,10 @@ async def enroll(client: httpx.AsyncClient, encoded: bytes) -> SourceReview:
 
 async def metadata_settled(client: httpx.AsyncClient, job_id: str) -> DiscoveryJob:
     """Observe retained native jobs rather than running work in the browser."""
-    async with asyncio.timeout(30):
+    # Real cold workers have the production metadata budget, including native
+    # imports under concurrent filesystem load. Leave time for its terminal
+    # journal observation rather than timing out before the worker's deadline.
+    async with asyncio.timeout(METADATA_WORKER_SECONDS + 10):
         while True:
             response = await client.get("/preservation/discovery/jobs/" + job_id)
             assert response.status_code == 200, response.text
@@ -687,7 +691,13 @@ async def test_queued_cancel_and_forced_stop_hold_metadata_ownership(
 
 
 @pytest.mark.asyncio
-async def test_metadata_worker_exits_when_parent_pipe_is_lost(tmp_path: Path) -> None:
+@pytest.mark.parametrize("loss_phase", ["startup", "active"])
+async def test_metadata_worker_exits_when_parent_pipe_is_lost(
+    tmp_path: Path, loss_phase: Literal["startup", "active"]
+) -> None:
+    """Cover early EOF and bound active-worker exit independently of cold imports."""
+    from contextlib import suppress
+
     from foxlight_model_preservation.discovery import (
         bootstrap_identity,
         follow_source,
@@ -727,6 +737,23 @@ async def test_metadata_worker_exits_when_parent_pipe_is_lost(tmp_path: Path) ->
         request_path.write_text(
             DiscoveryWorkerRequest(cache=cache, selection=selection).model_dump_json()
         )
+        entered, release = threading.Event(), threading.Event()
+
+        class BlockedHandler(SimpleHTTPRequestHandler):
+            def log_message(self, *args: object, **kwargs: object) -> None:
+                """Keep fixture addresses out of logs."""
+
+            def do_GET(self) -> None:
+                """Witness real metadata work while preventing normal completion."""
+                entered.set()
+                release.wait(30)
+                with suppress(BrokenPipeError, ConnectionResetError):
+                    super().do_GET()
+
+        if loss_phase == "active":
+            metadata.server.RequestHandlerClass = partial(
+                BlockedHandler, directory=str(tmp_path / "source")
+            )
         process = await asyncio.create_subprocess_exec(
             *preservation_worker_command(request_path),
             stdin=asyncio.subprocess.PIPE,
@@ -734,15 +761,25 @@ async def test_metadata_worker_exits_when_parent_pipe_is_lost(tmp_path: Path) ->
             stderr=asyncio.subprocess.DEVNULL,
         )
         assert process.stdin is not None
-        process.stdin.close()
         try:
-            await asyncio.wait_for(process.wait(), 5)
+            if loss_phase == "active":
+                # Cold interpreter/module imports are not parent-loss latency.
+                # Real HTTP proves the worker and its EOF watcher have started;
+                # the blocked response rules out ordinary successful exit.
+                async with asyncio.timeout(120):
+                    while not entered.is_set():
+                        await asyncio.sleep(0.025)
+            process.stdin.close()
+            await asyncio.wait_for(
+                process.wait(), 5 if loss_phase == "active" else 120
+            )
             assert process.returncode == 75
             assert list_sources(cache)[0].catalog_id == accepted.catalog_id
         finally:
+            release.set()
             if process.returncode is None:
                 process.kill()
-                await process.wait()
+            await process.wait()
 
 
 @pytest.mark.asyncio

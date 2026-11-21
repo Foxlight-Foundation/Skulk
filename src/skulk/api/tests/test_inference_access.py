@@ -1,0 +1,356 @@
+"""Real HTTP owner/client authentication and protected inference enrollment."""
+
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi import FastAPI, HTTPException, Request, WebSocket
+from pydantic import JsonValue, TypeAdapter
+from starlette.types import Message, Scope
+
+from skulk.api.inference_access import (
+    ClientCreated,
+    authenticate_inference_request,
+    create_inference_access_router,
+)
+from skulk.extensions.inference_callers import InferenceCallers
+from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
+from skulk.extensions.runtime_files import write_private
+from skulk.shared.types.common import NodeId
+
+
+def application(root: Path) -> tuple[FastAPI, InferenceCallers]:
+    """Use production routers and real custody, with a test-only identity observer."""
+    write_private(
+        root / "host.json",
+        HostSettings(profile_id="a" * 32, transport_node_id="access-core")
+        .model_dump_json()
+        .encode(),
+    )
+    write_private(
+        root / "connection.json",
+        ServiceConnection(manager_root=str(root), profile_id="a" * 32)
+        .model_dump_json()
+        .encode(),
+    )
+    service = InferenceCallers(root, "a" * 32, "access-core")
+    app = FastAPI()
+    app.include_router(
+        create_inference_access_router(
+            NodeId("access-core"), connection_path=root / "connection.json"
+        )
+    )
+
+    async def caller(request: Request) -> dict[str, JsonValue]:
+        authenticated = await authenticate_inference_request(
+            request, service, NodeId("access-core")
+        )
+        return authenticated.principal.model_dump(mode="json")
+
+    app.get("/caller")(caller)
+    return app, service
+
+
+def client_for(
+    app: FastAPI,
+    *,
+    peer: str = "127.0.0.1",
+    scheme: str = "http",
+    dashboard: bool = True,
+) -> httpx.AsyncClient:
+    """Create a real ASGI socket/origin boundary without authentication stubs."""
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=(peer, 1)),
+        base_url=f"{scheme}://localhost",
+        headers={"origin": f"{scheme}://localhost", "x-skulk-dashboard": "pairing-v1"}
+        if dashboard
+        else {},
+    )
+
+
+async def test_owner_identity_uses_current_host_profile_without_permission(
+    tmp_path: Path,
+) -> None:
+    """The UI receives the actual authenticated owner realm, never a guessed issuer."""
+    app, service = application(tmp_path)
+    async with client_for(app) as client:
+        response = await client.get("/v1/inference-access/owner")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.json() == {
+        "identifier": "direct-owner",
+        "kind": "operator",
+        "issuer_node_id": "core-profile:" + "a" * 32,
+    }
+    assert service.policy().enabled is False and service.policy().callers == ()
+
+
+async def test_owner_identity_rejects_client_and_stale_host_attachment(
+    tmp_path: Path,
+) -> None:
+    """An inference bearer cannot inspect owner setup; changed host custody fails shut."""
+    app, service = application(tmp_path)
+    _, token = service.create(service.inventory().revision, "API", None)
+    async with client_for(app) as client:
+        refused = await client.get(
+            "/v1/inference-access/owner", headers={"authorization": f"Bearer {token}"}
+        )
+        assert refused.status_code == 403
+        write_private(
+            tmp_path / "host.json",
+            HostSettings(profile_id="b" * 32, transport_node_id="access-core")
+            .model_dump_json()
+            .encode(),
+        )
+        unavailable = await client.get("/v1/inference-access/owner")
+    assert unavailable.status_code == 503
+    assert "core-profile" not in unavailable.text
+
+
+@pytest.mark.parametrize("fault", ["browser", "origin", "forwarded", "paired"])
+async def test_owner_identity_keeps_direct_owner_origin_boundary(
+    tmp_path: Path, fault: str
+) -> None:
+    """The owner-description route has the same boundary as enrollment mutations."""
+    app, _ = application(tmp_path)
+    headers: dict[str, str] = {}
+    if fault == "origin":
+        headers["origin"] = "https://untrusted.invalid"
+    elif fault == "forwarded":
+        headers["x-forwarded-for"] = "127.0.0.1"
+    elif fault == "paired":
+        headers["authorization"] = "Bearer paired-device"
+    async with client_for(app, dashboard=fault != "browser") as client:
+        response = await client.get("/v1/inference-access/owner", headers=headers)
+    assert response.status_code == 403
+
+
+async def test_owner_can_enroll_once_list_metadata_and_revoke(tmp_path: Path) -> None:
+    """The bearer exists only in the creation response; revocation invalidates it."""
+    app, service = application(tmp_path)
+    async with client_for(app) as client:
+        listed = await client.get("/v1/inference-access/clients")
+        assert listed.status_code == 200 and listed.json()["clients"] == []
+        created = await client.post(
+            "/v1/inference-access/clients",
+            json={
+                "expected_revision": listed.json()["revision"],
+                "label": "AnythingLLM",
+            },
+        )
+        assert created.status_code == 201
+        assert created.headers["cache-control"] == "no-store"
+        issued = ClientCreated.model_validate_json(created.content)
+        token = issued.token
+        identifier = issued.client.identifier
+        assert (
+            service.authenticate(token).principal.identifier == f"client:{identifier}"
+        )
+        visible = await client.get("/v1/inference-access/clients")
+        assert (
+            token not in visible.text
+            and "token_digest" not in visible.text
+            and "digest_key" not in visible.text
+        )
+        original = await client.get("/caller")
+        assert original.json()["identifier"] == "direct-owner"
+        bearer = await client.get(
+            "/caller",
+            headers={"authorization": f"Bearer {token}", "x-caller-id": "direct-owner"},
+        )
+        assert bearer.json()["identifier"] == f"client:{identifier}"
+        assert bearer.json()["kind"] == "client"
+        stale = await client.post(
+            "/v1/inference-access/clients",
+            json={"expected_revision": listed.json()["revision"], "label": "Stale"},
+        )
+        assert stale.status_code == 409
+        revoked = await client.request(
+            "DELETE",
+            f"/v1/inference-access/clients/{identifier}",
+            json={"expected_revision": visible.json()["revision"]},
+        )
+        assert revoked.status_code == 200 and revoked.json()["clients"] == []
+        denied = await client.get(
+            "/caller", headers={"authorization": f"Bearer {token}"}
+        )
+        assert denied.status_code == 401
+        assert service.policy().enabled is False
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["invalid", "duplicate", "empty", "paired", "forwarded", "remote-cleartext"],
+)
+async def test_invalid_client_never_falls_back_to_owner(
+    tmp_path: Path, fault: str
+) -> None:
+    """Real credentials cannot be substituted with caller text or unsafe transport."""
+    app, service = application(tmp_path)
+    _, token = service.create(service.inventory().revision, "API", None)
+    auth = f"Bearer {token}"
+    headers: list[tuple[str, str]] = [("authorization", auth)]
+    if fault == "invalid":
+        headers = [("authorization", "Bearer invalid")]
+    elif fault == "duplicate":
+        headers.append(("authorization", auth))
+    elif fault == "empty":
+        headers = [("authorization", "")]
+    elif fault == "paired":
+        headers = [("authorization", "Bearer operator-credential")]
+    elif fault == "forwarded":
+        headers.append(("x-forwarded-for", "127.0.0.1"))
+    async with client_for(
+        app, peer="192.0.2.1" if fault == "remote-cleartext" else "127.0.0.1"
+    ) as client:
+        result = await client.get("/caller", headers=headers)
+    assert result.status_code in {401, 403}
+
+
+async def test_client_and_unverified_browser_cannot_administer_enrollment(
+    tmp_path: Path,
+) -> None:
+    """Execution authentication never grants owner management access."""
+    app, service = application(tmp_path)
+    _, token = service.create(service.inventory().revision, "API", None)
+    async with client_for(app) as client:
+        result = await client.get(
+            "/v1/inference-access/clients", headers={"authorization": f"Bearer {token}"}
+        )
+        assert result.status_code == 403
+    async with client_for(app, dashboard=False) as client:
+        result = await client.get("/v1/inference-access/clients")
+        assert result.status_code == 403
+    async with client_for(app, peer="192.0.2.1") as client:
+        result = await client.get("/v1/inference-access/clients")
+        assert result.status_code == 403
+
+
+async def test_bearer_requires_no_browser_origin_on_https(tmp_path: Path) -> None:
+    """Stock clients use a standard bearer over a protected direct transport."""
+    app, service = application(tmp_path)
+    _, token = service.create(service.inventory().revision, "API", None)
+    async with client_for(
+        app, peer="192.0.2.1", scheme="https", dashboard=False
+    ) as client:
+        result = await client.get(
+            "/caller", headers={"authorization": f"Bearer {token}"}
+        )
+    assert result.status_code == 200 and result.json()["kind"] == "client"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["missing", "invalid", "duplicate", "paired", "forwarded", "cleartext", "valid"],
+)
+async def test_websocket_has_explicit_bearer_authority_without_owner_fallback(
+    tmp_path: Path, fault: str
+) -> None:
+    """Actual WebSocket scopes authenticate enrolled clients over protected WSS."""
+    _, service = application(tmp_path)
+    _, token = service.create(service.inventory().revision, "Streaming API", None)
+    credential = ("Bearer " + token).encode()
+    headers = [(b"authorization", credential)]
+    if fault == "missing":
+        headers = [(b"x-skulk-dashboard", b"pairing-v1")]
+    elif fault in {"invalid", "paired"}:
+        headers = [(b"authorization", b"Bearer operator-credential")]
+    elif fault == "duplicate":
+        headers.append((b"authorization", credential))
+    elif fault == "forwarded":
+        headers.append((b"x-forwarded-for", b"127.0.0.1"))
+    scope: Scope = {
+        "type": "websocket",
+        "scheme": "ws" if fault == "cleartext" else "wss",
+        "path": "/caller",
+        "query_string": b"",
+        "headers": headers,
+        "client": ("192.0.2.1", 1),
+        "server": ("localhost", 443),
+    }
+
+    async def receive() -> Message:
+        raise AssertionError("authentication must not read application frames")
+
+    async def send(_message: Message) -> None:
+        raise AssertionError("authentication must precede socket acceptance")
+
+    socket = WebSocket(scope, receive, send)
+    if fault == "valid":
+        caller = await authenticate_inference_request(
+            socket, service, NodeId("access-core")
+        )
+        assert caller.principal.kind == "client"
+        assert caller.principal.identifier != "direct-owner"
+    else:
+        with pytest.raises(HTTPException) as refusal:
+            await authenticate_inference_request(socket, service, NodeId("access-core"))
+        assert refusal.value.status_code in (401, 403)
+
+
+async def test_management_authentication_precedes_body_parsing_and_bounds_it(
+    tmp_path: Path,
+) -> None:
+    """An unauthenticated caller cannot force parsing; an owner has a fixed byte cap."""
+    app, service = application(tmp_path)
+    async with client_for(app, dashboard=False) as client:
+        refused = await client.post(
+            "/v1/inference-access/clients",
+            content=b"{" * 150000,
+            headers={"content-type": "application/json"},
+        )
+        assert refused.status_code == 403
+    async with client_for(app) as client:
+        oversized = await client.post(
+            "/v1/inference-access/clients",
+            content=b"{" * 150000,
+            headers={"content-type": "application/json"},
+        )
+        assert oversized.status_code == 413
+        malformed = await client.post(
+            "/v1/inference-access/clients",
+            json={
+                "expected_revision": service.inventory().revision,
+                "label": "API",
+                "expires_unix_ms": True,
+            },
+        )
+        assert malformed.status_code == 422
+    assert service.inventory().clients == ()
+
+
+async def test_policy_has_distinct_default_deny_and_cas(tmp_path: Path) -> None:
+    """Policy administration stays separate from credentials and legacy read enrollment."""
+    app, _ = application(tmp_path)
+    async with client_for(app) as client:
+        initial = await client.get("/v1/inference-access/policy")
+        assert initial.status_code == 200 and initial.json()["enabled"] is False
+        updated = await client.put(
+            "/v1/inference-access/policy",
+            json={
+                "expected_revision": initial.json()["revision"],
+                "enabled": True,
+                "callers": [],
+            },
+        )
+        assert updated.status_code == 200 and updated.json()["callers"] == []
+        stale = await client.put(
+            "/v1/inference-access/policy",
+            json={
+                "expected_revision": initial.json()["revision"],
+                "enabled": False,
+                "callers": [],
+            },
+        )
+        assert stale.status_code == 409
+    schema = TypeAdapter(dict[str, JsonValue]).validate_python(app.openapi())
+    paths = TypeAdapter(dict[str, dict[str, dict[str, JsonValue]]]).validate_python(
+        schema["paths"]
+    )
+    for path, methods in paths.items():
+        if path.startswith("/v1/inference-access"):
+            assert all(
+                operation["summary"] and operation["description"] and operation["tags"]
+                for operation in methods.values()
+            )
