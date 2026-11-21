@@ -1128,7 +1128,13 @@ The system uses event sourcing for state management:
 ### Rust Components
 Rust code in `rust/` provides:
 - `networking`: libp2p networking (gossipsub, peer discovery)
-- `skulk_pyo3_bindings`: PyO3 bindings exposing Rust to Python
+- `skulk_pyo3_bindings`: PyO3 bindings exposing Rust to Python. Its tokio
+  threads outlive the interpreter, so code that runs on them must never call
+  `Python::attach`: log through `log`/`tracing` (the bridge in
+  `src/exit_safety.rs` drops records once Python is exiting), start futures
+  with `exit_safety::future_into_py`, and return plain Rust data that becomes
+  a Python object in `IntoPyObject`. `routing/tests/test_bindings_interpreter_exit.py`
+  covers it.
 - `system_custodian`: System-level operations
 
 ### Extension API (plugins)

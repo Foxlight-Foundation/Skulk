@@ -5,6 +5,7 @@
 //!
 
 mod allow_threading;
+mod exit_safety;
 mod ident;
 mod networking;
 
@@ -26,19 +27,11 @@ pub(crate) mod ext {
     use crate::allow_threading::AllowThreads;
     use extend::ext;
     use pyo3::exceptions::{PyConnectionError, PyRuntimeError};
-    use pyo3::types::PyBytes;
-    use pyo3::{Py, PyErr, PyResult, Python};
+    use pyo3::{PyErr, PyResult, Python};
     use tokio::runtime::Runtime;
     use tokio::sync::mpsc;
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::task::JoinHandle;
-
-    #[ext(pub, name = ByteArrayExt)]
-    impl [u8] {
-        fn pybytes(&self) -> Py<PyBytes> {
-            Python::attach(|py| PyBytes::new(py, self).unbind())
-        }
-    }
 
     #[ext(pub, name = ResultExt)]
     impl<T, E> Result<T, E>
@@ -159,14 +152,20 @@ fn main_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // transport incident into gigabytes of duplicate logs and sustained CPU
     // pressure. Python reports aggregate queue drops without payloads, so keep
     // errors from this target but suppress its warning-level raw RPC dumps.
-    pyo3_log::Logger::new(m.py(), pyo3_log::Caching::LoggersAndLevels)?
+    let logger = pyo3_log::Logger::new(m.py(), pyo3_log::Caching::LoggersAndLevels)?
         .filter(log::LevelFilter::Debug)
         .filter_target(
             "libp2p_gossipsub::behaviour".to_owned(),
             log::LevelFilter::Error,
-        )
-        .install()
+        );
+    // Installed by hand, not with `Logger::install`, so the bridge can be
+    // wrapped: runtime threads keep logging while Python exits, and attaching
+    // to a finalized interpreter panics.
+    log::set_boxed_logger(Box::new(exit_safety::ExitSafeLogger(logger)))
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    // The most verbose level any filter above lets through.
+    log::set_max_level(log::LevelFilter::Debug);
+    exit_safety::register_exit_hook(m)?;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     pyo3_async_runtimes::tokio::init(builder);
