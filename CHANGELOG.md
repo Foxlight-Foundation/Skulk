@@ -7,6 +7,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Management nodes and the master role
+
+- A management node (started with `--no-worker`, or declaring
+  `SKULK_NODE_PARTICIPATION=management`) is now a last-resort master candidate. It loses the
+  master election to any inference node and becomes master only when the cluster has no
+  inference node. A newly elected master's `skulk.yaml` replaces every follower's, including
+  the model-store host, so before this a freshly installed management machine could win an
+  election on node ID alone and repoint the whole cluster's model store at itself. Among
+  management nodes the election works as it does among inference nodes: a master that has
+  already won against another node keeps the role when a further one joins, and two nodes
+  that each started alone are still decided by commands seen and then node ID.
+  `--force-master` still makes any node the master.
+
 ### Clean shutdown
 
 - A node no longer prints a Rust panic (`The Python interpreter is not initialized`) when it

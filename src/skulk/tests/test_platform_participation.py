@@ -11,6 +11,7 @@ from skulk.main import (
     Args,
     UnsupportedParticipationError,
     apply_platform_participation,
+    is_master_candidate,
 )
 
 _POSIX_ONLY_MODULES = frozenset({"fcntl", "grp", "pwd", "resource", "termios"})
@@ -51,6 +52,40 @@ def test_windows_refuses_a_participation_that_needs_an_engine(declared: str) -> 
         apply_platform_participation(_args(), "win32", environ)
 
     assert environ == {NODE_PARTICIPATION_ENV_VAR: declared}
+
+
+@pytest.mark.parametrize("declared", [None, "", "full", "ffn_only", "unknown"])
+def test_an_inference_node_is_an_ordinary_master_candidate(
+    declared: str | None,
+) -> None:
+    environ = {} if declared is None else {NODE_PARTICIPATION_ENV_VAR: declared}
+
+    assert is_master_candidate(_args(), environ) is True
+
+
+@pytest.mark.parametrize("declared", ["management", " Management "])
+def test_a_declared_management_node_is_a_last_resort_candidate(declared: str) -> None:
+    environ = {NODE_PARTICIPATION_ENV_VAR: declared}
+
+    assert is_master_candidate(_args(), environ) is False
+
+
+def test_a_node_without_a_worker_is_a_last_resort_candidate() -> None:
+    assert is_master_candidate(_args(no_worker=True), {}) is False
+
+
+def test_a_windows_node_is_a_last_resort_candidate() -> None:
+    environ: dict[str, str] = {}
+    args = apply_platform_participation(_args(), "win32", environ)
+
+    assert is_master_candidate(args, environ) is False
+
+
+def test_force_master_keeps_a_management_node_an_ordinary_candidate() -> None:
+    args = Args(libp2p_port=0, no_worker=True, force_master=True)
+    environ = {NODE_PARTICIPATION_ENV_VAR: "management"}
+
+    assert is_master_candidate(args, environ) is True
 
 
 def test_no_module_imports_a_posix_only_module_unconditionally() -> None:

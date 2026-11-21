@@ -1,4 +1,4 @@
-from typing import Self
+from typing import Final, Self
 
 import anyio
 from anyio import (
@@ -30,6 +30,14 @@ COMPLETED_ELECTION_REPUBLISH_INTERVAL_SECONDS = 5.0
 # burst of related updates over this window before deciding whether membership
 # truly changed.
 CONNECTION_SETTLE_DELAY = 0.2
+
+# Starting seniority of a last-resort candidate (a node that should master only
+# a cluster with no ordinary candidate, such as a management node). Ordinary
+# candidates start at 0 and only ever gain seniority, so every last-resort
+# value, which stays this far below zero however many rounds the node wins,
+# loses to every ordinary one. The gap is the same "one million nodes" bound
+# that ``--force-master`` uses in the other direction.
+LAST_RESORT_SENIORITY_FLOOR: Final = -1_000_000
 
 
 class ElectionMessage(CamelCaseModel):
@@ -72,10 +80,19 @@ class Election:
         is_candidate: bool = True,
         seniority: int = 0,
     ):
-        # If we aren't a candidate, simply don't increment seniority.
-        # For reference: This node can be elected master if all nodes are not master candidates
-        # Any master candidate will automatically win out over this node.
-        self.seniority = seniority if is_candidate else -1
+        # ``is_candidate=False`` makes this a last-resort candidate: any
+        # ordinary candidate wins over it, and it masters a cluster only when
+        # every node is last-resort (a management node alone, or a cluster of
+        # management nodes). It still gains seniority when it wins, counted up
+        # from the floor, exactly as an ordinary candidate does from zero: a
+        # last-resort master that has won a round against another node keeps
+        # the role when a further last-resort node joins. Without that, every
+        # join would hand mastership, and with it the authoritative cluster
+        # config, to whichever node ID sorted higher. Two nodes that each
+        # started alone still tie on seniority and fall through to commands
+        # seen and node ID, in this band as in the ordinary one.
+        self._seniority_floor = 0 if is_candidate else LAST_RESORT_SENIORITY_FLOOR
+        self.seniority = seniority if is_candidate else LAST_RESORT_SENIORITY_FLOOR
         self.clock = 0
         self.node_id = node_id
         self.commands_seen = 0
@@ -362,19 +379,14 @@ class Election:
                 elected = max(candidates)
                 logger.debug(f"Election queue {candidates}")
                 logger.debug(f"Elected: {elected}")
-                if (
-                    self.node_id == elected.proposed_session.master_node_id
-                    and self.seniority >= 0
-                ):
-                    logger.debug(
-                        f"Node is a candidate and seniority is {self.seniority}"
+                if self.node_id == elected.proposed_session.master_node_id:
+                    logger.debug(f"Node won with seniority {self.seniority}")
+                    self.seniority = max(
+                        self.seniority, self._seniority_floor + len(candidates)
                     )
-                    self.seniority = max(self.seniority, len(candidates))
                     logger.debug(f"New seniority: {self.seniority}")
                 else:
-                    logger.debug(
-                        f"Node is not a candidate or seniority is not {self.seniority}"
-                    )
+                    logger.debug(f"Node did not win; seniority {self.seniority}")
                 logger.debug(
                     f"Election finished, new SessionId({elected.proposed_session}) with queue {candidates}"
                 )
