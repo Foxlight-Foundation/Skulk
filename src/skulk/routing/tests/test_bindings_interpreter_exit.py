@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import uuid
 
 _PEER = r"""
@@ -25,14 +26,18 @@ import skulk_pyo3_bindings as bindings
 logging.basicConfig(level=logging.DEBUG, stream=open(os.devnull, "w"))
 serve = sys.argv[1] == "serve"
 bootstrap = sys.argv[2:]
+NO_TRAFFIC = 3
 
 
 async def main() -> None:
     handle = bindings.NetworkingHandle(bindings.Keypair.generate(), bootstrap, 0)
+    heard = asyncio.Event()
 
     async def read() -> None:
         while True:
-            await handle.recv()
+            event = await handle.recv()
+            if isinstance(event, bindings.PyFromSwarm.Message):
+                heard.set()
 
     async def chatter() -> None:
         while True:
@@ -54,7 +59,13 @@ async def main() -> None:
         print(" ".join(addresses), flush=True)
         await asyncio.sleep(120)
     else:
-        await asyncio.sleep(1.5)
+        # Exit only with the connection up and messages arriving; without
+        # them this test would pass on the unfixed bindings too.
+        try:
+            await asyncio.wait_for(heard.wait(), 30)
+        except TimeoutError:
+            sys.exit(NO_TRAFFIC)
+        await asyncio.sleep(1.0)
     for task in (talker, reader):
         task.cancel()
         try:
@@ -67,6 +78,7 @@ asyncio.run(main())
 """
 
 _EXITS = 4
+_NO_TRAFFIC = 3
 
 
 def test_interpreter_exit_with_live_traffic_does_not_panic() -> None:
@@ -80,9 +92,13 @@ def test_interpreter_exit_with_live_traffic_does_not_panic() -> None:
         stderr=subprocess.DEVNULL,
         text=True,
     )
+    # Ends the read below if the serving peer never reports a listener.
+    watchdog = threading.Timer(60, server.kill)
+    watchdog.start()
     try:
         assert server.stdout is not None
         port = re.search(r"/tcp/(\d+)", server.stdout.readline())
+        watchdog.cancel()
         assert port is not None, "the serving peer reported no TCP listener"
         bootstrap = f"/ip4/127.0.0.1/tcp/{port.group(1)}"
 
@@ -96,7 +112,9 @@ def test_interpreter_exit_with_live_traffic_does_not_panic() -> None:
                 check=False,
             )
             assert "panicked" not in peer.stderr, peer.stderr
+            assert peer.returncode != _NO_TRAFFIC, "no message reached the joining peer"
             assert peer.returncode == 0, peer.stderr
     finally:
+        watchdog.cancel()
         server.kill()
         server.wait()
