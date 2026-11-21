@@ -7,6 +7,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Windows management node
+
+- A Skulk node now starts on Windows from a source checkout, as a management node only. It
+  joins a cluster by discovery, syncs state, connects the data transport and leaves cleanly;
+  it never runs an inference engine. Windows always declares management participation, and
+  asking for `full` or `ffn_only` there is refused at startup. Ctrl-Break requests the same
+  orderly shutdown that SIGTERM does on macOS and Linux. No compiler is needed: the Rust
+  networking bindings install as a published wheel (CPython 3.13). Not built yet on Windows:
+  an installer, signed installs, an unattended service and capability hosting.
+- Installs on macOS and Linux resolve the same packages as before, with one exception: the
+  `foxlight-model-preservation` pin moves from 0.29.0 to 0.38.0 on every platform, because
+  0.38.0 is the first release that imports on Windows.
+
 ### Management nodes and the master role
 
 - A management node (started with `--no-worker`, or declaring
