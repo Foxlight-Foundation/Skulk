@@ -7,6 +7,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Clean shutdown
+
+- A node no longer prints a Rust panic (`The Python interpreter is not initialized`) when it
+  shuts down. The networking layer's background threads could try to log, or to hand a result
+  back to Python, after the interpreter had already exited; this happened in roughly half of
+  clean shutdowns of a connected node with verbose logging. The exit code was already 0 and
+  nothing was lost, so this removes noise from logs and crash reporters, not a failure.
+
 ### Engine builds
 
 - Fix the CUDA image build, which had started failing: `llama-server` is now built without

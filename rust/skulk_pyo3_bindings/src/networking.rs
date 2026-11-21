@@ -2,7 +2,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::r#const::MPSC_CHANNEL_SIZE;
-use crate::ext::{ByteArrayExt as _, FutureExt, PyErrExt as _};
+use crate::exit_safety::future_into_py;
+use crate::ext::{FutureExt, PyErrExt as _};
 use crate::ext::{ResultExt as _, TokioMpscSenderExt as _};
 use crate::ident::PyKeypair;
 use crate::networking::exception::{
@@ -16,7 +17,7 @@ use networking::zenoh_session::{ZenohConfig, ZenohSession};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::{PyModule, PyModuleMethods as _};
 use pyo3::types::PyBytes;
-use pyo3::{Bound, Py, PyAny, PyErr, PyResult, Python, pymethods};
+use pyo3::{Bound, IntoPyObject, Py, PyAny, PyErr, PyResult, Python, pymethods};
 use pyo3_stub_gen::derive::{
     gen_methods_from_python, gen_stub_pyclass, gen_stub_pyclass_complex_enum, gen_stub_pymethods,
 };
@@ -155,8 +156,8 @@ enum PyFromSwarm {
         data: Py<PyBytes>,
     },
 }
-impl From<FromSwarm> for PyFromSwarm {
-    fn from(value: FromSwarm) -> Self {
+impl PyFromSwarm {
+    fn from_swarm(py: Python<'_>, value: FromSwarm) -> Self {
         match value {
             FromSwarm::Discovered {
                 peer_id,
@@ -176,10 +177,49 @@ impl From<FromSwarm> for PyFromSwarm {
             },
             FromSwarm::Message { from, topic, data } => Self::Message {
                 origin: from.to_base58(),
-                topic: topic,
-                data: data.pybytes(),
+                topic,
+                data: PyBytes::new(py, &data).unbind(),
             },
         }
+    }
+}
+
+/// A swarm event on its way out of the runtime, still plain Rust data.
+///
+/// `recv` futures run on runtime threads, which must not attach to Python
+/// (see [`crate::exit_safety`]), so the Python object is built only when the
+/// result is delivered.
+struct SwarmEvent(FromSwarm);
+
+impl<'py> IntoPyObject<'py> for SwarmEvent {
+    type Target = PyFromSwarm;
+    type Output = Bound<'py, PyFromSwarm>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        PyFromSwarm::from_swarm(py, self.0).into_pyobject(py)
+    }
+}
+
+/// A data-plane sample on its way out of the runtime; see [`SwarmEvent`].
+struct ZenohSample {
+    topic: String,
+    data: Vec<u8>,
+}
+
+impl<'py> IntoPyObject<'py> for ZenohSample {
+    type Target = PyZenohMessage;
+    type Output = Bound<'py, PyZenohMessage>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        Bound::new(
+            py,
+            PyZenohMessage {
+                topic: self.topic,
+                data: PyBytes::new(py, &self.data).unbind(),
+            },
+        )
     }
 }
 
@@ -225,14 +265,14 @@ impl PyNetworkingHandle {
     #[gen_stub(skip)]
     fn recv<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let swarm = Arc::clone(&self.swarm);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             swarm
                 .try_lock()
                 .map_err(|_| PyRuntimeError::new_err("called recv twice concurrently"))?
                 .next()
                 .await
                 .ok_or(PyErr::receiver_channel_closed())
-                .map(PyFromSwarm::from)
+                .map(SwarmEvent)
         })
     }
 
@@ -435,15 +475,12 @@ impl PyZenohHandle {
     #[gen_stub(skip)]
     fn recv<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let session = Arc::clone(&self.session);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        future_into_py(py, async move {
             let (topic, data) = session
                 .recv()
                 .await
                 .ok_or(PyErr::receiver_channel_closed())?;
-            Ok(PyZenohMessage {
-                topic,
-                data: data.pybytes(),
-            })
+            Ok(ZenohSample { topic, data })
         })
     }
 }
