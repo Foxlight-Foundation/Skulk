@@ -7,6 +7,32 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Windows management node
+
+- A Skulk node now starts on Windows from a source checkout, as a management node only. It
+  joins a cluster by discovery, syncs state, connects the data transport and leaves cleanly;
+  it never runs an inference engine. Windows always declares management participation, and
+  asking for `full` or `ffn_only` there is refused at startup. Ctrl-Break requests the same
+  orderly shutdown that SIGTERM does on macOS and Linux. No compiler is needed: the Rust
+  networking bindings install as a published wheel (CPython 3.13). Not built yet on Windows:
+  an installer, signed installs, an unattended service and capability hosting.
+- Installs on macOS and Linux resolve the same packages as before, with one exception: the
+  `foxlight-model-preservation` pin moves from 0.29.0 to 0.38.0 on every platform, because
+  0.38.0 is the first release that imports on Windows.
+
+### Management nodes and the master role
+
+- A management node (started with `--no-worker`, or declaring
+  `SKULK_NODE_PARTICIPATION=management`) is now a last-resort master candidate. It loses the
+  master election to any inference node and becomes master only when the cluster has no
+  inference node. A newly elected master's `skulk.yaml` replaces every follower's, including
+  the model-store host, so before this a freshly installed management machine could win an
+  election on node ID alone and repoint the whole cluster's model store at itself. Among
+  management nodes the election works as it does among inference nodes: a master that has
+  already won against another node keeps the role when a further one joins, and two nodes
+  that each started alone are still decided by commands seen and then node ID.
+  `--force-master` still makes any node the master.
+
 ### Clean shutdown
 
 - A node no longer prints a Rust panic (`The Python interpreter is not initialized`) when it

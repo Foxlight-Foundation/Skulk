@@ -101,7 +101,7 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Router**: libp2p-based pub/sub messaging via Rust bindings (`skulk_pyo3_bindings`). `TELEMETRY` uses bounded latest-value admission, a one-packet Python egress queue, and its own gossipsub protocol/handler queues; `ELECTION_MESSAGES` has a separate Python egress queue and isolated protocol/handler queues. Neither can be starved by ordinary control fan-out, and telemetry pressure cannot consume election capacity. Election alone carries a temporary legacy-protocol copy. Peer discovery tries all mDNS addresses once, then slows link-local retries to one minute after another path connects; socket liveness requires three consecutive five-second ping failures.
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
 - **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
-- **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration
+- **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration A management-participation node (`--no-worker` or `SKULK_NODE_PARTICIPATION=management`; every Windows node) is a last-resort candidate (`is_master_candidate` in `main.py`, `LAST_RESORT_SENIORITY_FLOOR` in `shared/election.py`): it loses to every ordinary candidate, because a new master's `skulk.yaml` replaces every follower's, and gains seniority only inside its own band; `--force-master` overrides.
 - **API**: FastAPI server for OpenAI-compatible chat completions
 
 ### Inference engines
@@ -216,6 +216,24 @@ Rust code in `rust/` provides:
   a Python object in `IntoPyObject`. `routing/tests/test_bindings_interpreter_exit.py`
   covers it.
 - `system_custodian`: System-level operations
+
+Windows (`win32`) is a non-compute target: the entry point forces management
+participation (`apply_platform_participation`; an explicit `full` or `ffn_only`
+is refused), Ctrl-Break requests the same orderly shutdown as SIGTERM, and
+outbound libp2p dials use a fresh local port (`DIAL_FROM_FRESH_PORT` in
+`rust/networking/src/discovery.rs`) because Windows refuses the listening-port
+rebind. No module may import a POSIX-only standard-library module
+(`fcntl`, `grp`, `pwd`, `resource`, `termios`) at module level; import it in the
+function that needs it or under a platform check
+(`tests/test_platform_participation.py` enforces this). The bindings reach
+Windows as a wheel built by `.github/workflows/bindings-wheel.yml` and published
+to the Foxlight index by manual dispatch. `pyproject.toml` pins that wheel for
+`win32` on CPython 3.13 and splits the source by platform, which is why the
+bindings are a path source and not a uv workspace member (uv refuses an index
+source for a member). The pin must equal the bindings version
+(`tests/test_windows_bindings_wheel.py`), so a bindings version bump moves the
+pin and needs the Windows wheel published from that branch before `uv lock`. Capability
+hosting, signed installs and an unattended service on Windows are not built yet.
 
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`, dark = the operator design system's Den palette); components never branch on the theme name. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field (scene crown + shooting stars, mesh retired); default builds ship a CSS-only night gradient with the mesh.

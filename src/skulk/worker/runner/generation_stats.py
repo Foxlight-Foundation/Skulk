@@ -24,7 +24,6 @@ This module provides the shared pieces those engines need:
 
 from __future__ import annotations
 
-import resource
 import sys
 import time
 from pathlib import Path
@@ -32,6 +31,10 @@ from typing import Callable, cast, final
 
 from skulk.api.types import GenerationStats
 from skulk.shared.types.memory import Memory
+
+if sys.platform != "win32":
+    # POSIX-only; the guard keeps this module loadable on Windows.
+    import resource
 
 
 def process_peak_memory() -> Memory:

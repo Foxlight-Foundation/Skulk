@@ -12,7 +12,6 @@ import array
 import importlib
 import math
 import os
-import resource
 import signal
 import sys
 import threading
@@ -25,6 +24,10 @@ from types import TracebackType
 from typing import Final, Literal, Protocol, final, overload, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if sys.platform != "win32":
+    # POSIX-only; the guard keeps this module loadable on Windows.
+    import resource
 
 
 class AudioPlane(Protocol):

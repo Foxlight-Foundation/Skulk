@@ -3,12 +3,11 @@ import hashlib
 import ipaddress
 import multiprocessing as mp
 import os
-import resource
 import signal
 import socket
 import sys
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, MutableMapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
@@ -1205,8 +1204,16 @@ class Node:
         )
 
         er_send, er_recv = channel[ElectionResult]()
+        master_candidate = is_master_candidate(args, os.environ)
+        if not master_candidate:
+            logger.info(
+                "Management node: last-resort master candidate. It masters the "
+                "cluster only while no inference node is present; --force-master "
+                "overrides."
+            )
         election = Election(
             node_id,
+            is_candidate=master_candidate,
             # If someone manages to assemble 1 MILLION devices into a Skulk cluster then. well done. good job champ.
             seniority=1_000_000 if args.force_master else 0,
             # nb: this DOES feedback right now. i have thoughts on how to address this,
@@ -1252,6 +1259,11 @@ class Node:
         async with self._store_lifetime(), self._tg as tg:
             signal.signal(signal.SIGINT, lambda _, __: self.shutdown())
             signal.signal(signal.SIGTERM, lambda _, __: self.shutdown())
+            if sys.platform == "win32":
+                # Ctrl-Break is the one console signal a supervisor can send to
+                # a Windows process group, so it requests the same orderly
+                # shutdown that SIGTERM does elsewhere.
+                signal.signal(signal.SIGBREAK, lambda _, __: self.shutdown())
             tg.start_soon(self.router.run)
             tg.start_soon(self.event_router.run)
             tg.start_soon(self.election.run)
@@ -2180,9 +2192,11 @@ def main():
 
         sys.exit(doctor_main(sys.argv[2:]))
     args = Args.parse()
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    target = min(max(soft, 65535), hard)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    try:
+        args = apply_platform_participation(args, sys.platform, os.environ)
+    except UnsupportedParticipationError as error:
+        sys.exit(str(error))
+    _raise_open_file_limit()
 
     mp.set_start_method("spawn", force=True)
     # `kill -USR1 <pid>` writes every thread's Python stack to the log.
@@ -2380,6 +2394,84 @@ async def run_node(args: "Args") -> None:
     """
     node = await Node.create(args)
     await node.run()
+
+
+class UnsupportedParticipationError(Exception):
+    """The requested node participation cannot run on this platform."""
+
+
+NODE_PARTICIPATION_ENV_VAR: Final = "SKULK_NODE_PARTICIPATION"
+
+
+def apply_platform_participation(
+    args: "Args", platform: str, environ: "MutableMapping[str, str]"
+) -> "Args":
+    """Return launch arguments restricted to what this platform can run.
+
+    Windows hosts no inference engine, so a Windows node always runs with
+    management participation: no worker, never a placement target. An unset
+    participation becomes ``management`` (recorded in ``environ`` because
+    resource telemetry and provisioning read the variable directly); an
+    explicit ``full`` or ``ffn_only`` is refused rather than silently
+    downgraded. Every other platform gets its arguments back unchanged.
+
+    Raises:
+        UnsupportedParticipationError: Windows was asked for a participation
+            that needs an inference engine.
+    """
+    if platform != "win32":
+        return args
+    declared = environ.get(NODE_PARTICIPATION_ENV_VAR, "").strip().lower()
+    if declared not in ("", "management"):
+        raise UnsupportedParticipationError(
+            f"{NODE_PARTICIPATION_ENV_VAR}={declared} is not available on "
+            "Windows: a Windows node runs without an inference engine. Unset "
+            "the variable or set it to 'management'."
+        )
+    environ[NODE_PARTICIPATION_ENV_VAR] = "management"
+    return args.model_copy(update={"no_worker": True})
+
+
+def is_master_candidate(args: "Args", environ: "Mapping[str, str]") -> bool:
+    """Return whether this node is an ordinary master candidate.
+
+    A node with management participation (started with ``--no-worker``, or
+    declaring ``SKULK_NODE_PARTICIPATION=management``, which Windows always
+    does) is a last-resort candidate instead: it becomes master only when the
+    cluster holds no ordinary candidate. A newly elected master's
+    ``skulk.yaml`` replaces every follower's, model-store host included, so a
+    management machine that joins with a default configuration must not win an
+    election against the inference nodes it joined. ``--force-master`` keeps
+    its meaning on any node, for a dedicated always-on coordinator.
+
+    Args:
+        args: Parsed launch arguments, after platform participation is applied.
+        environ: Process environment carrying the declared participation.
+
+    Returns:
+        ``True`` for an ordinary candidate, ``False`` for a last-resort one.
+    """
+    if args.force_master:
+        return True
+    if args.no_worker:
+        return False
+    declared = environ.get(NODE_PARTICIPATION_ENV_VAR, "").strip().lower()
+    return declared != "management"
+
+
+def _raise_open_file_limit() -> None:
+    """Raise the soft open-file limit toward 65535 where the platform has one.
+
+    Windows has no per-process descriptor limit to raise and no ``resource``
+    module, so this is a no-op there.
+    """
+    if sys.platform == "win32":
+        return
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = min(max(soft, 65535), hard)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
 
 
 class Args(CamelCaseModel):

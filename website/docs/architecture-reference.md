@@ -371,6 +371,7 @@ before resuming workloads.
 - **Communicates via:** `ELECTION_MESSAGES` topic
 - **Late proposals:** a better same-round proposal corrects a completed result; comparison uses the completed vote rather than post-win seniority. Duplicate, inferior, and older-round proposals do not reverse the result.
 - **Lost startup votes:** connected nodes republish the original completed winning vote every five seconds. A fixed receive deadline prevents busy incoming traffic from starving repair. A newer in-flight round suppresses the previous result. The timer never creates a round, increases seniority, or substitutes for connection liveness; peerless nodes emit no repair traffic, and input closure stops the receiver.
+- **Last-resort candidates:** a node with management participation (`--no-worker`, or `SKULK_NODE_PARTICIPATION=management`, which Windows always declares) campaigns from a seniority band that starts at -1,000,000 (`LAST_RESORT_SENIORITY_FLOOR`), so it loses to every ordinary candidate and masters a cluster only when no inference node is present. It gains seniority inside that band when it wins, as an ordinary candidate does from zero, so a management master that has won a round against another node is not displaced by a further management node joining; two nodes that each started alone still tie on seniority and are decided by commands seen and node ID, in either band. The reason is configuration, not load: a newly elected master's `skulk.yaml` replaces every follower's, model-store host included. `--force-master` makes any node an ordinary candidate with top seniority. `is_master_candidate` in `src/skulk/main.py` decides.
 - **Triggers:** node startup, lost master heartbeat, explicit master abdication
 
 ### API
@@ -1609,7 +1610,7 @@ The table also identifies upstream engine variables that Skulk configures.
 |---|---|
 | `-v` / `-vv` / `-vvv` | Increase log verbosity |
 | `-q` | Decrease verbosity |
-| `--force-master` / `-m` | Force this node into master role |
+| `--force-master` / `-m` | Force this node into master role; also lets a management node win an election against inference nodes |
 | `--api-port` | Override default 52415 |
 | `--no-api` | Disable API server |
 | `--no-batch` | Disable continuous batching |
