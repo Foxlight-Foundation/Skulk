@@ -31,7 +31,7 @@ from skulk.provisioning.engine_packages import (
     EnginePackageRefusal,
     EnginePackageRefusedError,
 )
-from skulk.shared.backends import package_engine_of
+from skulk.shared.backends import engine_packages_disabled, package_engine_of
 
 UnusableReason = EnginePackageRefusal | Literal["backend_tag_ambiguous"]
 """Why a lane's active generation is not offered: the installer's refusal, or
@@ -96,7 +96,14 @@ def read_engine_package_inventory(
     Directories that are not a valid engine ID or lane are ignored: they are
     not packages. Lanes with generations but no active one are not reported;
     nothing is offered from them and nothing is wrong with them.
+
+    With engine packages turned off (``SKULK_ENGINE_PACKAGES_DISABLE=1``) the
+    root is not read and the inventory is empty, whatever is installed. Every
+    reader of a node's packages goes through here, so the node then offers
+    and runs none.
     """
+    if engine_packages_disabled():
+        return EnginePackageInventory(active={}, unusable=())
     found: list[InstalledEngine] = []
     unusable: list[UnusableEnginePackage] = []
     if root.is_dir():

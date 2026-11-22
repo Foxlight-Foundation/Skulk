@@ -15,10 +15,12 @@ import skulk.facts
 from skulk.facts.derive import BackendDerivation
 from skulk.shared.backends import (
     ACE_STEP_COMPUTE_BACKENDS,
+    ENGINE_PACKAGES_DISABLE_ENV,
     ENGINE_UNKNOWN_FAILURE_MARKER,
     backend_hardware_present,
     describe_backend_hardware,
     engine_of,
+    engine_packages_disabled,
     engine_supports_multi_node,
     expand_engine_backends,
     make_backend_tag,
@@ -482,6 +484,35 @@ def test_a_known_or_unstamped_backend_is_not_refused(tag: str | None) -> None:
     # No stamped backend means the node resolves the engine from its own
     # probe, which is a separate path and not a refusal.
     assert unknown_engine_refusal(tag) is None
+
+
+def test_the_packages_switch_is_off_unless_set_to_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(ENGINE_PACKAGES_DISABLE_ENV, raising=False)
+    assert not engine_packages_disabled()
+    for value in ("", "0", "true", "yes"):
+        monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, value)
+        assert not engine_packages_disabled()
+    for value in ("1", " 1 "):
+        monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, value)
+        assert engine_packages_disabled()
+
+
+def test_a_refusal_says_when_packages_are_turned_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, "1")
+
+    refusal = unknown_engine_refusal("tensorfold-rocm")
+    bounded = unknown_engine_refusal("x" * 5000)
+
+    assert refusal is not None
+    assert refusal.startswith(f"{ENGINE_UNKNOWN_FAILURE_MARKER}: ")
+    assert f"{ENGINE_PACKAGES_DISABLE_ENV}=1" in refusal
+    assert bounded is not None and len(bounded) < 300
+    # A built-in engine is never refused, whatever the switch says.
+    assert unknown_engine_refusal("mlx-metal") is None
 
 
 def test_an_unknown_engine_refusal_bounds_the_tag_it_repeats() -> None:

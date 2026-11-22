@@ -40,6 +40,7 @@ from skulk.provisioning.tests.engine_package_fixtures import (
     public_hex,
     sign_engine_claims,
 )
+from skulk.shared.backends import ENGINE_PACKAGES_DISABLE_ENV
 
 ENGINE_ID = "foxlight.tensorfold"
 ENGINE = b"#!/bin/sh\necho engine\n"
@@ -199,6 +200,24 @@ def test_install_from_files_lays_out_a_complete_generation(
     # Installing does not activate.
     assert active_engine(ENGINE_ID, "rocm", root=packages) is None
     assert _leftovers(packages) == [built.package.digest, "install.lock"]
+
+
+def test_packages_turned_off_install_nothing(
+    tmp_path: Path,
+    key: Ed25519PrivateKey,
+    packages: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built = _build(tmp_path, key)
+    monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, "1")
+
+    with pytest.raises(EnginePackageRefusedError) as refused:
+        install_engine_package(
+            built.package, DirectoryPackageSource(built.files), root=packages
+        )
+
+    assert refused.value.code == "packages_disabled"
+    assert not packages.exists()
 
 
 def test_an_installed_generation_is_returned_without_fetching_again(

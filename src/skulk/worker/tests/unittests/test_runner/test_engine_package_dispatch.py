@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
 import loguru
 import pytest
 
-from skulk.shared.backends import engine_load_refusal
+from skulk.engines.tests.package_fixtures import install_test_package
+from skulk.shared.backends import (
+    ENGINE_PACKAGES_DISABLE_ENV,
+    ENGINE_UNKNOWN_FAILURE_MARKER,
+    engine_load_refusal,
+)
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.common import NodeId
@@ -35,7 +41,7 @@ MODEL = ModelId("org/model")
 BUILD = "a" * 64
 
 
-def _bound() -> BoundInstance:
+def _bound(build: str = BUILD) -> BoundInstance:
     shard = PipelineShardMetadata(
         model_card=ModelCard(
             model_id=MODEL,
@@ -51,7 +57,7 @@ def _bound() -> BoundInstance:
         end_layer=4,
         n_layers=4,
         resolved_backend="tensorfold-rocm",
-        resolved_engine_build=BUILD,
+        resolved_engine_build=build,
     )
     instance = get_mlx_ring_instance(
         InstanceId("instance-a"), MODEL, {NODE: RUNNER}, {RUNNER: shard}
@@ -63,36 +69,18 @@ def _skip_process_setup(*_arguments: object, **_keywords: object) -> None:
     """Keep signal, limit, watchdog and diagnostic effects out of an in-process run."""
 
 
-def test_a_placement_on_a_held_package_reaches_the_generic_runner(
+def _run_entrypoint(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The stamped backend and build select the package; no built-in runner is consulted."""
-    package = object()
-    looked_up: list[tuple[str | None, str | None]] = []
-    started: list[tuple[object, int | None]] = []
+    bound: BoundInstance,
+    lookup: object,
+    runner_class: type,
+) -> list[Event]:
+    """Run the runner entry point in process and return the events it sent.
+
+    ``lookup`` stands in for the installed-package lookup and ``runner_class``
+    for the generic runner. Reaching built-in engine resolution fails the test.
+    """
     events: list[Event] = []
-
-    def lookup(backend: str | None, build: str | None) -> object:
-        looked_up.append((backend, build))
-        return package
-
-    class RecordingRunner:
-        """Stand in for the generic runner; record what it was built with."""
-
-        def __init__(
-            self,
-            _bound_instance: BoundInstance,
-            _events: object,
-            _tasks: object,
-            _cancels: object,
-            installed: object,
-            context_token_limit: int | None = None,
-        ) -> None:
-            self.installed = installed
-            self.context_token_limit = context_token_limit
-
-        def main(self) -> None:
-            started.append((self.installed, self.context_token_limit))
 
     def built_in_reached(*_arguments: object, **_keywords: object) -> None:
         raise AssertionError("a package placement reached built-in engine resolution")
@@ -118,10 +106,10 @@ def test_a_placement_on_a_held_package_reaches_the_generic_runner(
         monkeypatch.setattr(bootstrap, name, _skip_process_setup)
     monkeypatch.setattr(bootstrap, "installed_engine_package", lookup)
     monkeypatch.setattr(bootstrap, "_resolve_text_engine", built_in_reached)
-    monkeypatch.setattr(runner_module, "Runner", RecordingRunner)
+    monkeypatch.setattr(runner_module, "Runner", runner_class)
     try:
         bootstrap.entrypoint(
-            _bound(),
+            bound,
             event_sender,
             diagnostic_sender,
             task_receiver,
@@ -144,6 +132,40 @@ def test_a_placement_on_a_held_package_reaches_the_generic_runner(
             audio_receiver,
         ):
             channel_end.close()
+    return events
+
+
+def test_a_placement_on_a_held_package_reaches_the_generic_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stamped backend and build select the package; no built-in runner is consulted."""
+    package = object()
+    looked_up: list[tuple[str | None, str | None]] = []
+    started: list[tuple[object, int | None]] = []
+
+    def lookup(backend: str | None, build: str | None) -> object:
+        looked_up.append((backend, build))
+        return package
+
+    class RecordingRunner:
+        """Stand in for the generic runner; record what it was built with."""
+
+        def __init__(
+            self,
+            _bound_instance: BoundInstance,
+            _events: object,
+            _tasks: object,
+            _cancels: object,
+            installed: object,
+            context_token_limit: int | None = None,
+        ) -> None:
+            self.installed = installed
+            self.context_token_limit = context_token_limit
+
+        def main(self) -> None:
+            started.append((self.installed, self.context_token_limit))
+
+    events = _run_entrypoint(monkeypatch, _bound(), lookup, RecordingRunner)
 
     assert looked_up == [("tensorfold-rocm", BUILD)]
     assert started == [(package, 4096)]
@@ -153,6 +175,49 @@ def test_a_placement_on_a_held_package_reaches_the_generic_runner(
         if isinstance(event, RunnerStatusUpdated)
         and isinstance(event.runner_status, RunnerFailed)
     ]
+
+
+def test_packages_turned_off_refuse_a_placement_on_a_held_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The off switch makes a node that holds the package act as one that does not."""
+    packages = tmp_path / "packages"
+    installed = install_test_package(tmp_path, packages)
+    tag = "tensorfold-rocm"
+    real_lookup = bootstrap.installed_engine_package
+
+    def lookup(backend: str | None, build: str | None) -> object:
+        return real_lookup(backend, build, packages_root=packages)
+
+    class UnreachableRunner:
+        """The generic runner must not be built while packages are off."""
+
+        def __init__(self, *_arguments: object, **_keywords: object) -> None:
+            raise AssertionError("a package ran while engine packages were turned off")
+
+    held = real_lookup(tag, installed.digest, packages_root=packages)
+    assert held is not None and held.digest == installed.digest
+
+    monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, "1")
+
+    assert real_lookup(tag, installed.digest, packages_root=packages) is None
+    # A stamp for a generation that is gone is a missing-engine error while
+    # packages are on; turned off, the node does not look at all.
+    assert real_lookup(tag, "f" * 64, packages_root=packages) is None
+    events = _run_entrypoint(
+        monkeypatch, _bound(installed.digest), lookup, UnreachableRunner
+    )
+
+    failures = [
+        event.runner_status
+        for event in events
+        if isinstance(event, RunnerStatusUpdated)
+        and isinstance(event.runner_status, RunnerFailed)
+    ]
+    assert len(failures) == 1
+    message = failures[0].error_message or ""
+    assert message.startswith(f"{ENGINE_UNKNOWN_FAILURE_MARKER}: ")
+    assert f"{ENGINE_PACKAGES_DISABLE_ENV}=1" in message
 
 
 def test_the_worker_gives_up_a_refused_load_with_the_code_only() -> None:

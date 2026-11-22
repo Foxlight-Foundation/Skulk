@@ -47,6 +47,10 @@ from skulk.provisioning.engine_packages import (
     installed_engine_claims,
     verify_engine_file,
 )
+from skulk.shared.backends import (
+    ENGINE_PACKAGES_DISABLE_ENV,
+    engine_packages_disabled,
+)
 from skulk.shared.constants import SKULK_ENGINES_DIR
 
 ENGINE_PACKAGES_DIR: Final = SKULK_ENGINES_DIR / "packages"
@@ -611,12 +615,20 @@ def install_engine_package(
         EnginePackageRefusedError: ``insufficient_space``,
             ``source_unavailable``, ``archive_corrupt`` or
             ``install_cancelled``. Nothing is left under the generation's
-            final name in any of these cases.
+            final name in any of these cases. ``packages_disabled`` when
+            engine packages are turned off on this node; nothing is fetched
+            or written.
 
     Side effects:
         Writes under ``root``. Holds a per-engine, per-lane file lock for the
         duration, so two installations of the same engine never overlap.
     """
+    if engine_packages_disabled():
+        raise _refuse(
+            "packages_disabled",
+            "engine packages are turned off on this node "
+            f"({ENGINE_PACKAGES_DISABLE_ENV}=1)",
+        )
     cancel = stop if stop is not None else threading.Event()
     claims = package.claims
     lane_directory = _lane_directory(root, claims.engine_id, claims.lane)

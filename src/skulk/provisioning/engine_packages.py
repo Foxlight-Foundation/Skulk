@@ -106,6 +106,7 @@ EnginePackageRefusal = Literal[
     "generation_missing",
     "generation_active",
     "installation_damaged",
+    "packages_disabled",
 ]
 """Why a package was refused. Each code names one check, so an operator and a
 test can tell a bad signature from a package that simply does not fit this

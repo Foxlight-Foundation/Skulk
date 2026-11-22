@@ -522,8 +522,9 @@ def installed_engine_package(
     """Find the installed engine package a stamped placement names, if any.
 
     Returns ``None`` for an unstamped placement, for a built-in engine's
-    backend, and for a package backend this node does not hold; the caller
-    then refuses an unknown engine as before. ``packages_root`` overrides
+    backend, for a package backend this node does not hold, and for every
+    backend while engine packages are turned off; the caller then refuses an
+    unknown engine as before. ``packages_root`` overrides
     where installed packages are read from.
 
     Raises:
@@ -540,10 +541,15 @@ def installed_engine_package(
     from skulk.provisioning.engine_packages import EnginePackageRefusedError
     from skulk.shared.backends import (
         ENGINE_UNAVAILABLE_FAILURE_MARKER,
+        engine_packages_disabled,
         package_engine_of,
     )
 
     if resolved_backend is None or package_engine_of(resolved_backend) is None:
+        return None
+    if engine_packages_disabled():
+        # The caller then refuses the placement as an unknown engine and
+        # says the packages are turned off.
         return None
     root = packages_root if packages_root is not None else ENGINE_PACKAGES_DIR
     try:

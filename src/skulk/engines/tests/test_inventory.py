@@ -2,11 +2,14 @@
 
 from pathlib import Path
 
+import pytest
+
 from skulk.engines.inventory import (
     installed_engine_for_backend,
     read_engine_package_inventory,
 )
 from skulk.engines.tests.package_fixtures import install_test_package
+from skulk.shared.backends import ENGINE_PACKAGES_DISABLE_ENV
 
 
 def test_a_node_without_packages_reports_nothing(tmp_path: Path) -> None:
@@ -121,3 +124,43 @@ def test_an_unknown_stamp_or_tag_finds_nothing(tmp_path: Path) -> None:
     assert installed_engine_for_backend(tag, "f" * 64, root=packages) is None
     assert installed_engine_for_backend(tag, "../../outside", root=packages) is None
     assert installed_engine_for_backend("tensorfold-cuda", None, root=packages) is None
+
+
+def test_packages_turned_off_report_nothing_whatever_is_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A good package and a damaged one both vanish; clearing the switch brings them back."""
+    packages = tmp_path / "packages"
+    good = install_test_package(tmp_path, packages)
+    damaged = install_test_package(tmp_path, packages, lane="cuda")
+    damaged.adapter.unlink()
+    tag = "tensorfold-rocm"
+    before = read_engine_package_inventory(root=packages)
+    assert before.builds == {tag: good.digest} and len(before.unusable) == 1
+
+    monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, "1")
+    empty = read_engine_package_inventory(root=tmp_path / "absent")
+    turned_off = read_engine_package_inventory(root=packages)
+
+    # Exactly what a node with no packages reports.
+    assert turned_off == empty
+    assert turned_off.active == {} and turned_off.unusable == ()
+    assert installed_engine_for_backend(tag, None, root=packages) is None
+    assert installed_engine_for_backend(tag, good.digest, root=packages) is None
+
+    monkeypatch.delenv(ENGINE_PACKAGES_DISABLE_ENV)
+    assert read_engine_package_inventory(root=packages) == before
+
+
+@pytest.mark.parametrize("value", ["", "0", "true", "yes", "on", "2"])
+def test_only_the_value_one_turns_packages_off(
+    value: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    packages = tmp_path / "packages"
+    good = install_test_package(tmp_path, packages)
+
+    monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, value)
+
+    assert read_engine_package_inventory(root=packages).builds == {
+        "tensorfold-rocm": good.digest
+    }

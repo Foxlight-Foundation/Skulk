@@ -215,6 +215,25 @@ The worker gives the instance up at once: relaunching cannot make this node
 learn an engine."""
 
 
+ENGINE_PACKAGES_DISABLE_ENV: Final = "SKULK_ENGINE_PACKAGES_DISABLE"
+"""Set to ``1`` to make a node ignore installed engine packages entirely.
+
+The node then reads no package from disk, offers no package backend, runs no
+package and installs none: it behaves as a build without engine packages. This
+is the operator's off lever if a package misbehaves on a live node. Packages
+already on disk are left where they are and come back when the variable is
+cleared."""
+
+
+def engine_packages_disabled() -> bool:
+    """Whether this process must ignore installed engine packages.
+
+    Read from the environment on every call, so a runner process started by a
+    worker gives the same answer as the worker that started it.
+    """
+    return os.environ.get(ENGINE_PACKAGES_DISABLE_ENV, "").strip() == "1"
+
+
 ENGINE_LOAD_REFUSED_FAILURE_MARKER: Final = "engine-load-refused"
 """Marks a runner whose engine package refused to load its model. The refusal
 is the engine's answer for this build and checkpoint, so the worker gives the
@@ -264,6 +283,12 @@ def unknown_engine_refusal(resolved_backend: str | None) -> str | None:
         return None
     # The tag arrived over the wire: bound what a log or failure record repeats.
     shown = resolved_backend[:64]
+    if engine_packages_disabled():
+        return (
+            f"{ENGINE_UNKNOWN_FAILURE_MARKER}: this node has no engine for "
+            f"backend {shown!r}; it is not built into this Skulk build and "
+            f"engine packages are turned off here ({ENGINE_PACKAGES_DISABLE_ENV}=1)"
+        )
     return (
         f"{ENGINE_UNKNOWN_FAILURE_MARKER}: this node has no engine for backend "
         f"{shown!r}; it is not built into this Skulk build and no installed "
