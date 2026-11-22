@@ -213,6 +213,7 @@ jobs:
           src/skulk/utils/tests/test_runtime_files_platforms.py
           src/skulk/utils/tests/test_windows_account.py
           src/skulk/extensions/tests/test_runtime_manager_platforms.py
+          src/skulk/extensions/tests/test_runtime_catalog.py
 
   test:
     name: Test

@@ -255,7 +255,12 @@ folder is refused. `has_root_authority()` is the one test for "runs as root":
 the effective root user on POSIX, the SYSTEM account or a process running as
 administrator on Windows (`utils/_windows_account.py`). With these the plugin
 manager starts and answers on Windows; owner processes and the native kernel
-do not run there yet.
+do not run there yet. Plugin-hosting code in `extensions/` never asks who owns
+a file or opens one link-safely by calling the operating system itself: it uses
+`is_private_directory`, `open_private` and `sync_directory` from the same
+module, and a guard in `utils/tests/test_runtime_files_platforms.py` lists the
+modules not yet moved (`runtime_integrity.py`, `local_setup.py` and the
+`service_*` modules). Take a module off that list when it is ported; add none.
 
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`, dark = the operator design system's Den palette); components never branch on the theme name. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field (scene crown + shooting stars, mesh retired); default builds ship a CSS-only night gradient with the mesh.

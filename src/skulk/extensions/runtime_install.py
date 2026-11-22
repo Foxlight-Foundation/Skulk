@@ -43,7 +43,11 @@ from skulk.extensions.runtime_integrity import (
     seal_runtime,
     verify_or_adopt_installed_runtime,
 )
-from skulk.utils.runtime_files import has_root_authority
+from skulk.utils.runtime_files import (
+    has_root_authority,
+    open_private,
+    sync_directory,
+)
 
 _INVENTORY = """import importlib.metadata,json,re
 def name(d): return re.sub(r"[-_.]+", "-", d.metadata["Name"].lower())
@@ -242,19 +246,10 @@ class RuntimeInstaller:
         self.installer = self.root / "installer"
         private_directory(self.installer)
         self.database = self.installer / "operations.sqlite3"
-        descriptor = os.open(
-            self.database, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
-        )
         try:
-            info = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or info.st_uid != os.getuid()
-                or info.st_mode & 0o077
-            ):
-                raise ValueError("runtime journal must be owner-only")
-        finally:
-            os.close(descriptor)
+            os.close(open_private(self.database, os.O_RDWR | os.O_CREAT))
+        except ValueError:
+            raise ValueError("runtime journal must be owner-only") from None
         with self._connect() as connection:
             connection.executescript(
                 "CREATE TABLE IF NOT EXISTS operations "
@@ -704,8 +699,4 @@ class RuntimeInstaller:
         write_private(history / "operation.json", operation.model_dump_json().encode())
         os.rename(generation, history / "generation")
         for directory in (generation.parent, history):
-            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            sync_directory(directory)
