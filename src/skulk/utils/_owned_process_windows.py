@@ -19,6 +19,12 @@ classes cannot pass that attribute, which is why this module calls
 that ``asyncio`` would otherwise provide. Jobs nest, so this works when this
 process is itself inside a job (a service, a CI runner, a remote session).
 
+Releasing a child waits for its tree to be gone, not merely told to go: an
+ended process goes on closing what it held for a moment, and until then its
+files cannot be replaced or removed. The job's own member count drops too
+early to show that, so a handle is taken on every member before it is ended
+and those handles are what is waited on (``_end_all``).
+
 A file lock on Windows belongs to one process and is not shared with a child,
 so the directory's lock is not passed down as it is on POSIX. The job gives
 the same result by a different route: when this process dies, its lock is
@@ -44,8 +50,14 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import final
 
+_JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+_JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x0008
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+_WAIT_OBJECT_0 = 0
+_ERROR_MORE_DATA = 234
 _PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002
 _PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x0002000D
 _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
@@ -54,6 +66,9 @@ _CREATE_NO_WINDOW = 0x08000000
 _STARTF_USESTDHANDLES = 0x00000100
 _INFINITE = 0xFFFFFFFF
 _ERROR_ACCESS_DENIED = 5
+# How long ended processes get to finish letting go of what they held.
+_DRAIN_SECONDS = 10.0
+_DRAIN_POLL_SECONDS = 0.005
 
 
 class _BasicLimits(ctypes.Structure):
@@ -126,6 +141,9 @@ class _ExtendedStartupInformation(ctypes.Structure):
 # bytes so the values are plain integers to the type checker.
 _POINTER_BYTES = ctypes.sizeof(ctypes.c_void_p)
 _PROCESS_INFORMATION_BYTES = 2 * _POINTER_BYTES + 8
+# JOBOBJECT_BASIC_PROCESS_ID_LIST: two 32-bit counts (processes in the job,
+# identifiers that fitted in the list), then one pointer-sized identifier each.
+_ID_LIST_HEADER_BYTES = 8
 
 
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -138,6 +156,18 @@ _kernel32.SetInformationJobObject.argtypes = (
     wt.DWORD,
 )
 _kernel32.SetInformationJobObject.restype = wt.BOOL
+_kernel32.QueryInformationJobObject.argtypes = (
+    wt.HANDLE,
+    ctypes.c_int,
+    wt.LPVOID,
+    wt.DWORD,
+    wt.LPVOID,
+)
+_kernel32.QueryInformationJobObject.restype = wt.BOOL
+_kernel32.OpenProcess.argtypes = (wt.DWORD, wt.BOOL, wt.DWORD)
+_kernel32.OpenProcess.restype = wt.HANDLE
+_kernel32.IsProcessInJob.argtypes = (wt.HANDLE, wt.HANDLE, ctypes.POINTER(wt.BOOL))
+_kernel32.IsProcessInJob.restype = wt.BOOL
 _kernel32.TerminateJobObject.argtypes = (wt.HANDLE, wt.UINT)
 _kernel32.TerminateJobObject.restype = wt.BOOL
 _kernel32.CloseHandle.argtypes = (wt.HANDLE,)
@@ -184,6 +214,11 @@ _create_job: Callable[[None, None], int | None] = _kernel32.CreateJobObjectW
 _set_job_information: Callable[[int, int, object, int], int] = (
     _kernel32.SetInformationJobObject
 )
+_query_job: Callable[[int, int, object, int, None], int] = (
+    _kernel32.QueryInformationJobObject
+)
+_open_process: Callable[[int, bool, int], int | None] = _kernel32.OpenProcess
+_is_in_job: Callable[[int, int, object], int] = _kernel32.IsProcessInJob
 _terminate_job: Callable[[int, int], int] = _kernel32.TerminateJobObject
 _close_handle: Callable[[int], int] = _kernel32.CloseHandle
 _initialize_attributes: Callable[[object, int, int, object], int] = (
@@ -223,21 +258,32 @@ def _new_job() -> int:
     job = _create_job(None, None)
     if not job:
         raise _failure("could not create a job")
-    limits = _ExtendedLimits(
-        BasicLimitInformation=_BasicLimits(
+    try:
+        _set_limits(job, admit_new_members=True)
+    except BaseException:
+        _close_handle(job)
+        raise
+    return job
+
+
+def _set_limits(job: int, *, admit_new_members: bool) -> None:
+    """Keep *kill on close*; optionally stop the job taking any new process."""
+    basic = _BasicLimits(LimitFlags=_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+    if not admit_new_members:
+        # With a member present, a limit of one refuses every further one.
+        basic = _BasicLimits(
             LimitFlags=_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | _JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+            ActiveProcessLimit=1,
         )
-    )
+    limits = _ExtendedLimits(BasicLimitInformation=basic)
     if not _set_job_information(
         job,
         _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
         ctypes.byref(limits),
         ctypes.sizeof(limits),
     ):
-        failure = _failure("could not configure a job")
-        _close_handle(job)
-        raise failure
-    return job
+        raise _failure("could not configure a job")
 
 
 def _create_in_job(
@@ -305,9 +351,10 @@ def _create_in_job(
                 _EXTENDED_STARTUPINFO_PRESENT
                 | _CREATE_UNICODE_ENVIRONMENT
                 | _CREATE_NO_WINDOW,
-                # Built element by element: the block has a terminator after
-                # every entry, and one more to end it.
-                (ctypes.c_wchar * (len(block) + 1))(*block),
+                # Every entry ends with a terminator and the buffer adds the
+                # one that ends the block. A character outside the Basic
+                # Multilingual Plane takes two units here, which this handles.
+                ctypes.create_unicode_buffer(block),
                 str(cwd),
                 ctypes.byref(startup),
                 started,
@@ -327,6 +374,95 @@ def _create_in_job(
     )
     _close_handle(thread)
     return process, identifier
+
+
+def _member_identifiers(job: int) -> list[int]:
+    """The identifiers of the processes in the job now."""
+    capacity = 256
+    while True:
+        size = _ID_LIST_HEADER_BYTES + _POINTER_BYTES * capacity
+        listing = ctypes.create_string_buffer(size)
+        if (
+            not _query_job(job, _JOB_OBJECT_BASIC_PROCESS_ID_LIST, listing, size, None)
+            and ctypes.get_last_error() != _ERROR_MORE_DATA
+        ):
+            raise _failure("could not list a job's processes")
+        raw = listing.raw
+        in_job = int.from_bytes(raw[0:4], sys.byteorder)
+        listed = int.from_bytes(raw[4:8], sys.byteorder)
+        if in_job > listed:
+            capacity = in_job + 64
+            continue
+        return [
+            int.from_bytes(
+                raw[
+                    _ID_LIST_HEADER_BYTES + index * _POINTER_BYTES : (
+                        _ID_LIST_HEADER_BYTES + (index + 1) * _POINTER_BYTES
+                    )
+                ],
+                sys.byteorder,
+            )
+            for index in range(listed)
+        ]
+
+
+def _end_all(job: int) -> list[int]:
+    """End every process in the job; return a handle on each to wait for.
+
+    Ending a process is not instant. Windows reports success, and the job's
+    own count of members drops, while the process is still closing what it
+    held; only when the process itself is finished are its files and
+    directories free again. Its handle is what says so, and a handle can be
+    had only while the process is still listed, which is before it is ended.
+
+    So, in this order: stop the job taking new members, which makes the list
+    complete; take a handle on every member; then end them.
+    """
+    _set_limits(job, admit_new_members=False)
+    members: list[int] = []
+    try:
+        for identifier in _member_identifiers(job):
+            handle = _open_process(
+                _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, identifier
+            )
+            if not handle:
+                # It ended between being listed and being opened.
+                continue
+            # The identifier may have gone to an unrelated process meanwhile.
+            is_member = wt.BOOL()
+            if _is_in_job(handle, job, ctypes.byref(is_member)) and is_member.value:
+                members.append(handle)
+            else:
+                _close_handle(handle)
+        if (
+            not _terminate_job(job, 1)
+            and ctypes.get_last_error() != _ERROR_ACCESS_DENIED
+        ):
+            raise _failure("could not end a job's processes")
+    except BaseException:
+        for handle in members:
+            _close_handle(handle)
+        raise
+    return members
+
+
+async def _still_running(members: list[int]) -> list[int]:
+    """Wait for ended processes to finish; return the handles of any that have not.
+
+    The handles of those that finished are closed.
+    """
+    deadline = asyncio.get_running_loop().time() + _DRAIN_SECONDS
+    while True:
+        unfinished: list[int] = []
+        for handle in members:
+            if _wait_for_handle(handle, 0) == _WAIT_OBJECT_0:
+                _close_handle(handle)
+            else:
+                unfinished.append(handle)
+        members = unfinished
+        if not members or asyncio.get_running_loop().time() >= deadline:
+            return members
+        await asyncio.sleep(_DRAIN_POLL_SECONDS)
 
 
 def _await_exit(process: int) -> int:
@@ -356,6 +492,7 @@ class JobChild:
         self._transport = transport
         self._exit_code = exit_code
         self._job: int | None = job
+        self._ended: list[int] = []
 
     @property
     def returncode(self) -> int | None:
@@ -371,19 +508,29 @@ class JobChild:
 
     def kill(self) -> None:
         """End every process in the job; quiet when none is left."""
-        if (
-            self._job is not None
-            and not _terminate_job(self._job, 1)
-            and ctypes.get_last_error() != _ERROR_ACCESS_DENIED
-        ):
-            raise _failure("could not end a job's processes")
-
-    def close(self) -> None:
-        """Release the job and the output stream, ending anything still in the job."""
         if self._job is not None:
-            _close_handle(self._job)
-            self._job = None
+            self._ended.extend(_end_all(self._job))
+
+    async def close(self) -> None:
+        """End what is left of the tree, wait until it is gone, then release it.
+
+        Returns only when every process of the tree has finished, so nothing
+        of theirs is still open in the directory the caller goes on to use.
+
+        Raises:
+            OSError: A process had not finished after the wait. The job is
+                kept, so the tree still cannot outlive this process, and the
+                call can be repeated.
+        """
         self._transport.close()
+        if self._job is None:
+            return
+        self._ended.extend(_end_all(self._job))
+        self._ended = await _still_running(self._ended)
+        if self._ended:
+            raise OSError("a child process tree did not end")
+        _close_handle(self._job)
+        self._job = None
 
 
 async def start(arguments: Sequence[str], *, cwd: Path) -> JobChild:
@@ -412,7 +559,10 @@ async def start(arguments: Sequence[str], *, cwd: Path) -> JobChild:
                 windows_utils.PipeHandle(read_end),
             )
         except BaseException:
-            _terminate_job(job, 1)
+            # The child is already running: do not leave it, or anything of
+            # its still open, behind the error.
+            for handle in await asyncio.shield(_still_running(_end_all(job))):
+                _close_handle(handle)
             raise
     except BaseException:
         _close_handle(job)

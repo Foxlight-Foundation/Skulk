@@ -66,11 +66,15 @@ class OwnedProcess(Protocol):
         """Stop every process in the tree at once; quiet when none is left."""
         ...
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Release what the platform holds for the tree; call after waiting.
 
-        On Windows this also ends any member still running, which is the same
-        guarantee an abrupt exit of this process gives.
+        On Windows this ends any member still running and returns only when
+        none is left, so nothing of theirs is still open in the directory.
+        On POSIX there is nothing to release.
+
+        Raises:
+            OSError: On Windows, a member was still there after a bounded wait.
         """
         ...
 
@@ -113,7 +117,7 @@ if sys.platform != "win32":
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(self._process.pid, signal.SIGKILL)
 
-        def close(self) -> None:
+        async def close(self) -> None:
             """Nothing to release: the session ends with its last member."""
 
 
@@ -132,7 +136,7 @@ async def start_owned(
             outlive it.
 
     Returns:
-        The started child. The caller waits for it and then calls ``close``,
+        The started child. The caller waits for it and then awaits ``close``,
         calling ``kill`` first when it gives up on the child.
     """
     if sys.platform == "win32":

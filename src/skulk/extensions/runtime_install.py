@@ -214,7 +214,7 @@ async def _execute(
                     child.kill()
                 await finish_runtime_work(asyncio.create_task(child.wait()))
             finally:
-                child.close()
+                await finish_runtime_work(asyncio.create_task(child.close()))
 
     return await finish_runtime_work(asyncio.create_task(owned()))
 

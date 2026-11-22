@@ -109,7 +109,7 @@ async def test_a_child_runs_with_its_output_captured(root: Path) -> None:
             assert await child.wait() == 3
             assert child.returncode == 3
         finally:
-            child.close()
+            await child.close()
     finally:
         lock.close()
 
@@ -134,7 +134,7 @@ async def test_a_child_starts_in_the_given_directory_without_the_callers_environ
             output = (await child.stdout.read()).decode()
             assert await child.wait() == 0
         finally:
-            child.close()
+            await child.close()
     finally:
         lock.close()
     directory, *names = output.splitlines()
@@ -174,7 +174,11 @@ async def test_stopping_a_child_stops_everything_it_started(root: Path) -> None:
             # Stopping what has already stopped is quiet.
             child.kill()
         finally:
-            child.close()
+            await child.close()
+        # Nothing of the tree still has its files open: on Windows a file
+        # another process holds open cannot be removed.
+        (root / "child.log").unlink()
+        (root / "grandchild.log").unlink()
     finally:
         lock.close()
 
@@ -201,9 +205,50 @@ async def test_closing_ends_what_a_finished_child_left_running_on_windows(
             left_behind = int(await child.stdout.readline())
             assert await asyncio.wait_for(child.wait(), 10) == 0
             assert _running(left_behind)
+            # Let it open its file and start writing before it is ended.
+            log = root / "grandchild.log"
+            deadline = time.monotonic() + 10
+            while not (log.exists() and log.stat().st_size):
+                assert time.monotonic() < deadline
+                await asyncio.sleep(0.02)
         finally:
-            child.close()
+            await child.close()
+        # Closing returns only once the descendant has ended and let go of
+        # its file, which Windows would otherwise refuse to remove. (Windows
+        # may go on listing an ended process for a moment, so that is not
+        # what is checked first.)
+        (root / "grandchild.log").unlink()
         await asyncio.to_thread(_wait_until_gone, [left_behind])
+    finally:
+        lock.close()
+
+
+async def test_a_temporary_directory_with_any_character_in_its_name_is_passed_on(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A character outside the Basic Multilingual Plane takes two units on Windows."""
+    if sys.platform != "win32":
+        pytest.skip("only the Windows child is given a temporary directory")
+    unusual = root / "temp-\U00020000-\U0001f98a"
+    unusual.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(unusual))
+    lock = RuntimeLock(root, "installer.lock")
+    try:
+        child = await start_owned(
+            (
+                sys.executable,
+                "-I",
+                "-c",
+                "import os, sys; sys.stdout.buffer.write(os.environ['TEMP'].encode())",
+            ),
+            cwd=root,
+            lock=lock,
+        )
+        try:
+            assert (await child.stdout.read()).decode() == str(unusual)
+            assert await child.wait() == 0
+        finally:
+            await child.close()
     finally:
         lock.close()
 
