@@ -13,8 +13,19 @@
 # published again.
 #
 # Build runs on pull requests and dev pushes that touch the bindings, the
-# workspace manifests or this workflow; PUBLISH runs only on manual dispatch
-# with publish=true (cutting a wheel release is a deliberate act).
+# workspace manifests or this workflow, and on manual dispatch without
+# `publish`. Each build smoke-tests its wheel and records the wheel's SHA-256.
+#
+# PUBLISH never builds. A manual dispatch with publish=true promotes the wheel
+# of an earlier successful run of this workflow, named by `publish_run_id` and
+# `publish_sha256`, so the bytes that were tested are the bytes that ship. The
+# candidate must come from a manual dispatch or a push (a pull-request run
+# builds a merge commit, not the branch), and its Rust sources must be
+# identical to the ref the publication is dispatched from:
+#
+#   gh workflow run bindings-wheel.yml --ref <branch>
+#   gh workflow run bindings-wheel.yml --ref <branch> -f publish=true \
+#     -f publish_run_id=<run> -f publish_sha256=<sha256>
 name: bindings-wheel
 
 permissions:
@@ -24,9 +35,17 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish the bindings wheel to the Foxlight R2 index"
+        description: "Promote a previously built and tested wheel to the Foxlight R2 index, without rebuilding"
         type: boolean
         default: false
+      publish_run_id:
+        description: "Successful bindings-wheel run that built the wheel"
+        type: string
+        default: ""
+      publish_sha256:
+        description: "SHA-256 of that run's wheel"
+        type: string
+        default: ""
   pull_request:
     paths:
       - ".github/workflows/bindings-wheel.yml"
@@ -43,6 +62,7 @@ on:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_dispatch' || !inputs.publish
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
@@ -116,6 +136,13 @@ jobs:
           asyncio.run(main())
           PY
 
+      - name: Record the wheel's SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.whl | tee -a "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@v4
         with:
           name: bindings-wheel-win_amd64
@@ -124,9 +151,12 @@ jobs:
           retention-days: 30
 
   publish-index:
-    needs: build
     if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
     # Every wheel workflow regenerates the one shared index from the bucket's
     # contents, so publications serialize across workflows.
     concurrency:
@@ -134,13 +164,55 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate the candidate run and its Rust sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.publish_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          run="repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID"
+          test "$(gh api "$run" --jq '.conclusion')" = success
+          test "$(gh api "$run" --jq '.path')" = .github/workflows/bindings-wheel.yml
+          # A pull-request run builds the merge of the branch and its base,
+          # so its head commit does not identify the sources it compiled.
+          event="$(gh api "$run" --jq '.event')"
+          [[ "$event" == workflow_dispatch || "$event" == push ]]
+          source_sha="$(gh api "$run" --jq '.head_sha')"
+          git fetch --no-tags origin "$source_sha"
+          # The wheel is compiled from these paths only. They must be the same
+          # at the candidate's commit and at the ref this publication runs on.
+          for path in rust Cargo.toml Cargo.lock; do
+            if [ "$(git rev-parse "$source_sha:$path")" != "$(git rev-parse "HEAD:$path")" ]; then
+              echo "$path differs between candidate $source_sha and $GITHUB_SHA" >&2
+              exit 1
+            fi
+          done
       - uses: actions/download-artifact@v4
         with:
-          pattern: "bindings-wheel-*"
-          merge-multiple: true
+          name: bindings-wheel-win_amd64
           path: dist
+          run-id: ${{ inputs.publish_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify the selected wheel
+        env:
+          EXPECTED_SHA256: ${{ inputs.publish_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/skulk_pyo3_bindings/pyproject.toml)"
+          test -n "$version"
+          expected="skulk_pyo3_bindings-${version}-cp313-cp313-win_amd64.whl"
+          found="$(cd dist && ls)"
+          if [ "$found" != "$expected" ]; then
+            echo "expected only $expected, found: $found" >&2
+            exit 1
+          fi
+          echo "$EXPECTED_SHA256  dist/$expected" | sha256sum --check --strict
       - uses: astral-sh/setup-uv@v6
-      - name: Publish wheels to the Foxlight index
+      - name: Publish the wheel to the Foxlight index
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}

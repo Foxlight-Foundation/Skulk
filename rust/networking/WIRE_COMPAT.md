@@ -14,6 +14,13 @@ only when it moves, and every installed startup script runs `uv sync`, so
 the bump makes auto-updating nodes rebuild their bindings on the FIRST
 restart instead of running new Python against stale wire code.
 
+Windows nodes do not build the bindings: they install the published
+`win_amd64` wheel of the version pinned for `win32` in the root
+`pyproject.toml`. A bindings version bump therefore also moves that pin, and
+the Windows wheel is published (`.github/workflows/bindings-wheel.yml`, manual
+dispatch from the branch) before `uv lock`, or Windows nodes would keep the
+old wire code.
+
 CI enforces the pairing: a PR touching anything under this crate's `src/`
 tree, this crate's `Cargo.toml`, or the workspace `Cargo.toml`/`Cargo.lock`
 at the repo root, or the pinned gossipsub vendor source/manifests (a libp2p
@@ -50,6 +57,15 @@ bindings while `versionStatus` reported "consistent".
   nodes discover each other as before, so `NETWORK_VERSION` remains v0.0.3.
   Bindings advance to 0.2.8 so ordinary upgrades rebuild them instead of
   keeping a cached wheel with the old interval.
+- **wire-neutral** (2026-11-19): on Windows only, `src/discovery.rs` dials
+  from a fresh local port (`PortUse::New`) instead of the listening port.
+  Windows refuses the listening-port rebind on a redial (error 10048) and
+  crossing dials from two listening ports can fail the noise handshake. Only
+  the local source port of an outbound TCP connection changes; protocols,
+  topics, framing, upgrades and the pnet key are untouched, and POSIX builds
+  compile the same dial options as before, so `NETWORK_VERSION` stays v0.0.3.
+  A peer that accepts a Windows node's connection now observes an ephemeral
+  remote port, as it already does for any dialer behind address translation.
 
 - **wire-neutral** (2026-11-13): the workspace uses the pinned
   `libp2p-gossipsub` 0.49.5 source with a subscription-reannouncement backport.

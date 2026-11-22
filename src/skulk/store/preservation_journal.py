@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -77,6 +76,9 @@ class PreservationJournal:
     """One private owner, bounded job display and permanent replay reservations."""
 
     def __init__(self, root: Path) -> None:
+        # POSIX-only module, imported at use so this module loads on Windows.
+        import fcntl
+
         secure_directory(root)
         self.root = root
         self._mutex = threading.RLock()

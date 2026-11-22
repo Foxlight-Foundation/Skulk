@@ -1,7 +1,6 @@
 import contextlib
 import gc
 import os
-import resource
 import signal
 import sys
 import threading
@@ -39,6 +38,11 @@ from skulk.worker.runner.diagnostics import (
     configure_runner_diagnostics,
     record_runner_phase,
 )
+
+if sys.platform != "win32":
+    # POSIX-only; the guard keeps this module loadable on Windows. It stays a
+    # module-level name because tests patch it through this module.
+    import resource
 
 logger: "loguru.Logger" = loguru.logger
 

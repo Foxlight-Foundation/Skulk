@@ -1,16 +1,20 @@
 """Protected local files and exclusive ownership for independently managed runtimes."""
 
 import asyncio
-import fcntl
 import functools
-import grp
 import os
-import pwd
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import final
 from uuid import uuid4
+
+if sys.platform != "win32":
+    # POSIX-only; the guard keeps this module loadable on Windows.
+    import fcntl
+    import grp
+    import pwd
 
 
 @functools.cache

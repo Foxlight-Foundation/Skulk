@@ -18,14 +18,25 @@ dependencies = [
   "psutil>=7.0.0",
   "loguru>=0.7.3",
   "packaging>=24.0",                                # extension version gating
-  "skulk_pyo3_bindings",                            # rust bindings
+  # Rust bindings. macOS and Linux build them from rust/ during `uv sync`.
+  # Windows has no compiler toolchain to assume, so it installs the wheel that
+  # .github/workflows/bindings-wheel.yml publishes to the Foxlight index (see
+  # [tool.uv.sources]). That wheel exists for CPython 3.13 only, so the Windows
+  # entry in [tool.uv] environments stops at 3.13. The Windows pin
+  # must equal the version in rust/skulk_pyo3_bindings/pyproject.toml
+  # (src/skulk/tests/test_windows_bindings_wheel.py enforces it): bump both
+  # together and publish the Windows wheel before running `uv lock`.
+  "skulk_pyo3_bindings; sys_platform != 'win32'",
+  "skulk_pyo3_bindings==0.2.11; sys_platform == 'win32'",
   "anyio==4.14.2",
   "mlx==0.32.4; sys_platform == 'darwin'",
   "mlx[cpu]==0.32.4; sys_platform == 'linux'",
   # mlx-lm is a Foxlight fork installed as a wheel from the Foxlight index
   # (see [tool.uv.sources]); a .postN version is a Foxlight build of one
   # pinned fork commit.
-  "mlx-lm==0.32.2.post1",
+  # Not installed on Windows: it requires mlx, which has no Windows build, and
+  # a Windows node never runs an inference engine.
+  "mlx-lm==0.32.2.post1; sys_platform != 'win32'",
   "mlx-optiq[convert]; sys_platform == 'darwin'",
   "tiktoken>=0.12.0",                             # required for kimi k2 tokenizer
   "hypercorn>=0.18.0",
@@ -35,7 +46,7 @@ dependencies = [
   "tomlkit>=0.14.0",
   "tuf>=6,<7",
   # Public preservation core; serving remains an explicit operator action.
-  "foxlight-model-preservation[peer] @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@d66ab33f8c80299a43ed191c957ffd3961476745",
+  "foxlight-model-preservation[peer] @ git+https://github.com/Foxlight-Foundation/foxlight-model-preservation.git@e2982df0612ba9cb263000cf3eb480b3b2e4f814",
   # Native peer wheels are qualified on Python 3.13; other supported Python
   # versions retain HTTP mirrors and receive-only preservation.
   "libtorrent==2.0.14; python_version < '3.14'",
@@ -161,10 +172,17 @@ llama-cpp = [
 ###
 
 [tool.uv.workspace]
-members = ["rust/skulk_pyo3_bindings", "bench"]
+members = ["bench"]
 
 [tool.uv.sources]
-skulk_pyo3_bindings = { workspace = true }
+# The bindings are a path source, not a workspace member: uv refuses an index
+# source for a workspace member, and Windows must take the published wheel.
+# Off Windows this resolves exactly as the member did (an editable build of
+# rust/skulk_pyo3_bindings).
+skulk_pyo3_bindings = [
+  { path = "rust/skulk_pyo3_bindings", editable = true, marker = "sys_platform != 'win32'" },
+  { index = "foxlight", marker = "sys_platform == 'win32'" },
+]
 # Public cohort assets remain immutable inputs to the normal frozen install.
 skulk-capability-kernel = [
   { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-manylinux_2_34_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
@@ -246,9 +264,15 @@ required-version = ">=0.8.6"
 # The MLX hard dependency already has binaries only for Apple Silicon and
 # Linux x86_64/aarch64. Declare those real installation targets so a new
 # platform-specific dependency does not ask uv to solve imaginary architectures.
+# Windows (win32, x86-64) is a non-compute target only: it runs the management
+# participation mode and never an inference engine, so it installs neither MLX
+# nor the native capability kernel. It is limited to CPython 3.13 because the
+# bindings wheel exists for that version only: uv refuses any other Windows
+# interpreter instead of installing a node without its bindings.
 environments = [
   "sys_platform == 'darwin' and platform_machine == 'arm64'",
   "sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+  "sys_platform == 'win32' and platform_machine == 'AMD64' and python_full_version < '3.14'",
 ]
 extra-build-dependencies = { "miniaudio" = ["setuptools", "cffi", "pycparser"] }
 
