@@ -92,6 +92,7 @@ from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_service import RuntimeServiceStatus
 from skulk.extensions.service_snapshot import ServiceSnapshot, activate_staged_runtime
 from skulk.utils.local_transport import (
+    LocalServer,
     connect,
     discard,
     endpoint_directory,
@@ -843,7 +844,7 @@ class RuntimeManager:
         # display identity is read once per digest; failures are not cached
         # because a staging in progress completes later.
         self.release_identities: dict[str, InstalledRelease] = {}
-        self.server: asyncio.Server | None = None
+        self.server: LocalServer | None = None
         self.lock: RuntimeLock | None = None
         # Set by the serving loop: a reload activates the successor, then asks
         # the loop to stop so the OS service restarts on it.
