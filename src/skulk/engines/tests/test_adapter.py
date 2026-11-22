@@ -85,11 +85,15 @@ while True:
     elif kind == "unload":
         send({**base, "released": True})
     elif kind == "stop":
+        with open(pid_file, "w") as handle:
+            handle.write("stop received")
         send(base)
         break
 """
 
-MODEL = ModelIdentity(model_id="Qwen/Example", source_revision="d" * 40)
+MODEL = ModelIdentity(
+    model_id="Qwen/Example", source_revision="d" * 40, directory="/models/example"
+)
 SETTINGS = LoadSettings(
     context_tokens=32768, parallel_streams=4, cache_precision="f16", drafting=False
 )
@@ -126,7 +130,7 @@ def _gone(pid: int, timeout: float = 5.0) -> bool:
 
 def test_full_lifecycle_and_clean_stop(tmp_path: Path) -> None:
     """Every call is answered, the version is negotiated and close stops the process."""
-    session, _ = _session(tmp_path, "normal")
+    session, stop_marker = _session(tmp_path, "normal")
     assert session.start() == 1 and session.version == 1
     described = session.describe()
     assert described.model_families == ("qwen",)
@@ -146,6 +150,8 @@ def test_full_lifecycle_and_clean_stop(tmp_path: Path) -> None:
     session.close()
     assert not session.alive
     assert _gone(process_id)
+    # The adapter was asked to stop before its group was terminated.
+    assert stop_marker.read_text() == "stop received"
 
 
 def test_a_refused_load_keeps_the_session_usable(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence, Set
 
 from skulk.download.download_utils import MODEL_FILES_INCOMPLETE_MARKER
 from skulk.shared.backends import (
+    ENGINE_LOAD_REFUSED_FAILURE_MARKER,
     ENGINE_UNAVAILABLE_FAILURE_MARKER,
     ENGINE_UNKNOWN_FAILURE_MARKER,
     ON_DEMAND_ENGINE_DOWNLOAD_BYTES,
@@ -138,8 +139,8 @@ def _retried_on_failure(status: RunnerStatus) -> bool:
     """Whether a local runner's failure goes through shutdown and relaunch.
 
     A GPU wedge, a model-trust refusal, incomplete model files, a missing
-    on-demand engine, and a placement for an engine this build does not have
-    are terminal for the instance: the worker gives the instance up as soon as
+    on-demand engine, a placement for an engine this build does not have, and
+    a load an engine package refused are terminal for the instance: the worker gives the instance up as soon as
     it observes them, because relaunching into any of them repeats the failure
     (a wedge also leaks wired GPU memory each time).
     Every other failure is a crash the worker's circuit breaker relaunches
@@ -156,6 +157,7 @@ def _retried_on_failure(status: RunnerStatus) -> bool:
             MODEL_FILES_INCOMPLETE_MARKER,
             ENGINE_UNAVAILABLE_FAILURE_MARKER,
             ENGINE_UNKNOWN_FAILURE_MARKER,
+            ENGINE_LOAD_REFUSED_FAILURE_MARKER,
         )
     )
 

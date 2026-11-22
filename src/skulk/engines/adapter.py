@@ -345,12 +345,14 @@ class AdapterSession:
         """
         if self._closed:
             return
-        self._closed = True
         process = self._process
         if process is None:
+            self._closed = True
             return
         if not self._dead:
             # A failed graceful stop is expected; the group is terminated below.
+            # The session is marked closed only afterwards, or the stop itself
+            # would be refused as a call on a closed session.
             with contextlib.suppress(
                 AdapterFailedError, AdapterRefusedError, ControlProtocolError
             ):
@@ -360,6 +362,7 @@ class AdapterSession:
                     ),
                     _STOP_DEADLINE_SECONDS,
                 )
+        self._closed = True
         self._dead = True
         for pipe in (process.stdin, process.stdout):
             if pipe is not None:

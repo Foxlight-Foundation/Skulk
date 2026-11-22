@@ -60,16 +60,29 @@ class _Strict(BaseModel):
 
 
 class ModelIdentity(_Strict):
-    """The exact model a message refers to: its catalog ID and pinned revision."""
+    """The exact model a message refers to, and where its files are on this node.
+
+    The directory is the installed model as Skulk verified it. An adapter
+    reads it and never writes to it.
+    """
 
     model_id: str = Field(
         min_length=1,
         max_length=_MAX_TEXT_CHARS,
         description="Catalog model identifier.",
     )
-    source_revision: str = Field(
+    source_revision: str | None = Field(
         pattern=r"^[0-9a-f]{40}$",
-        description="Full immutable source revision the weights were taken from.",
+        description=(
+            "Full immutable source revision the weights were taken from, or "
+            "null for a card that pins none."
+        ),
+    )
+    directory: str = Field(
+        min_length=1,
+        max_length=4096,
+        pattern=r"^/",
+        description="Absolute path of the model's files on this node.",
     )
 
 

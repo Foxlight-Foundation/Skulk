@@ -58,9 +58,11 @@ from skulk.routing.vision_media import VisionMediaPacket
 from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.apply import apply
 from skulk.shared.backends import (
+    ENGINE_LOAD_REFUSED_FAILURE_MARKER,
     ENGINE_UNAVAILABLE_FAILURE_MARKER,
     ENGINE_UNKNOWN_FAILURE_MARKER,
     EngineType,
+    engine_load_refusal_code,
     engine_of,
 )
 from skulk.shared.constants import (
@@ -458,9 +460,22 @@ def _engine_unavailable_instance_failure_message(model_id: ModelId) -> str:
 def _engine_unknown_instance_failure_message(model_id: ModelId) -> str:
     """Return safe operator guidance for a placement this node's build cannot run."""
     return _instance_failure_message(
-        f"runner for {model_id} was placed on an engine this node's Skulk build "
-        "does not include; not retrying. Every node in a cluster must run the "
-        "same Skulk build."
+        f"runner for {model_id} was placed on an engine this node does not "
+        "have: it is neither built into its Skulk build nor installed as an "
+        "engine package; not retrying."
+    )
+
+
+def _engine_load_refused_instance_failure_message(model_id: ModelId, code: str) -> str:
+    """Return safe operator guidance for a load an engine package refused.
+
+    Only the engine's typed code is kept. Its own explanation may name local
+    paths, so it stays in this node's log.
+    """
+    return _instance_failure_message(
+        f"the engine package refused to load {model_id} ({code}); not retrying "
+        "on this node with this engine build. The engine's own reason is in "
+        "the node's log. The node stays eligible for other models."
     )
 
 
@@ -593,6 +608,37 @@ def engine_unknown_live_instances(
                 )
             )
     return unknown
+
+
+def engine_load_refused_live_instances(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+    live_instances: Container[InstanceId],
+) -> list[tuple[InstanceId, ModelId, str, str]]:
+    """Return live instances whose engine package refused to load their model.
+
+    A refusal is the engine's answer for one build and one checkpoint, so the
+    instance is given up once. Each entry is the instance, its model, the
+    engine's typed code and the full failure message for the log.
+    """
+    refused: list[tuple[InstanceId, ModelId, str, str]] = []
+    for supervisor in runners.values():
+        instance_id = supervisor.bound_instance.instance.instance_id
+        status = supervisor.status
+        if (
+            instance_id in live_instances
+            and isinstance(status, RunnerFailed)
+            and status.error_message is not None
+            and ENGINE_LOAD_REFUSED_FAILURE_MARKER in status.error_message
+        ):
+            refused.append(
+                (
+                    instance_id,
+                    supervisor.shard_metadata.model_card.model_id,
+                    engine_load_refusal_code(status.error_message) or "load_refused",
+                    status.error_message,
+                )
+            )
+    return refused
 
 
 def model_trust_failed_live_instances(
@@ -4123,6 +4169,26 @@ class Worker:
                     await self._give_up_on_instance(
                         unknown_instance_id,
                         _engine_unknown_instance_failure_message(unknown_model_id),
+                        error_code="placement_failed",
+                    )
+
+            for (
+                refused_instance_id,
+                refused_model_id,
+                refusal_code,
+                refusal_error,
+            ) in engine_load_refused_live_instances(self.runners, self.state.instances):
+                if refused_instance_id not in self._terminal_load_failures_handled:
+                    self._terminal_load_failures_handled.add(refused_instance_id)
+                    logger.error(
+                        f"Worker: engine package refused the load for instance "
+                        f"{refused_instance_id}: {refusal_error}"
+                    )
+                    await self._give_up_on_instance(
+                        refused_instance_id,
+                        _engine_load_refused_instance_failure_message(
+                            refused_model_id, refusal_code
+                        ),
                         error_code="placement_failed",
                     )
 

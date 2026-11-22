@@ -215,6 +215,32 @@ The worker gives the instance up at once: relaunching cannot make this node
 learn an engine."""
 
 
+ENGINE_LOAD_REFUSED_FAILURE_MARKER: Final = "engine-load-refused"
+"""Marks a runner whose engine package refused to load its model. The refusal
+is the engine's answer for this build and checkpoint, so the worker gives the
+instance up at once: loading again on the same node and build repeats it. The
+node stays eligible for other models."""
+
+
+def engine_load_refusal(code: str, reason: str) -> str:
+    """The runner failure message for a load an engine package refused.
+
+    The typed ``code`` is kept in a form the worker can read back; the
+    engine's own ``reason`` follows for the node's log. Only the code reaches
+    replicated state.
+    """
+    return f"{ENGINE_LOAD_REFUSED_FAILURE_MARKER}[{code}]: {reason[:1024]}"
+
+
+def engine_load_refusal_code(failure_message: str) -> str | None:
+    """Read the typed code back out of a load-refusal failure message."""
+    found = re.search(
+        rf"{re.escape(ENGINE_LOAD_REFUSED_FAILURE_MARKER)}\[([a-z_]{{1,64}})\]",
+        failure_message,
+    )
+    return None if found is None else found.group(1)
+
+
 def unknown_engine_refusal(resolved_backend: str | None) -> str | None:
     """Explain why a stamped backend cannot run here, or return ``None``.
 
@@ -240,8 +266,8 @@ def unknown_engine_refusal(resolved_backend: str | None) -> str | None:
     shown = resolved_backend[:64]
     return (
         f"{ENGINE_UNKNOWN_FAILURE_MARKER}: this node has no engine for backend "
-        f"{shown!r}; the placement was made for an engine this Skulk build does "
-        "not include"
+        f"{shown!r}; it is not built into this Skulk build and no installed "
+        "engine package offers it"
     )
 
 # audio.cpp is absent from the base environment. Only a verified installed

@@ -95,6 +95,11 @@ def test_the_runner_refuses_an_unknown_engine_before_choosing_a_runner(
     # not happen for a placement this build cannot run. The embedding path
     # has no such hook, so there the single marked failure below is the proof.
     monkeypatch.setattr(bootstrap, "_resolve_text_engine", default_runner_reached)
+    # This node holds no engine package, whatever the test machine has installed.
+    def no_package(*_arguments: object, **_keywords: object) -> None:
+        return None
+
+    monkeypatch.setattr(bootstrap, "installed_engine_package", no_package)
     try:
         bootstrap.entrypoint(
             _bound("tensorfold-rocm", task),

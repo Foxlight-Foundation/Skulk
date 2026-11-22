@@ -6,6 +6,8 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import loguru
 
@@ -38,6 +40,9 @@ from skulk.worker.runner.diagnostics import (
     configure_runner_diagnostics,
     record_runner_phase,
 )
+
+if TYPE_CHECKING:
+    from skulk.provisioning.engine_install import InstalledEngine
 
 if sys.platform != "win32":
     # POSIX-only; the guard keeps this module loadable on Windows. It stays a
@@ -508,6 +513,60 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     )
 
 
+def installed_engine_package(
+    resolved_backend: str | None,
+    resolved_engine_build: str | None,
+    *,
+    packages_root: Path | None = None,
+) -> "InstalledEngine | None":
+    """Find the installed engine package a stamped placement names, if any.
+
+    Returns ``None`` for an unstamped placement, for a built-in engine's
+    backend, and for a package backend this node does not hold; the caller
+    then refuses an unknown engine as before. ``packages_root`` overrides
+    where installed packages are read from.
+
+    Raises:
+        RuntimeError: Marked as a missing engine, which the worker does not
+            relaunch, when this node holds the package but the stamped
+            generation is gone or damaged. Activating another generation
+            must not move a placement onto a build it was not admitted for.
+    """
+    from skulk.engines.inventory import (
+        installed_engine_for_backend,
+        read_engine_package_inventory,
+    )
+    from skulk.provisioning.engine_install import ENGINE_PACKAGES_DIR
+    from skulk.provisioning.engine_packages import EnginePackageRefusedError
+    from skulk.shared.backends import (
+        ENGINE_UNAVAILABLE_FAILURE_MARKER,
+        package_engine_of,
+    )
+
+    if resolved_backend is None or package_engine_of(resolved_backend) is None:
+        return None
+    root = packages_root if packages_root is not None else ENGINE_PACKAGES_DIR
+    try:
+        found = installed_engine_for_backend(
+            resolved_backend, resolved_engine_build, root=root
+        )
+    except EnginePackageRefusedError as refused:
+        raise RuntimeError(
+            f"{ENGINE_UNAVAILABLE_FAILURE_MARKER}: the engine package for backend "
+            f"{resolved_backend[:64]!r} cannot be used ({refused.code})"
+        ) from None
+    if (
+        found is None
+        and resolved_backend in read_engine_package_inventory(root=root).active
+    ):
+        raise RuntimeError(
+            f"{ENGINE_UNAVAILABLE_FAILURE_MARKER}: the engine package generation "
+            f"this placement was made for is no longer installed for backend "
+            f"{resolved_backend[:64]!r}"
+        )
+    return found
+
+
 def safe_engine_build_inventory(
     inventory_provider: Callable[[], dict[str, str]],
 ) -> dict[str, str]:
@@ -618,6 +677,25 @@ def entrypoint(
         # send an engine they do not recognize to a default runner.
         from skulk.shared.backends import unknown_engine_refusal
 
+        engine_package = installed_engine_package(
+            shard.resolved_backend, shard.resolved_engine_build
+        )
+        if engine_package is not None:
+            # A backend an installed engine package offers. One generic runner
+            # serves every package; nothing below knows the engine's name.
+            from skulk.worker.runner.engine_package.runner import (
+                Runner as EnginePackageRunner,
+            )
+
+            EnginePackageRunner(
+                bound_instance,
+                event_sender,
+                task_receiver,
+                cancel_receiver,
+                engine_package,
+                context_token_limit=context_token_limit,
+            ).main()
+            return
         unknown_engine = unknown_engine_refusal(shard.resolved_backend)
         if unknown_engine is not None:
             raise RuntimeError(unknown_engine)

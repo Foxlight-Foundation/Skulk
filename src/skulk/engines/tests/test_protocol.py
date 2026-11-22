@@ -25,7 +25,9 @@ DIGEST = "a" * 64
 SETTINGS = LoadSettings(
     context_tokens=32768, parallel_streams=4, cache_precision="f16", drafting=False
 )
-MODEL = ModelIdentity(model_id="Qwen/Example", source_revision="b" * 40)
+MODEL = ModelIdentity(
+    model_id="Qwen/Example", source_revision="b" * 40, directory="/models/example"
+)
 
 
 def _body(frame: bytes) -> bytes:
@@ -143,7 +145,7 @@ def test_settings_bounds_are_enforced() -> None:
             context_tokens=0, parallel_streams=1, cache_precision="f16", drafting=False
         )
     with pytest.raises(ValueError):
-        ModelIdentity(model_id="x", source_revision="main")
+        ModelIdentity(model_id="x", source_revision="main", directory="/m")
 
 
 def test_negotiation_picks_the_highest_common_version() -> None:
