@@ -1,5 +1,6 @@
 """Owner-only runtime files behave the same on every platform Skulk runs on."""
 
+import ast
 import os
 import subprocess
 import sys
@@ -8,17 +9,54 @@ from pathlib import Path
 
 import pytest
 
+import skulk.extensions
 from skulk.utils.runtime_files import (
     RuntimeLock,
     acquire_runtime_lock,
+    is_private_directory,
+    open_private,
     private_directory,
     read_private,
     remove_private,
+    sync_directory,
     write_private,
 )
 
 windows_only = pytest.mark.skipif(
     sys.platform != "win32", reason="examines a Windows access list"
+)
+posix_only = pytest.mark.skipif(
+    sys.platform == "win32", reason="examines POSIX permission bits"
+)
+
+# What only the file seam may do: ask who owns a file, or open one without
+# following a link, by calling the operating system directly.
+_DIRECT_FILE_CUSTODY = frozenset(
+    {
+        "O_DIRECTORY",
+        "O_NOFOLLOW",
+        "chown",
+        "fchmod",
+        "fchown",
+        "getegid",
+        "geteuid",
+        "getgid",
+        "getuid",
+        "st_gid",
+        "st_uid",
+    }
+)
+# Plugin-hosting modules not yet moved onto the seam, so not yet able to run on
+# Windows. Remove a module from this list when it is ported; add none.
+_NOT_YET_PORTED = frozenset(
+    {
+        "local_setup.py",
+        "runtime_integrity.py",
+        "service_bootstrap.py",
+        "service_registration.py",
+        "service_setup.py",
+        "service_snapshot.py",
+    }
 )
 
 
@@ -230,3 +268,122 @@ def test_a_file_made_by_other_means_is_not_owner_only(root: Path) -> None:
     # Writing it through the seam replaces it with an owner-only file.
     write_private(path, b"ours")
     assert read_private(path) == b"ours"
+
+
+def test_a_directory_made_through_the_seam_is_private(root: Path) -> None:
+    assert is_private_directory(root)
+
+
+def test_a_link_or_a_file_is_not_a_private_directory(
+    tmp_path: Path, root: Path
+) -> None:
+    write_private(root / "state.json", b"{}")
+    assert not is_private_directory(root / "state.json")
+    link = tmp_path / "link"
+    _link_or_skip(link, root, directory=True)
+    assert not is_private_directory(link)
+
+
+def test_a_missing_directory_cannot_be_examined(root: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        is_private_directory(root / "absent")
+
+
+@posix_only
+def test_a_directory_others_can_enter_is_not_private(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o750)
+    assert not is_private_directory(shared)
+    shared.chmod(0o700)
+    assert is_private_directory(shared)
+
+
+@windows_only
+def test_a_directory_with_an_inherited_access_list_is_not_private(
+    tmp_path: Path,
+) -> None:
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+    assert not is_private_directory(ordinary)
+
+
+def test_a_file_opened_for_creation_is_private_and_exclusive(root: Path) -> None:
+    path = root / "artifact.partial"
+    descriptor = open_private(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    with os.fdopen(descriptor, "wb") as target:
+        target.write(b"line one\nline two\n")
+    with pytest.raises(FileExistsError):
+        open_private(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    # The bytes are exactly what was written, and the file passes the private read.
+    assert read_private(path) == b"line one\nline two\n"
+
+
+def test_an_existing_private_file_opens_and_one_that_is_absent_is_created(
+    root: Path,
+) -> None:
+    path = root / "operations.sqlite3"
+    os.close(open_private(path, os.O_RDWR | os.O_CREAT))
+    assert path.is_file()
+    write_private(root / "state.json", b"kept")
+    descriptor = open_private(root / "state.json", os.O_RDONLY)
+    with os.fdopen(descriptor, "rb") as source:
+        assert source.read() == b"kept"
+
+
+def test_opening_refuses_a_link_and_a_missing_file(tmp_path: Path, root: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        open_private(root / "absent.json", os.O_RDONLY)
+    write_private(root / "state.json", b"{}")
+    link = tmp_path / "link.json"
+    _link_or_skip(link, root / "state.json", directory=False)
+    with pytest.raises(OSError):
+        open_private(link, os.O_RDONLY)
+
+
+def test_opening_refuses_a_directory(root: Path) -> None:
+    with pytest.raises((ValueError, OSError)):
+        open_private(root, os.O_RDONLY)
+
+
+@posix_only
+def test_opening_refuses_a_file_others_can_read(root: Path) -> None:
+    path = root / "loose.json"
+    path.write_bytes(b"{}")
+    path.chmod(0o640)
+    with pytest.raises(ValueError, match="owner-only"):
+        open_private(path, os.O_RDONLY)
+
+
+@windows_only
+def test_opening_refuses_a_file_with_an_inherited_access_list(root: Path) -> None:
+    path = root / "dropped.json"
+    path.write_bytes(b"{}")
+    with pytest.raises(ValueError, match="owner-only"):
+        open_private(path, os.O_RDONLY)
+
+
+def test_a_directory_syncs_and_a_missing_one_does_not(root: Path) -> None:
+    write_private(root / "state.json", b"{}")
+    sync_directory(root)
+    with pytest.raises(OSError):
+        sync_directory(root / "absent")
+
+
+def test_only_the_seam_asks_who_owns_a_file_or_opens_one_link_safely() -> None:
+    """Plugin-hosting code reaches protected files through the seam alone.
+
+    A direct ownership comparison or link-safe open is POSIX-only, so a module
+    that makes one cannot run on Windows, and each copy is one more place the
+    rule for "private to this account" could drift.
+    """
+    package_root = Path(skulk.extensions.__file__).parent
+    direct: set[str] = set()
+    for source in sorted(package_root.glob("*.py")):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        if any(
+            isinstance(node, ast.Attribute) and node.attr in _DIRECT_FILE_CUSTODY
+            for node in ast.walk(tree)
+        ):
+            direct.add(source.name)
+
+    assert direct == _NOT_YET_PORTED

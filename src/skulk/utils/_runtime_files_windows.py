@@ -51,6 +51,21 @@ def _open_directory(path: Path) -> int:
         raise
 
 
+def is_private_directory(path: Path) -> bool:
+    """Whether ``path`` is a folder only this account and SYSTEM can reach."""
+    try:
+        descriptor = safefs.open_dir(path)
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            # Something other than a folder is there: a link or a file.
+            return False
+        raise
+    try:
+        return _owner_only(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def private_directory(path: Path) -> None:
     """Create or validate an owner-only directory without accepting a link."""
     safefs.make_dir(path, parents=True, exist_ok=True)
@@ -60,6 +75,20 @@ def private_directory(path: Path) -> None:
             raise ValueError("runtime directory must be owner-only")
     finally:
         os.close(descriptor)
+
+
+def open_private(path: Path, flags: int) -> int:
+    """Open an owner-only regular file, never a link; the caller closes it."""
+    descriptor = safefs.open_path(path, flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode) or not _owner_only(
+            descriptor
+        ):
+            raise ValueError("runtime file must be owner-only")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def read_private(path: Path, limit: int) -> bytes:
@@ -112,6 +141,15 @@ def remove_private(path: Path) -> None:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def sync_directory(path: Path) -> None:
+    """Make a folder's own changes durable."""
+    descriptor = safefs.open_dir(path)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def open_lock(root: Path, name: str) -> int:

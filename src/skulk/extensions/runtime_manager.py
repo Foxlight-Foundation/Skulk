@@ -5,7 +5,6 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import os
 import shutil
 import signal
 import sys
@@ -99,7 +98,7 @@ from skulk.utils.local_transport import (
     endpoint_is_private,
     serve,
 )
-from skulk.utils.runtime_files import has_root_authority
+from skulk.utils.runtime_files import has_root_authority, sync_directory
 
 PluginIdentifier = Annotated[
     str, Field(pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$")
@@ -1481,11 +1480,7 @@ class RuntimeManager:
                 if binding.parent.exists():
                     remove_private(binding)
                 await asyncio.to_thread(shutil.rmtree, root)
-                descriptor = os.open(self.installations, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
+                sync_directory(self.installations)
                 self.controllers.pop(identifier, None)
                 self.downloads.pop(identifier, None)
                 self.errors.pop(identifier, None)

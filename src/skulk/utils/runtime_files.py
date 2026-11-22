@@ -90,6 +90,33 @@ def is_desktop_metadata(path: Path) -> bool:
     return stat.S_ISREG(path.lstat().st_mode)
 
 
+def is_private_directory(path: Path) -> bool:
+    """Whether ``path`` is a directory only this account can reach.
+
+    The path itself is examined, never a link's target, and nothing is
+    created or changed.
+
+    Args:
+        path: The directory to examine.
+
+    Returns:
+        True for a directory owned by this account that no other account can
+        reach; False for anything else found there, a link included.
+
+    Raises:
+        OSError: When the path cannot be examined, for example because it does
+            not exist.
+    """
+    if sys.platform == "win32":
+        return _windows.is_private_directory(path)
+    info = path.lstat()
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and not info.st_mode & 0o077
+    )
+
+
 def private_directory(path: Path) -> None:
     """Create or validate an owner-only directory without accepting a symlink."""
     if sys.platform == "win32":
@@ -103,6 +130,42 @@ def private_directory(path: Path) -> None:
         or info.st_mode & 0o077
     ):
         raise ValueError("runtime directory must be owner-only")
+
+
+def open_private(path: Path, flags: int) -> int:
+    """Open an owner-only regular file, never a link.
+
+    A file this call creates is created owner-only. The check is made on the
+    opened file, so what is checked is what the caller then reads or writes.
+
+    Args:
+        path: The file to open.
+        flags: The ``os.O_*`` access and creation flags, as for :func:`os.open`.
+
+    Returns:
+        An open descriptor; the caller closes it.
+
+    Raises:
+        ValueError: When the file is not a regular file private to this
+            account.
+        OSError: When it cannot be opened, as :func:`os.open` reports it; a
+            link in its place is one such case.
+    """
+    if sys.platform == "win32":
+        return _windows.open_private(path, flags)
+    descriptor = os.open(path, flags | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+        ):
+            raise ValueError("runtime file must be owner-only")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def read_private(path: Path, limit: int = 131072) -> bytes:
@@ -167,6 +230,26 @@ def remove_private(path: Path) -> None:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def sync_directory(path: Path) -> None:
+    """Make a directory's own changes durable.
+
+    Creating, renaming or removing an entry changes the directory that holds
+    it. Until that directory is synced, a crash can bring back its earlier
+    contents.
+
+    Args:
+        path: The directory whose entries changed.
+    """
+    if sys.platform == "win32":
+        _windows.sync_directory(path)
+        return
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 @final

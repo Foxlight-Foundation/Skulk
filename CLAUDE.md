@@ -1414,7 +1414,12 @@ folder is refused. `has_root_authority()` is the one test for "runs as root":
 the effective root user on POSIX, the SYSTEM account or a process running as
 administrator on Windows (`utils/_windows_account.py`). With these the plugin
 manager starts and answers on Windows; owner processes and the native kernel
-do not run there yet.
+do not run there yet. Plugin-hosting code in `extensions/` never asks who owns
+a file or opens one link-safely by calling the operating system itself: it uses
+`is_private_directory`, `open_private` and `sync_directory` from the same
+module, and a guard in `utils/tests/test_runtime_files_platforms.py` lists the
+modules not yet moved (`runtime_integrity.py`, `local_setup.py` and the
+`service_*` modules). Take a module off that list when it is ported; add none.
 
 ### Extension API (plugins)
 

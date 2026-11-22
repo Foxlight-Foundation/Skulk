@@ -1,6 +1,7 @@
 """Keep the plugin bridge's Tailscale observation off the machine running the tests."""
 
 import asyncio
+import sys
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -16,6 +17,23 @@ from skulk.extensions.native_host_protocol import (
     admit_owner,
 )
 from skulk.extensions.tests.test_native_host_protocol import Channels, binding
+from skulk.utils.runtime_files import private_directory
+
+if sys.platform == "win32":
+
+    @pytest.fixture
+    def tmp_path(tmp_path: Path) -> Path:
+        """Give each test an owner-only temporary directory on Windows.
+
+        pytest creates its temporary directory with the access list it inherits
+        from the account's temp folder, which is not owner-only there. On POSIX
+        pytest already creates it private to the account, so tests pass it
+        straight to code that requires an owner-only root. A directory created
+        through the file seam is what that code expects on Windows.
+        """
+        private = tmp_path / "private"
+        private_directory(private)
+        return private
 
 
 @pytest.fixture(autouse=True)
