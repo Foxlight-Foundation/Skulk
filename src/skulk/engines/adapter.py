@@ -50,7 +50,6 @@ from skulk.engines.protocol import (
     UnloadResponse,
     decode_response,
     encode_frame,
-    negotiate_version,
 )
 from skulk.utils.process_groups import observe_process_exit, terminate_process_group
 
@@ -144,45 +143,57 @@ class AdapterSession:
         """Whether the session can still accept calls."""
         return self._process is not None and not self._dead and not self._closed
 
-    def start(self, *, deadline_seconds: float = START_DEADLINE_SECONDS) -> int:
+    def start(
+        self,
+        *,
+        versions: tuple[int, ...] = PROTOCOL_VERSIONS_SUPPORTED,
+        deadline_seconds: float = START_DEADLINE_SECONDS,
+    ) -> int:
         """Start the adapter and negotiate the protocol version.
 
-        Returns the negotiated version. Raises ``ControlProtocolError`` when
-        the versions are disjoint, and ``AdapterFailedError`` on any channel
-        fault; the process group is terminated in both cases.
+        ``versions`` is what the host offers: the versions this build speaks
+        that the package's manifest also declares. The adapter picks one of
+        them. Returns the chosen version. Raises ``AdapterFailedError`` when
+        the program cannot be started, on any channel fault, or when the
+        adapter picks a version that was not offered; the process group is
+        terminated in every case.
         """
         if self._process is not None or self._closed:
             raise RuntimeError("adapter session can be started only once")
-        self._process = subprocess.Popen(
-            list(self._command),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=self._stderr,
-            env=self._environment,
-            cwd=self._working_directory,
-            start_new_session=True,
-            close_fds=True,
-        )
+        try:
+            self._process = subprocess.Popen(
+                list(self._command),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self._stderr,
+                env=self._environment,
+                cwd=self._working_directory,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError as error:
+            self._dead = True
+            raise AdapterFailedError(
+                "exited", f"adapter could not be started: {error.strerror}"
+            ) from None
         assert self._process.stdin is not None and self._process.stdout is not None
         os.set_blocking(self._process.stdin.fileno(), False)
         os.set_blocking(self._process.stdout.fileno(), False)
-        offered = PROTOCOL_VERSIONS_SUPPORTED
-        expected = negotiate_version(offered)
         response = self._expect(
             self._exchange(
                 HelloRequest(
                     sequence=self._take_sequence(),
                     build_digest=self._build_digest,
-                    versions=offered,
+                    versions=versions,
                 ),
                 deadline_seconds,
             ),
             HelloResponse,
         )
-        if response.version != expected:
+        if response.version not in versions:
             self._fail(
                 "protocol",
-                f"adapter selected version {response.version}, expected {expected}",
+                f"adapter selected version {response.version}, which was not offered",
             )
         self._version = response.version
         return response.version

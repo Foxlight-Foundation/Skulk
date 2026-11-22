@@ -28,6 +28,7 @@ written against the original ``{"mlx"}`` vocabulary keep matching unchanged.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import AbstractSet, Final, Literal
@@ -354,6 +355,38 @@ def engine_of(tag: str) -> EngineType | None:
         if tag == engine or tag.startswith(f"{engine}{_TAG_SEPARATOR}"):
             return engine
     return None
+
+
+_PACKAGE_ENGINE_NAME: Final = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
+
+
+def package_engine_of(tag: str) -> str | None:
+    """Return the engine name of a tag shaped like an engine package's, else ``None``.
+
+    Engine packages add engines this build has no name for. Their tags keep
+    the built-in shape: ``<engine>`` or ``<engine>-<compute>``, where the
+    engine name uses lowercase letters, digits and underscores. A tag that
+    names a built-in engine is never a package tag, and neither is a compute
+    name on its own or a string of any other shape. Whether a node actually holds such a package is a
+    separate question, answered by the node's own inventory.
+    """
+    if engine_of(tag) is not None:
+        return None
+    name = tag
+    for compute in _COMPUTE_BACKENDS:
+        suffix = f"{_TAG_SEPARATOR}{compute}"
+        if tag.endswith(suffix):
+            name = tag[: -len(suffix)]
+            break
+    # A compute name alone is never an engine: ``cuda`` is not a package.
+    if name in _COMPUTE_BACKENDS or _PACKAGE_ENGINE_NAME.fullmatch(name) is None:
+        return None
+    return name
+
+
+def _engine_name_of(tag: str) -> str | None:
+    """The engine a tag selects, built in or packaged."""
+    return engine_of(tag) or package_engine_of(tag)
 
 
 # The hardware an engine needs, in an operator's words, for engines whose
@@ -699,6 +732,9 @@ def expand_engine_backends(compatible_backends: AbstractSet[str]) -> frozenset[s
                 for compute in _COMPUTE_BACKENDS
                 if (lane := f"{tag}-{compute}") not in _EMBEDDING_ONLY_LANES
             )
+        elif package_engine_of(tag) == tag:
+            # A bare package engine name accepts whichever lane a node holds.
+            expanded.update(f"{tag}-{compute}" for compute in _COMPUTE_BACKENDS)
     return frozenset(expanded)
 
 
@@ -724,8 +760,10 @@ def resolve_node_backend(
     intersection = frozenset(
         tag
         for tag in intersection
-        if engine_of(tag) != tag
-        or not any(engine_of(other) == tag and other != tag for other in intersection)
+        if _engine_name_of(tag) != tag
+        or not any(
+            _engine_name_of(other) == tag and other != tag for other in intersection
+        )
     )
     if not intersection:
         return None
@@ -734,7 +772,10 @@ def resolve_node_backend(
         for preference in backend_preference
         for tag in sorted(intersection, key=lambda item: (item.endswith("-cpu"), item))
         if tag == preference
-        or (engine_of(preference) == preference and engine_of(tag) == preference)
+        or (
+            _engine_name_of(preference) == preference
+            and _engine_name_of(tag) == preference
+        )
     ]
     # Fallback for tags outside the card's preference list: deterministic, but
     # never let a CPU compute tag beat a GPU tag on alphabetical accident --

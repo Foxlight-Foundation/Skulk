@@ -22,6 +22,7 @@ from skulk.shared.backends import (
     engine_supports_multi_node,
     expand_engine_backends,
     make_backend_tag,
+    package_engine_of,
     platform_compatible_backends,
     probe_node_backends,
     resolve_node_backend,
@@ -487,3 +488,59 @@ def test_an_unknown_engine_refusal_bounds_the_tag_it_repeats() -> None:
     refusal = unknown_engine_refusal("x" * 5000)
 
     assert refusal is not None and len(refusal) < 300
+
+
+@pytest.mark.parametrize(
+    ("tag", "name"),
+    [
+        ("tensorfold-rocm", "tensorfold"),
+        ("tensorfold", "tensorfold"),
+        ("tensor_fold2-cpu", "tensor_fold2"),
+    ],
+)
+def test_a_package_shaped_tag_names_its_engine(tag: str, name: str) -> None:
+    assert package_engine_of(tag) == name
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["mlx", "mlx-metal", "llama_server-cuda", "cuda", "rocm-cuda", "", "MLX-metal",
+     "tensor-fold-rocm", "tensor fold", "tensorfold-", "-rocm", "tensorfold-gpu"],
+)
+def test_built_in_reserved_and_malformed_tags_are_not_package_tags(tag: str) -> None:
+    assert package_engine_of(tag) is None
+
+
+def test_a_bare_package_engine_accepts_whichever_lane_a_node_holds() -> None:
+    expanded = expand_engine_backends(frozenset({"tensorfold"}))
+
+    assert expanded == frozenset(
+        {"tensorfold", "tensorfold-metal", "tensorfold-vulkan", "tensorfold-rocm",
+         "tensorfold-cuda", "tensorfold-cpu"}
+    )
+    # A named lane stays as narrow as the card wrote it.
+    assert expand_engine_backends(frozenset({"tensorfold-rocm"})) == frozenset(
+        {"tensorfold-rocm"}
+    )
+
+
+def test_a_card_naming_a_package_engine_resolves_to_the_nodes_lane() -> None:
+    node = frozenset({"tensorfold-rocm", "llama_server-vulkan", "llama_server"})
+
+    assert resolve_node_backend(frozenset({"tensorfold"}), (), node) == "tensorfold-rocm"
+    # Preference by bare engine name works for a package as for a built-in.
+    both = frozenset({"tensorfold", "llama_server"})
+    assert resolve_node_backend(both, ("tensorfold",), node) == "tensorfold-rocm"
+    assert resolve_node_backend(both, ("llama_server",), node) == "llama_server-vulkan"
+    # A node without the package is unaffected by the card naming it.
+    assert (
+        resolve_node_backend(both, ("tensorfold",), frozenset({"llama_server-vulkan"}))
+        == "llama_server-vulkan"
+    )
+    assert resolve_node_backend(frozenset({"tensorfold"}), (), frozenset({"mlx"})) is None
+
+
+def test_a_bare_package_alias_never_wins_over_its_lane() -> None:
+    node = frozenset({"tensorfold", "tensorfold-cuda"})
+
+    assert resolve_node_backend(frozenset({"tensorfold"}), (), node) == "tensorfold-cuda"

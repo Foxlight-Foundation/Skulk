@@ -519,6 +519,17 @@ def _version_in(specifier: str, version: str) -> bool:
         return False
 
 
+def adapter_python_supported(claims: EnginePackageClaims, python_version: str) -> bool:
+    """Whether this interpreter can run the package's adapter.
+
+    Always true for a native adapter. Checked at install and again at every
+    launch, because the node's interpreter can change under an installed
+    package when Skulk itself is updated.
+    """
+    required = claims.adapter.python_requires
+    return required is None or _version_in(required, python_version)
+
+
 def check_engine_host(package: VerifiedEnginePackage, host: EngineHost) -> int:
     """Decide whether a verified package can be installed on this host.
 
