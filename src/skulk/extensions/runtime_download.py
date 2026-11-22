@@ -43,6 +43,7 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 from skulk.extensions.runtime_install import RuntimeInstaller, finish_runtime_work
+from skulk.utils.runtime_files import open_private
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 
@@ -951,9 +952,7 @@ class RuntimeDownloads:
     ) -> None:
         destination = directory / name
         temporary = directory / (name + ".partial")
-        descriptor = os.open(
-            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
-        )
+        descriptor = open_private(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         total, checksum = 0, hashlib.sha256()
         with os.fdopen(descriptor, "wb") as target:
             async with client.stream("GET", source.base_url + quote(name)) as response:

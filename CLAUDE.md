@@ -1396,8 +1396,30 @@ hosting, signed installs and an unattended service on Windows are not built yet.
 Local streams between the node, the plugin manager and plugin owners go through
 `utils/local_transport.py` (endpoint directory, privacy check, `connect`,
 `serve`, `discard`); it is the only module that opens or binds a local socket
-or names an endpoint directory (`utils/tests/test_local_transport.py` enforces
-this), and today it has a POSIX implementation only.
+or pipe or names an endpoint directory (`utils/tests/test_local_transport.py`
+enforces this). POSIX uses a Unix socket. Windows uses a named pipe
+(`utils/_local_transport_windows.py`) owned by and open to the account and
+SYSTEM only; the client refuses a pipe served by another account, and a pipe
+has no half-close. There is one transport per platform and no fallback. The
+`Windows management node` CI job installs from the lock on Windows, imports
+`skulk.main` and runs the Windows tests; add a test file to that job when it
+has something only Windows can check.
+Owner-only runtime state (`utils/runtime_files.py`: `private_directory`,
+`read_private`, `write_private`, `remove_private`, `RuntimeLock`) has a Windows
+side in `utils/_runtime_files_windows.py`, built on the model-preservation
+`safefs` seam: owner-only there means owned by the account with a protected
+access list naming the account and SYSTEM only, so such state must be created
+through these functions; a file or folder made by other means inside a private
+folder is refused. `has_root_authority()` is the one test for "runs as root":
+the effective root user on POSIX, the SYSTEM account or a process running as
+administrator on Windows (`utils/_windows_account.py`). With these the plugin
+manager starts and answers on Windows; owner processes and the native kernel
+do not run there yet. Plugin-hosting code in `extensions/` never asks who owns
+a file or opens one link-safely by calling the operating system itself: it uses
+`is_private_directory`, `open_private` and `sync_directory` from the same
+module, and a guard in `utils/tests/test_runtime_files_platforms.py` lists the
+modules not yet moved (`runtime_integrity.py`, `local_setup.py` and the
+`service_*` modules). Take a module off that list when it is ported; add none.
 
 ### Extension API (plugins)
 

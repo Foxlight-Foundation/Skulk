@@ -1,7 +1,6 @@
 """Journaled stopped-owner runtime selection with retained logical plugin state."""
 
 import hashlib
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, Self, final
@@ -31,6 +30,7 @@ from skulk.extensions.runtime_files import (
     RuntimeLock,
     private_directory,
     read_private,
+    remove_private,
     write_private,
 )
 from skulk.extensions.runtime_install import RuntimeInstaller
@@ -137,12 +137,7 @@ class SelectionOperation(_Contract):
 
 
 def _remove_private(path: Path) -> None:
-    path.unlink(missing_ok=True)
-    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    remove_private(path)
 
 
 def _manifest(runtime: VerifiedRuntime) -> dict[str, JsonValue]:

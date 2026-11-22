@@ -5,7 +5,6 @@ import contextlib
 import hashlib
 import json
 import os
-import stat
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from itertools import islice
@@ -66,6 +65,7 @@ from skulk.shared.types.capability_nodes import (
     CapabilityNodeSurface,
 )
 from skulk.utils.local_transport import connect, endpoint_directory, endpoint_is_private
+from skulk.utils.runtime_files import is_private_directory, open_private
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 
@@ -307,25 +307,16 @@ class _Configuration(_WireModel):
 
 
 def _private_directory(path: Path) -> None:
-    info = path.lstat()
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
-        or info.st_mode & 0o077
-    ):
+    if not is_private_directory(path):
         raise ValueError("managed plugin directory is not protected")
 
 
 def _read_connection(path: Path) -> ManagedConnection:
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
-        info = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.getuid()
-            or info.st_mode & 0o077
-        ):
-            raise ValueError("managed connection is not protected")
+        descriptor = open_private(path, os.O_RDONLY)
+    except ValueError:
+        raise ValueError("managed connection is not protected") from None
+    try:
         with os.fdopen(descriptor, "rb", closefd=False) as source:
             raw = source.read(8193)
         if len(raw) > 8192:

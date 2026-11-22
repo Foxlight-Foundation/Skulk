@@ -2,7 +2,6 @@
 
 import asyncio
 import contextlib
-import os
 from pathlib import Path
 from typing import Literal, Self, final
 
@@ -13,6 +12,7 @@ from skulk.extensions.runtime_files import (
     RuntimeLock,
     private_directory,
     read_private,
+    remove_private,
     write_private,
 )
 from skulk.extensions.runtime_install import finish_runtime_work
@@ -220,12 +220,7 @@ class RuntimeController:
         return operation.request.action == "uninstall"
 
     def _clear_pending(self) -> None:
-        self.pending.unlink(missing_ok=True)
-        descriptor = os.open(self.records, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        remove_private(self.pending)
 
     async def _preview(self, request: LifecycleRequest) -> RuntimeSelection:
         if request.action == "disable" and self.is_uninstalled(self.selector.current()):

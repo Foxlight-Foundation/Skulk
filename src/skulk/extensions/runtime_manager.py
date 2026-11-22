@@ -5,7 +5,6 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import os
 import shutil
 import signal
 import sys
@@ -92,12 +91,14 @@ from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_service import RuntimeServiceStatus
 from skulk.extensions.service_snapshot import ServiceSnapshot, activate_staged_runtime
 from skulk.utils.local_transport import (
+    LocalServer,
     connect,
     discard,
     endpoint_directory,
     endpoint_is_private,
     serve,
 )
+from skulk.utils.runtime_files import has_root_authority, sync_directory
 
 PluginIdentifier = Annotated[
     str, Field(pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$")
@@ -806,7 +807,7 @@ class RuntimeManager:
         self, root: Path, request_stop: Callable[[], None] | None = None
     ) -> None:
         """Read only the fixed local host binding and prepare owner-only storage."""
-        if os.geteuid() == 0:
+        if has_root_authority():
             raise ValueError("plugin manager must run without root")
         private_directory(root)
         self.root = root.resolve()
@@ -843,7 +844,7 @@ class RuntimeManager:
         # display identity is read once per digest; failures are not cached
         # because a staging in progress completes later.
         self.release_identities: dict[str, InstalledRelease] = {}
-        self.server: asyncio.Server | None = None
+        self.server: LocalServer | None = None
         self.lock: RuntimeLock | None = None
         # Set by the serving loop: a reload activates the successor, then asks
         # the loop to stop so the OS service restarts on it.
@@ -1479,11 +1480,7 @@ class RuntimeManager:
                 if binding.parent.exists():
                     remove_private(binding)
                 await asyncio.to_thread(shutil.rmtree, root)
-                descriptor = os.open(self.installations, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
+                sync_directory(self.installations)
                 self.controllers.pop(identifier, None)
                 self.downloads.pop(identifier, None)
                 self.errors.pop(identifier, None)
