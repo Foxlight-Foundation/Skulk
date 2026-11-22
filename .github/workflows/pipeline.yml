@@ -210,6 +210,9 @@ jobs:
           src/skulk/shared/tests/test_election.py
           src/skulk/utils/tests/test_local_transport.py
           src/skulk/utils/tests/test_local_transport_windows.py
+          src/skulk/utils/tests/test_runtime_files_platforms.py
+          src/skulk/utils/tests/test_windows_account.py
+          src/skulk/extensions/tests/test_runtime_manager_platforms.py
 
   test:
     name: Test

@@ -15,6 +15,11 @@ if sys.platform != "win32":
     import fcntl
     import grp
     import pwd
+else:
+    # Owner-only directories, files and the lock have their own Windows
+    # implementation; each function below hands over to it first.
+    from skulk.utils import _runtime_files_windows as _windows
+    from skulk.utils import _windows_account
 
 
 @functools.cache
@@ -34,6 +39,18 @@ def private_group(group_id: int, user_id: int) -> bool:
         and group.gr_name == account.pw_name
         and not group.gr_mem
     )
+
+
+def has_root_authority() -> bool:
+    """Whether this process could change the machine for every account.
+
+    Code that runs installed plugins refuses to start with that authority, so
+    a plugin never inherits it. On POSIX it is the effective root user. On
+    Windows it is the SYSTEM account or a process running as administrator.
+    """
+    if sys.platform == "win32":
+        return _windows_account.this_process_has_machine_authority()
+    return os.geteuid() == 0
 
 
 def writable_only_by(info: os.stat_result, user_id: int) -> bool:
@@ -75,6 +92,9 @@ def is_desktop_metadata(path: Path) -> bool:
 
 def private_directory(path: Path) -> None:
     """Create or validate an owner-only directory without accepting a symlink."""
+    if sys.platform == "win32":
+        _windows.private_directory(path)
+        return
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = path.lstat()
     if (
@@ -87,6 +107,8 @@ def private_directory(path: Path) -> None:
 
 def read_private(path: Path, limit: int = 131072) -> bytes:
     """Read bounded bytes from an owner-only regular file, never a symlink."""
+    if sys.platform == "win32":
+        return _windows.read_private(path, limit)
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         info = os.fstat(descriptor)
@@ -107,6 +129,9 @@ def read_private(path: Path, limit: int = 131072) -> bytes:
 
 def write_private(path: Path, content: bytes) -> None:
     """Atomically replace a private file and sync its contents and directory."""
+    if sys.platform == "win32":
+        _windows.write_private(path, content)
+        return
     private_directory(path.parent)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}")
     descriptor = os.open(
@@ -133,6 +158,9 @@ def remove_private(path: Path) -> None:
     The removal is durable before this returns: a crash afterwards cannot
     bring the file back with the directory's earlier contents.
     """
+    if sys.platform == "win32":
+        _windows.remove_private(path)
+        return
     path.unlink(missing_ok=True)
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -159,6 +187,9 @@ class RuntimeLock:
             "native-host-key.lock",
         }:
             raise ValueError("unknown runtime lock")
+        if sys.platform == "win32":
+            self.descriptor = _windows.open_lock(root, name)
+            return
         private_directory(root)
         self.descriptor = os.open(
             root / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
