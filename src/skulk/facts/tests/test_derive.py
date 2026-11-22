@@ -12,12 +12,14 @@ import pytest
 from skulk.facts.derive import derive_node_backends
 from skulk.facts.testing import (
     AMD_STRIX,
+    APPLE_GPU,
     NVIDIA_A40,
     NVIDIA_PRESENCE_ONLY,
     bad_bin,
     make_facts,
     ok_bin,
 )
+from skulk.shared.backends import package_engine_of
 from skulk.shared.types.node_facts import (
     CapabilityConflictCode,
     GpuDeviceFact,
@@ -605,3 +607,111 @@ def test_comfy_skips_inherited_declarations_it_cannot_use() -> None:
     )
     assert "comfy" not in explicit.backends
     assert any(c.code == "backend_override_conflict" and "comfy" in c.message for c in explicit.conflicts)
+
+
+# --- installed engine packages -------------------------------------------------
+
+_PACKAGE_BUILD = "a" * 64
+
+
+def _representative_nodes() -> list[NodeFacts]:
+    return [
+        make_facts(),
+        make_facts(platform="darwin", gpus=(APPLE_GPU,), mlx_audio_importable=True),
+        make_facts(gpus=(AMD_STRIX,), llama_cpp_importable=True, llama_cpp_gpu_offload=True),
+        make_facts(gpus=(NVIDIA_A40,), pynvml_importable=True),
+        make_facts(gpus=(NVIDIA_A40,), comfy_on_demand_variants=("cuda",)),
+    ]
+
+
+def test_a_node_without_engine_packages_reports_what_it_did_before() -> None:
+    """The package fields default to empty and an empty record changes nothing."""
+    for facts in _representative_nodes():
+        assert facts.engine_package_builds == {}
+        assert facts.engine_package_problems == ()
+        explicit = facts.model_copy(
+            update={"engine_package_builds": {}, "engine_package_problems": ()}
+        )
+        assert derive_node_backends(explicit) == derive_node_backends(facts)
+        assert not {
+            tag
+            for tag in derive_node_backends(facts).backends
+            if package_engine_of(tag) is not None
+        }
+
+
+def test_an_installed_package_adds_its_tag_and_nothing_else() -> None:
+    """Every built-in tag, conflict, note and on-demand entry stays as it was."""
+    lanes = {"darwin": "tensorfold-metal", "linux": "tensorfold-vulkan"}
+    for facts in _representative_nodes():
+        before = derive_node_backends(facts)
+        tag = lanes[facts.platform]
+        if facts.platform == "linux" and not facts.gpus:
+            tag = "tensorfold-cpu"
+        after = derive_node_backends(
+            facts.model_copy(update={"engine_package_builds": {tag: _PACKAGE_BUILD}})
+        )
+
+        assert after.backends == before.backends | {tag}
+        assert after.conflicts == before.conflicts
+        assert after.notes == before.notes
+        assert after.on_demand_backends == before.on_demand_backends
+        # The bare engine name is never offered: a placement must be stamped
+        # with a tag the node's package inventory can look up.
+        assert "tensorfold" not in after.backends
+
+
+@pytest.mark.parametrize(
+    ("facts", "tag"),
+    [
+        (make_facts(gpus=(NVIDIA_A40,), pynvml_importable=True), "tensorfold-rocm"),
+        (make_facts(gpus=(AMD_STRIX,)), "tensorfold-cuda"),
+        (make_facts(gpus=(AMD_STRIX,)), "tensorfold-metal"),
+        (make_facts(), "tensorfold-vulkan"),
+    ],
+)
+def test_a_package_for_hardware_the_node_lacks_is_loud_and_not_offered(
+    facts: NodeFacts, tag: str
+) -> None:
+    before = derive_node_backends(facts)
+
+    after = derive_node_backends(
+        facts.model_copy(update={"engine_package_builds": {tag: _PACKAGE_BUILD}})
+    )
+
+    assert after.backends == before.backends
+    added = [conflict for conflict in after.conflicts if conflict not in before.conflicts]
+    assert [conflict.code for conflict in added] == ["invalid_engine_binary"]
+    assert repr(tag) in added[0].message
+
+
+def test_an_unusable_package_is_loud_and_offers_nothing() -> None:
+    facts = make_facts(gpus=(AMD_STRIX,))
+    before = derive_node_backends(facts)
+
+    after = derive_node_backends(
+        facts.model_copy(
+            update={
+                "engine_package_problems": (
+                    "foxlight.tensorfold (rocm): installation_damaged",
+                )
+            }
+        )
+    )
+
+    assert after.backends == before.backends
+    added = [conflict for conflict in after.conflicts if conflict not in before.conflicts]
+    assert [conflict.code for conflict in added] == ["invalid_engine_binary"]
+    assert "installation_damaged" in added[0].message
+
+
+@pytest.mark.parametrize("tag", ["mlx-metal", "llama_server-rocm", "rocm", "tensorfold", ""])
+def test_a_record_naming_a_built_in_or_bare_tag_offers_nothing(tag: str) -> None:
+    """Only ``<package engine>-<lane>`` is a package tag, whatever the record holds."""
+    facts = make_facts(gpus=(AMD_STRIX,))
+
+    after = derive_node_backends(
+        facts.model_copy(update={"engine_package_builds": {tag: _PACKAGE_BUILD}})
+    )
+
+    assert after == derive_node_backends(facts)

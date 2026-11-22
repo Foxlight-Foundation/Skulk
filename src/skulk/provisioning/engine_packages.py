@@ -520,6 +520,15 @@ def _version_in(specifier: str, version: str) -> bool:
         return False
 
 
+def skulk_version_supported(claims: EnginePackageClaims, skulk_version: str) -> bool:
+    """Whether this Skulk release is inside the range the package was written for.
+
+    Checked at install and again whenever a node reads its installed
+    packages, because Skulk itself can be updated under an installed package.
+    """
+    return _version_in(claims.skulk_versions, skulk_version)
+
+
 def adapter_python_supported(claims: EnginePackageClaims, python_version: str) -> bool:
     """Whether this interpreter can run the package's adapter.
 

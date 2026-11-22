@@ -87,6 +87,7 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
     video switch), so it joins the process snapshot here rather than in the
     probe, which tests drive with an injected environment.
     """
+    from skulk.engines.inventory import node_engine_package_report
     from skulk.provisioning.comfy import comfy_on_demand_variants
     from skulk.provisioning.comfy_extension import comfy_extension_inventory
     from skulk.provisioning.mlx_video import installable_video_builds
@@ -114,7 +115,10 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
         facts = gather_node_facts()
     image_builds = installable_image_builds(facts, classes, offline=offline_mode())
     extension_offers, extension_installed = comfy_extension_inventory(facts, offline=offline_mode())
+    package_builds, package_problems = node_engine_package_report()
     return facts.model_copy(update={
+        "engine_package_builds": package_builds,
+        "engine_package_problems": package_problems,
         "comfy_on_demand_variants": variants,
         "comfy_extension_installable_builds": extension_offers,
         "comfy_extension_installed_builds": extension_installed,

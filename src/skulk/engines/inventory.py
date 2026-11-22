@@ -12,13 +12,17 @@ part of the engine ID, so two publishers could claim one tag. A tag claimed
 twice is offered by neither; both lanes are reported as ambiguous.
 """
 
+import platform
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, cast, final, get_args
 
+from loguru import logger
 from pydantic import TypeAdapter, ValidationError
 
+from skulk.engines.protocol import PROTOCOL_VERSIONS_SUPPORTED
 from skulk.provisioning.engine_install import (
     ENGINE_PACKAGES_DIR,
     InstalledEngine,
@@ -28,10 +32,14 @@ from skulk.provisioning.engine_install import (
 from skulk.provisioning.engine_packages import (
     EngineId,
     EngineLane,
+    EnginePackageClaims,
     EnginePackageRefusal,
     EnginePackageRefusedError,
+    adapter_python_supported,
+    skulk_version_supported,
 )
 from skulk.shared.backends import engine_packages_disabled, package_engine_of
+from skulk.shared.version import get_skulk_version
 
 UnusableReason = EnginePackageRefusal | Literal["backend_tag_ambiguous"]
 """Why a lane's active generation is not offered: the installer's refusal, or
@@ -41,6 +49,7 @@ _ENGINE_ID: Final[TypeAdapter[str]] = TypeAdapter(EngineId)
 _LANES: Final[frozenset[str]] = frozenset(get_args(EngineLane))
 _MAX_ENGINES: Final = 64
 _DIGEST: Final = re.compile(r"^[0-9a-f]{64}$")
+_MAX_REPORTED_PROBLEMS: Final = 16
 
 
 @final
@@ -88,10 +97,44 @@ def _valid_engine_id(name: str) -> bool:
     return True
 
 
+def _build_fit_refusal(
+    claims: EnginePackageClaims, *, skulk_version: str, python_version: str
+) -> EnginePackageRefusal | None:
+    """Why this Skulk build cannot run an installed package, or ``None``.
+
+    A package fitted the node when it was installed. Skulk and its
+    interpreter can be updated underneath it, so the same three requirements
+    are read again every time the node lists its packages. Nothing is
+    started and nothing is written.
+    """
+    if not skulk_version_supported(claims, skulk_version):
+        return "skulk_version_unsupported"
+    if not any(
+        claims.control_protocol.minimum <= version <= claims.control_protocol.maximum
+        for version in PROTOCOL_VERSIONS_SUPPORTED
+    ):
+        return "protocol_unsupported"
+    if claims.adapter.kind == "python" and (
+        # A packaged Skulk's executable is its launcher, not an interpreter.
+        getattr(sys, "frozen", False)
+        or not adapter_python_supported(claims, python_version)
+    ):
+        return "adapter_python_unsupported"
+    return None
+
+
 def read_engine_package_inventory(
-    *, root: Path = ENGINE_PACKAGES_DIR
+    *,
+    root: Path = ENGINE_PACKAGES_DIR,
+    skulk_version: str | None = None,
+    python_version: str | None = None,
 ) -> EnginePackageInventory:
     """Read the active generation of every installed engine lane.
+
+    An intact generation this Skulk build can no longer run (its Skulk
+    version range, control-protocol range or adapter interpreter range no
+    longer includes this node) is reported as unusable and not offered.
+    ``skulk_version`` and ``python_version`` default to the running ones.
 
     Directories that are not a valid engine ID or lane are ignored: they are
     not packages. Lanes with generations but no active one are not reported;
@@ -104,6 +147,10 @@ def read_engine_package_inventory(
     """
     if engine_packages_disabled():
         return EnginePackageInventory(active={}, unusable=())
+    running_skulk = skulk_version if skulk_version is not None else get_skulk_version()
+    running_python = (
+        python_version if python_version is not None else platform.python_version()
+    )
     found: list[InstalledEngine] = []
     unusable: list[UnusableEnginePackage] = []
     if root.is_dir():
@@ -141,6 +188,14 @@ def read_engine_package_inventory(
                         )
                     )
                     continue
+                unfit = _build_fit_refusal(
+                    claims, skulk_version=running_skulk, python_version=running_python
+                )
+                if unfit is not None:
+                    unusable.append(
+                        UnusableEnginePackage(engine_directory.name, lane, unfit)
+                    )
+                    continue
                 found.append(installed)
 
     claimed: dict[str, list[InstalledEngine]] = {}
@@ -159,6 +214,32 @@ def read_engine_package_inventory(
             for claimant in claimants
         )
     return EnginePackageInventory(active=active, unusable=tuple(unusable))
+
+
+def node_engine_package_report(
+    *, root: Path = ENGINE_PACKAGES_DIR
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """What a node says about its engine packages when it gathers its facts.
+
+    Returns each offered backend tag's build identity, and one short line per
+    lane whose active generation cannot be offered (engine ID, lane and the
+    refusal code; no path). A packages folder that cannot be read is one such
+    line and offers nothing: a problem with an optional package must never
+    stop a node from starting or change what its built-in engines report.
+    """
+    try:
+        inventory = read_engine_package_inventory(root=root)
+    except OSError as error:
+        logger.warning(
+            f"Installed engine packages could not be read and none is offered: "
+            f"{type(error).__name__}"
+        )
+        return {}, ("the engine packages folder could not be read",)
+    problems = tuple(
+        f"{entry.engine_id} ({entry.lane}): {entry.reason}"
+        for entry in inventory.unusable[:_MAX_REPORTED_PROBLEMS]
+    )
+    return dict(sorted(inventory.builds.items())), problems
 
 
 def installed_engine_for_backend(

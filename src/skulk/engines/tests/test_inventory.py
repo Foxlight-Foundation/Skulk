@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from skulk.engines import inventory as inventory_module
 from skulk.engines.inventory import (
     installed_engine_for_backend,
+    node_engine_package_report,
     read_engine_package_inventory,
 )
 from skulk.engines.tests.package_fixtures import install_test_package
@@ -164,3 +166,62 @@ def test_only_the_value_one_turns_packages_off(
     assert read_engine_package_inventory(root=packages).builds == {
         "tensorfold-rocm": good.digest
     }
+
+
+def test_a_package_this_build_can_no_longer_run_is_reported_not_offered(
+    tmp_path: Path,
+) -> None:
+    """Skulk and its interpreter can change under an installed package."""
+    packages = tmp_path / "packages"
+    install_test_package(tmp_path, packages)
+    install_test_package(tmp_path, packages, lane="cuda", protocol=(2, 3))
+
+    def reasons(**running: str) -> dict[str, str]:
+        found = read_engine_package_inventory(root=packages, **running)
+        return {entry.lane: entry.reason for entry in found.unusable}
+
+    now = read_engine_package_inventory(root=packages)
+    assert set(now.active) == {"tensorfold-rocm"}
+    assert reasons() == {"cuda": "protocol_unsupported"}
+    assert reasons(skulk_version="1.9.0") == {
+        "rocm": "skulk_version_unsupported",
+        "cuda": "skulk_version_unsupported",
+    }
+    assert reasons(python_version="3.11.9")["rocm"] == "adapter_python_unsupported"
+    assert read_engine_package_inventory(root=packages, python_version="3.11.9").active == {}
+
+
+def test_the_node_report_names_builds_and_problems_without_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    packages = tmp_path / "packages"
+    good = install_test_package(tmp_path, packages)
+    damaged = install_test_package(tmp_path, packages, lane="cuda")
+    damaged.adapter.unlink()
+
+    builds, problems = node_engine_package_report(root=packages)
+
+    assert builds == {"tensorfold-rocm": good.digest}
+    assert problems == ("foxlight.tensorfold (cuda): installation_damaged",)
+    assert str(tmp_path) not in "".join(problems)
+    # No packages, and packages turned off, give the same empty report.
+    nothing = node_engine_package_report(root=tmp_path / "absent")
+    assert nothing == ({}, ())
+    monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, "1")
+    assert node_engine_package_report(root=packages) == nothing
+
+
+def test_an_unreadable_packages_folder_offers_nothing_and_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A problem with an optional package must not stop a node from starting."""
+
+    def unreadable(**_keywords: object) -> None:
+        raise PermissionError(13, "denied", str(tmp_path / "secret"))
+
+    monkeypatch.setattr(inventory_module, "read_engine_package_inventory", unreadable)
+
+    builds, problems = node_engine_package_report(root=tmp_path)
+
+    assert builds == {}
+    assert problems == ("the engine packages folder could not be read",)

@@ -32,6 +32,7 @@ from typing import final
 
 from pydantic import ConfigDict
 
+from skulk.shared.backends import package_engine_of
 from skulk.shared.types.node_facts import (
     CapabilityConflict,
     LlamaServerDeviceProbe,
@@ -687,6 +688,61 @@ def _derive_audio_cpp(
     return {"audio_cpp"} | {f"audio_cpp-{compute}" for compute in selected}, conflicts, []
 
 
+def _derive_engine_packages(
+    facts: NodeFacts,
+) -> tuple[set[str], list[CapabilityConflict], list[str]]:
+    """Offer each installed engine package's lane that this hardware can run.
+
+    A package tag is ``<engine name>-<lane>``. Only that compound tag is
+    offered, never the bare engine name, so a placement is always stamped
+    with a tag the node's package inventory can look up. A node with no
+    package offers nothing here and reports no conflict.
+    """
+    tags: set[str] = set()
+    conflicts: list[CapabilityConflict] = []
+    for tag in sorted(facts.engine_package_builds):
+        lane = tag.rsplit("-", 1)[-1]
+        if package_engine_of(tag) is None or lane == tag:
+            continue
+        runnable = (
+            facts.platform == "darwin"
+            if lane == "metal"
+            else _hardware_supports(lane, facts)
+        )
+        if runnable:
+            tags.add(tag)
+            continue
+        conflicts.append(
+            CapabilityConflict(
+                code="invalid_engine_binary",
+                message=(
+                    f"The installed engine package for backend {tag!r} executes "
+                    f"on {lane}, which this node's observed hardware does not "
+                    "offer; the backend is not advertised."
+                ),
+                remediation=(
+                    "Remove the package, or install the build for this node's "
+                    "accelerator, and restart skulk."
+                ),
+            )
+        )
+    conflicts.extend(
+        CapabilityConflict(
+            code="invalid_engine_binary",
+            message=(
+                f"An installed engine package cannot be used and its backend "
+                f"is not advertised: {problem}."
+            ),
+            remediation=(
+                "Reinstall or roll back the package, or remove it, and "
+                "restart skulk."
+            ),
+        )
+        for problem in facts.engine_package_problems
+    )
+    return tags, conflicts, []
+
+
 def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
     """Derive the backend tags a node advertises, plus every loud conflict.
 
@@ -717,6 +773,7 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
         _derive_comfy,
         _derive_test_video,
         _derive_audio_cpp,
+        _derive_engine_packages,
     ):
         engine_tags, engine_conflicts, engine_notes = derive(facts)
         tags |= engine_tags

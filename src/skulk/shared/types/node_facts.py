@@ -324,6 +324,16 @@ class NodeFacts(CamelCaseModel):
         default_factory=dict, description="Archive-verified Comfy overlays bound to this snapshot's actual base interpreter; existing instances retain their stamped build."
     )
 
+    engine_package_builds: dict[str, str] = Field(
+        default_factory=dict,
+        description="Backend tag to build identity (the package manifest digest) for each installed engine package's usable active generation. Empty when none is installed or engine packages are turned off.",
+    )
+
+    engine_package_problems: tuple[str, ...] = Field(
+        default=(),
+        description="One short line per installed engine package lane whose active generation cannot be offered: engine ID, lane and the refusal code.",
+    )
+
     audio_cpp_binary: EngineBinaryFact = Field(
         default_factory=lambda: EngineBinaryFact(env_var="SKULK_AUDIO_CPP_BIN")
     )

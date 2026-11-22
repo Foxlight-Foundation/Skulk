@@ -31,6 +31,7 @@ from skulk.shared.backends import (
     engine_of,
     engine_supports_multi_node,
     expand_engine_backends,
+    package_engine_of,
     platform_compatible_backends,
     resolve_node_backend,
     runtime_backends_for_builds,
@@ -827,6 +828,27 @@ def _card_platform_backends(
         ),
     )
     if node_resources is not None:
+        if (
+            card.vision is not None
+            or card.music is not None
+            or card.separation is not None
+            or card.image is not None
+            or card.video is not None
+            or card_serves_speech(card)
+            or card_serves_embeddings(card)
+        ):
+            # An installed engine package serves text generation and nothing
+            # else: its manifest has no way yet to say it implements another
+            # operation. The shared platform filter passes any tag whose
+            # engine this build has no name for, so without this a non-text
+            # card would be placed on a node's package only for its runner
+            # to refuse the load.
+            filtered = frozenset(
+                tag
+                for tag in filtered
+                if package_engine_of(tag) is None
+                or tag not in node_resources.backends
+            )
         filtered = frozenset(
             tag
             for tag in filtered
@@ -1850,6 +1872,17 @@ def place_instance(
                 if build is None:
                     raise PlacementError(
                         "Native placement lacks its exact engine build"
+                    )
+                updates["resolved_engine_build"] = build
+            if package_engine_of(resolved_backend) is not None:
+                # The runner finds an engine package's generation by its
+                # manifest digest. Without it a later activation could move
+                # this placement onto a build it was never admitted for.
+                assert resources is not None
+                build = resources.engine_builds.get(resolved_backend)
+                if build is None:
+                    raise PlacementError(
+                        "Engine package placement lacks its exact package build"
                     )
                 updates["resolved_engine_build"] = build
             if engine_of(resolved_backend) == "vllm" and resources is not None:
