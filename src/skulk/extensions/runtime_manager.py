@@ -8,7 +8,6 @@ import json
 import os
 import shutil
 import signal
-import stat
 import sys
 import time
 from collections.abc import Callable
@@ -92,6 +91,13 @@ from skulk.extensions.runtime_files import (
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_service import RuntimeServiceStatus
 from skulk.extensions.service_snapshot import ServiceSnapshot, activate_staged_runtime
+from skulk.utils.local_transport import (
+    connect,
+    discard,
+    endpoint_directory,
+    endpoint_is_private,
+    serve,
+)
 
 PluginIdentifier = Annotated[
     str, Field(pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$")
@@ -787,7 +793,7 @@ MANAGER_REQUEST: TypeAdapter[ManagerRequest] = TypeAdapter(ManagerRequest)
 def manager_socket(root: Path) -> Path:
     """Derive a protected short Unix socket address from the local service root."""
     digest = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:24]
-    directory = Path("/tmp") / f"skulk-manager-{os.getuid()}-{digest}"
+    directory = endpoint_directory("manager", digest)
     private_directory(directory)
     return directory / "manager.sock"
 
@@ -864,11 +870,7 @@ class RuntimeManager:
             raise ValueError("manager lifetime already used")
         self.lock = RuntimeLock(self.root, "manager.lock")
         try:
-            self.path.unlink(missing_ok=True)
-            self.server = await asyncio.start_unix_server(
-                self.accept, path=self.path, limit=16385
-            )
-            self.path.chmod(0o600)
+            self.server = await serve(self.path, self.accept, limit=16385)
             self.boot = asyncio.create_task(self._restore())
         except BaseException:
             await self.close()
@@ -1837,7 +1839,7 @@ class RuntimeManager:
                     if self.server is not None:
                         await self.server.wait_closed()
                     if self.lock is not None:
-                        self.path.unlink(missing_ok=True)
+                        discard(self.path)
                 finally:
                     # A failed socket unlink is diagnosable on the next start;
                     # it must not leak manager ownership after all children close.
@@ -1852,12 +1854,7 @@ class RuntimeManager:
 async def manager_request(root: Path, request: ManagerRequest) -> dict[str, JsonValue]:
     """Call a protected local manager without retrying any failed submission."""
     path = manager_socket(root)
-    info = path.lstat()
-    if (
-        not stat.S_ISSOCK(info.st_mode)
-        or info.st_uid != os.getuid()
-        or info.st_mode & 0o077
-    ):
+    if not endpoint_is_private(path):
         raise ValueError("manager socket is not protected")
     limit = (
         MAX_MANAGED_DISCOVERY_BYTES
@@ -1865,7 +1862,7 @@ async def manager_request(root: Path, request: ManagerRequest) -> dict[str, Json
         else 262144
     )
     async with asyncio.timeout(35):
-        reader, writer = await asyncio.open_unix_connection(path, limit=limit + 1)
+        reader, writer = await connect(path, limit=limit + 1)
         try:
             payload = request.model_dump(mode="json")
             if (

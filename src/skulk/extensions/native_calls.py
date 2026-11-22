@@ -7,7 +7,6 @@ It supplies generic host primitives, with no provider, account or routing policy
 import asyncio
 import hashlib
 import json
-import os
 import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -50,6 +49,7 @@ from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_selection import RuntimeSelector
+from skulk.utils.local_transport import connect, endpoint_directory
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 _TEXT = TypeAdapter(str)
@@ -328,12 +328,8 @@ class NativeCalls:
             name = hashlib.sha256(str(installation.absolute()).encode()).hexdigest()[
                 :24
             ]
-            socket = (
-                Path("/tmp")
-                / f"skulk-control-{os.getuid()}-{name}"
-                / "native-host.sock"
-            )
-            reader, writer = await asyncio.open_unix_connection(socket, limit=262144)
+            socket = endpoint_directory("control", name) / "native-host.sock"
+            reader, writer = await connect(socket, limit=262144)
             try:
                 keys = await admit_owner(
                     reader, writer, binding, key, lambda: self._current(binding)
