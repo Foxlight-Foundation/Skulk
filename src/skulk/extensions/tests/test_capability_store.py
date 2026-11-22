@@ -1127,3 +1127,108 @@ async def test_store_upgrade_keeps_version_and_floor_when_retaining_bytes_fails(
     status[0] = 200
     verified = await reopened.fetch()
     assert reopened.accepted(verified.sha256, now=int(time.time())).document == raw
+
+
+SECOND_TRUST_TARGET = "v1/second-authority-trust.json"
+
+
+def _two_authorities(
+    root: Path,
+) -> tuple[StoreRepository, StoreTrustClient, StoreTrustClient]:
+    """One repository and two clients that share a cache directory."""
+    repository = StoreRepository()
+    embedded = root / "capability_store_root.json"
+    embedded.write_bytes(repository.embedded_root)
+    shared = root / "trust"
+    capability = StoreTrustClient(
+        shared, embedded_root=embedded, fetcher=repository.fetcher
+    )
+    second = StoreTrustClient(
+        shared,
+        embedded_root=embedded,
+        fetcher=repository.fetcher,
+        trust_target=SECOND_TRUST_TARGET,
+    )
+    return repository, capability, second
+
+
+def test_a_second_trust_target_is_a_separate_authority(tmp_path: Path) -> None:
+    repository, capability, second = _two_authorities(tmp_path)
+    repository.publish_trust(
+        trust_document(Ed25519PrivateKey.generate(), revision=3, publisher="apps")
+    )
+    repository.publish_trust(
+        trust_document(Ed25519PrivateKey.generate(), revision=1, publisher="other"),
+        trust_target=SECOND_TRUST_TARGET,
+    )
+
+    assert set(capability.load(offline=False).publishers) == {"apps"}
+    assert set(second.load(offline=False).publishers) == {"other"}
+    # The capability copy keeps the name hosts already hold.
+    assert capability.retained_path.name == "last-known-good-trust.json"
+    assert second.retained_path != capability.retained_path
+    assert capability.load(offline=True).revision == 3
+    assert second.load(offline=True).revision == 1
+
+
+def test_an_unsigned_trust_target_never_borrows_another_authority(
+    tmp_path: Path,
+) -> None:
+    repository, capability, second = _two_authorities(tmp_path)
+    repository.publish_trust(
+        trust_document(Ed25519PrivateKey.generate(), revision=1, publisher="apps")
+    )
+    assert set(capability.load(offline=False).publishers) == {"apps"}
+
+    # The capability trust is verified and retained in the same directory,
+    # and the second authority still has nothing.
+    for offline in (False, True):
+        with pytest.raises(StoreTrustUnavailableError):
+            second.load(offline=offline)
+    assert not second.retained_path.exists()
+
+
+def test_each_trust_target_keeps_its_own_revision_floor(tmp_path: Path) -> None:
+    repository, capability, second = _two_authorities(tmp_path)
+    key = Ed25519PrivateKey.generate()
+    repository.publish_trust(trust_document(key, revision=5, publisher="apps"))
+    repository.publish_trust(
+        trust_document(key, revision=2, publisher="other"),
+        trust_target=SECOND_TRUST_TARGET,
+    )
+    assert capability.load(offline=False).revision == 5
+    assert second.load(offline=False).revision == 2
+
+    # An older document for the second target is refused on its own floor;
+    # the capability target's higher revision plays no part.
+    repository.publish_trust(
+        trust_document(key, revision=1, publisher="other"),
+        trust_target=SECOND_TRUST_TARGET,
+    )
+    assert second.load(offline=False).revision == 2
+    assert capability.load(offline=False).revision == 5
+
+    repository.publish_trust(
+        trust_document(key, revision=3, publisher="other"),
+        trust_target=SECOND_TRUST_TARGET,
+    )
+    assert second.load(offline=False).revision == 3
+    assert capability.load(offline=False).revision == 5
+
+
+@pytest.mark.parametrize(
+    "trust_target",
+    [
+        "second-authority-trust.json",
+        "../v1/second-authority-trust.json",
+        "v1/nested/second-authority-trust.json",
+        "v1/Second-Authority-Trust.json",
+        "v1/second-authority-trust.txt",
+        "https://example.invalid/v1/second-authority-trust.json",
+    ],
+)
+def test_a_trust_target_must_be_a_versioned_json_path(
+    tmp_path: Path, trust_target: str
+) -> None:
+    with pytest.raises(ValueError, match="versioned JSON target path"):
+        StoreTrustClient(tmp_path / "trust", trust_target=trust_target)
