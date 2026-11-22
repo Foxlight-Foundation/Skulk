@@ -15,6 +15,7 @@ import skulk.facts
 from skulk.facts.derive import BackendDerivation
 from skulk.shared.backends import (
     ACE_STEP_COMPUTE_BACKENDS,
+    ENGINE_UNKNOWN_FAILURE_MARKER,
     backend_hardware_present,
     describe_backend_hardware,
     engine_of,
@@ -25,6 +26,7 @@ from skulk.shared.backends import (
     probe_node_backends,
     resolve_node_backend,
     resolve_node_engine,
+    unknown_engine_refusal,
 )
 
 
@@ -459,3 +461,29 @@ def test_platform_compatible_backends_gates_new_families_off_in_process_llama_cp
     assert (
         platform_compatible_backends(declared, card_serves_vision=False) == declared
     )
+
+
+@pytest.mark.parametrize(
+    "tag", ["tensorfold-rocm", "tensorfold", "bogus-cuda", "cuda", "", "MLX-metal"]
+)
+def test_a_stamped_backend_of_an_unknown_engine_is_refused(tag: str) -> None:
+    refusal = unknown_engine_refusal(tag)
+
+    assert refusal is not None
+    assert refusal.startswith(f"{ENGINE_UNKNOWN_FAILURE_MARKER}: ")
+    assert repr(tag) in refusal
+
+
+@pytest.mark.parametrize(
+    "tag", [None, "mlx", "mlx-metal", "llama_server-vulkan", "vllm-cuda", "demucs-cpu"]
+)
+def test_a_known_or_unstamped_backend_is_not_refused(tag: str | None) -> None:
+    # No stamped backend means the node resolves the engine from its own
+    # probe, which is a separate path and not a refusal.
+    assert unknown_engine_refusal(tag) is None
+
+
+def test_an_unknown_engine_refusal_bounds_the_tag_it_repeats() -> None:
+    refusal = unknown_engine_refusal("x" * 5000)
+
+    assert refusal is not None and len(refusal) < 300

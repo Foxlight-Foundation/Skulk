@@ -59,6 +59,7 @@ from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.apply import apply
 from skulk.shared.backends import (
     ENGINE_UNAVAILABLE_FAILURE_MARKER,
+    ENGINE_UNKNOWN_FAILURE_MARKER,
     EngineType,
     engine_of,
 )
@@ -454,6 +455,15 @@ def _engine_unavailable_instance_failure_message(model_id: ModelId) -> str:
     )
 
 
+def _engine_unknown_instance_failure_message(model_id: ModelId) -> str:
+    """Return safe operator guidance for a placement this node's build cannot run."""
+    return _instance_failure_message(
+        f"runner for {model_id} was placed on an engine this node's Skulk build "
+        "does not include; not retrying. Every node in a cluster must run the "
+        "same Skulk build."
+    )
+
+
 @dataclass
 class _EngineInstallJob:
     """One on-demand engine install shared by every instance waiting for it."""
@@ -554,6 +564,35 @@ def engine_unavailable_live_instances(
                 )
             )
     return unavailable
+
+
+def engine_unknown_live_instances(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+    live_instances: Container[InstanceId],
+) -> list[tuple[InstanceId, ModelId, str]]:
+    """Return live instances whose runner was placed on an engine this build lacks.
+
+    The runner refuses such a placement before it chooses a runner type.
+    Relaunching cannot change the build, so the instance is given up once.
+    """
+    unknown: list[tuple[InstanceId, ModelId, str]] = []
+    for supervisor in runners.values():
+        instance_id = supervisor.bound_instance.instance.instance_id
+        status = supervisor.status
+        if (
+            instance_id in live_instances
+            and isinstance(status, RunnerFailed)
+            and status.error_message is not None
+            and ENGINE_UNKNOWN_FAILURE_MARKER in status.error_message
+        ):
+            unknown.append(
+                (
+                    instance_id,
+                    supervisor.shard_metadata.model_card.model_id,
+                    status.error_message,
+                )
+            )
+    return unknown
 
 
 def model_trust_failed_live_instances(
@@ -4068,6 +4107,23 @@ class Worker:
                             unavailable_model_id
                         ),
                         error_code="engine_install_failed",
+                    )
+
+            for (
+                unknown_instance_id,
+                unknown_model_id,
+                unknown_error,
+            ) in engine_unknown_live_instances(self.runners, self.state.instances):
+                if unknown_instance_id not in self._terminal_load_failures_handled:
+                    self._terminal_load_failures_handled.add(unknown_instance_id)
+                    logger.error(
+                        f"Worker: unknown engine for instance "
+                        f"{unknown_instance_id}: {unknown_error}"
+                    )
+                    await self._give_up_on_instance(
+                        unknown_instance_id,
+                        _engine_unknown_instance_failure_message(unknown_model_id),
+                        error_code="placement_failed",
                     )
 
             for (

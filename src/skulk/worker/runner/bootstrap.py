@@ -614,6 +614,13 @@ def entrypoint(
         # failure-reporting boundary so a denied card becomes an actionable
         # RunnerFailed state rather than an unreported process-exit retry loop.
         require_remote_code_approval(shard.model_card)
+        # Also before dispatch, for every model type: several branches below
+        # send an engine they do not recognize to a default runner.
+        from skulk.shared.backends import unknown_engine_refusal
+
+        unknown_engine = unknown_engine_refusal(shard.resolved_backend)
+        if unknown_engine is not None:
+            raise RuntimeError(unknown_engine)
         native_music = (
             shard.model_card.music.native
             if shard.model_card.music is not None

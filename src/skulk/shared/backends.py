@@ -208,6 +208,41 @@ ENGINE_UNAVAILABLE_FAILURE_MARKER: Final = "engine-not-installed"
 """Marks a runner that started without its on-demand engine installed. The
 worker gives the instance up instead of relaunching into the same gap."""
 
+ENGINE_UNKNOWN_FAILURE_MARKER: Final = "engine-unknown"
+"""Marks a runner whose placement names an engine this build does not have.
+The worker gives the instance up at once: relaunching cannot make this node
+learn an engine."""
+
+
+def unknown_engine_refusal(resolved_backend: str | None) -> str | None:
+    """Explain why a stamped backend cannot run here, or return ``None``.
+
+    A placement stamps the exact backend its shard must run on. When that
+    backend names an engine this build does not implement, nothing here can
+    serve it. Before this check such a shard reached the default runner and
+    was loaded as an MLX model, which serves the wrong engine without saying
+    so.
+
+    A shard with no stamped backend is a different case: it is resolved from
+    this node's own probe, as before, and is not refused here.
+
+    Args:
+        resolved_backend: The backend tag stamped on the shard, if any.
+
+    Returns:
+        A failure message starting with ``ENGINE_UNKNOWN_FAILURE_MARKER``
+        when the stamped backend's engine is unknown, otherwise ``None``.
+    """
+    if resolved_backend is None or engine_of(resolved_backend) is not None:
+        return None
+    # The tag arrived over the wire: bound what a log or failure record repeats.
+    shown = resolved_backend[:64]
+    return (
+        f"{ENGINE_UNKNOWN_FAILURE_MARKER}: this node has no engine for backend "
+        f"{shown!r}; the placement was made for an engine this Skulk build does "
+        "not include"
+    )
+
 # audio.cpp is absent from the base environment. Only a verified installed
 # executable is eligible for placement; the on-demand package preparation path
 # sets this variable after it has checked the immutable wheel and binary.
