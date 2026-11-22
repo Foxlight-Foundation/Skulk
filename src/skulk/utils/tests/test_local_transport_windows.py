@@ -36,8 +36,7 @@ async def _echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
     writer.close()
 
 
-def _protection(handle: int) -> str:
-    """The owner and access list of an open pipe, in Windows' own text form."""
+def _security_library() -> tuple[ctypes.CDLL, ctypes.CDLL]:
     assert sys.platform == "win32"
     import ctypes.wintypes as wt
 
@@ -62,7 +61,39 @@ def _protection(handle: int) -> str:
         ctypes.POINTER(wt.LPWSTR),
         wt.LPVOID,
     )
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wt.BOOL
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
+        wt.LPCWSTR,
+        wt.DWORD,
+        ctypes.POINTER(wt.LPVOID),
+        wt.LPVOID,
+    )
     kernel32.LocalFree.argtypes = (wt.LPVOID,)
+    return advapi32, kernel32
+
+
+def _as_windows_writes_it(descriptor: object) -> str:
+    """A security descriptor's owner and access list in Windows' own text form."""
+    assert sys.platform == "win32"
+    import ctypes.wintypes as wt
+
+    advapi32, kernel32 = _security_library()
+    text = wt.LPWSTR()
+    assert advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        descriptor, 1, _OWNER_AND_ACCESS_LIST, ctypes.byref(text), None
+    )
+    try:
+        return text.value or ""
+    finally:
+        kernel32.LocalFree(text)
+
+
+def _protection(handle: int) -> str:
+    """The owner and access list of an open pipe."""
+    assert sys.platform == "win32"
+    import ctypes.wintypes as wt
+
+    advapi32, kernel32 = _security_library()
     descriptor = wt.LPVOID()
     status = advapi32.GetSecurityInfo(
         handle,
@@ -75,14 +106,30 @@ def _protection(handle: int) -> str:
         ctypes.byref(descriptor),
     )
     assert status == 0, status
-    text = wt.LPWSTR()
-    assert advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
-        descriptor, 1, _OWNER_AND_ACCESS_LIST, ctypes.byref(text), None
+    try:
+        return _as_windows_writes_it(descriptor)
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def _normalized(protection: str) -> str:
+    """The same protection as Windows writes it back.
+
+    Windows abbreviates well-known accounts when it writes a descriptor (the
+    built-in administrator becomes ``LA``), so two descriptors are compared
+    after both have been through the same conversion.
+    """
+    assert sys.platform == "win32"
+    import ctypes.wintypes as wt
+
+    advapi32, kernel32 = _security_library()
+    descriptor = wt.LPVOID()
+    assert advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        protection, 1, ctypes.byref(descriptor), None
     )
     try:
-        return text.value or ""
+        return _as_windows_writes_it(descriptor)
     finally:
-        kernel32.LocalFree(text)
         kernel32.LocalFree(descriptor)
 
 
@@ -100,8 +147,12 @@ async def test_a_pipe_is_owned_by_and_open_to_this_account_and_system_only(
         pipe = writer.get_extra_info("pipe")
         # Full access for SYSTEM and for this account, nothing inherited, no
         # other entry: no other account, administrators included, is listed.
-        assert _protection(pipe.fileno()) == (
+        assert _protection(pipe.fileno()) == _normalized(
             f"O:{account}D:P(A;;FA;;;SY)(A;;FA;;;{account})"
+        )
+        # And that is not what an unprotected pipe looks like.
+        assert _protection(pipe.fileno()) != _normalized(
+            f"O:{account}D:(A;;FA;;;SY)(A;;FA;;;{account})(A;;FR;;;WD)"
         )
         writer.close()
     finally:
@@ -250,3 +301,90 @@ async def test_a_client_that_leaves_before_it_is_accepted_is_not_a_fault(
         loop.set_exception_handler(None)
 
     assert faults == []
+
+
+async def test_clients_that_leave_early_do_not_accumulate_pipe_instances(
+    directory: Path,
+) -> None:
+    """An instance whose client left before it was accepted is released at once."""
+    assert sys.platform == "win32"
+    from skulk.utils import _local_transport_windows as transport
+
+    address = directory / "endpoint.sock"
+    server = await serve(address, _echo, limit=1024)
+    try:
+        for _ in range(25):
+            handle = None
+            for _ in range(200):
+                handle = transport._kernel32.CreateFileW(
+                    transport._pipe_name(address),
+                    0xC0000000,
+                    0,
+                    None,
+                    3,
+                    0x40000000,
+                    None,
+                )
+                if handle not in (None, transport._INVALID_HANDLE):
+                    break
+                await asyncio.sleep(0.005)
+            assert handle not in (None, transport._INVALID_HANDLE)
+            assert transport._kernel32.CloseHandle(handle)
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)
+
+        # Only the instance being waited on and the next one remain.
+        assert len(server._waiting) <= 2
+        assert all(pipe.handle is not None for pipe in server._waiting)
+
+        reader, writer = await connect(address, limit=1024)
+        writer.write(b"still serving\n")
+        await writer.drain()
+        assert await reader.readline() == b"STILL SERVING\n"
+        writer.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert server._waiting == set()
+
+
+async def test_a_wait_that_fails_later_releases_its_pipe_instance(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wait can also fail after it was registered; that instance is released too."""
+    assert sys.platform == "win32"
+    from asyncio import windows_utils
+
+    address = directory / "endpoint.sock"
+    loop = asyncio.get_running_loop()
+    proactor = loop._proactor  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+    real_accept = proactor.accept_pipe  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    failed: list[windows_utils.PipeHandle] = []
+
+    def fail_the_first_wait(
+        pipe: windows_utils.PipeHandle,
+    ) -> asyncio.Future[windows_utils.PipeHandle]:
+        if failed:
+            return real_accept(pipe)  # pyright: ignore[reportUnknownVariableType]
+        failed.append(pipe)
+        broken: asyncio.Future[windows_utils.PipeHandle] = loop.create_future()
+        loop.call_soon(broken.set_exception, BrokenPipeError(232, "left"))
+        return broken
+
+    monkeypatch.setattr(proactor, "accept_pipe", fail_the_first_wait)
+    server = await serve(address, _echo, limit=1024)
+    try:
+        await asyncio.sleep(0.1)
+        assert len(failed) == 1
+        assert failed[0].handle is None
+        assert failed[0] not in server._waiting
+
+        reader, writer = await connect(address, limit=1024)
+        writer.write(b"after a failed wait\n")
+        await writer.drain()
+        assert await reader.readline() == b"AFTER A FAILED WAIT\n"
+        writer.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert server._waiting == set()

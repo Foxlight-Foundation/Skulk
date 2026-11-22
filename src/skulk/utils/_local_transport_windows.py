@@ -84,6 +84,9 @@ _SDDL_REVISION_1 = 1
 # caller's own deadline bounds the total.
 _BUSY_RETRY_FIRST_SECONDS = 0.001
 _BUSY_RETRY_LONGEST_SECONDS = 0.1
+# How long the server waits before trying again after an accept fails for a
+# reason other than a client leaving.
+_ACCEPT_RETRY_SECONDS = 0.1
 
 
 class _SecurityAttributes(ctypes.Structure):
@@ -379,10 +382,13 @@ async def connect(
 class _PipeListener:
     """A served endpoint: its pipe instances and the loop that accepts clients.
 
-    This is the standard library's pipe server and accept loop
+    This follows the standard library's pipe server and accept loop
     (``asyncio.windows_events.PipeServer`` and
-    ``ProactorEventLoop.start_serving_pipe``) with one difference: every
-    instance is created with this module's security descriptor.
+    ``ProactorEventLoop.start_serving_pipe``), with three differences: every
+    instance is created with this module's security descriptor; an instance
+    whose accept fails is closed and forgotten at once, where the standard
+    library leaves it to the garbage collector; and a failure other than a
+    client leaving is retried after a short delay, not immediately.
     """
 
     def __init__(
@@ -395,6 +401,8 @@ class _PipeListener:
         # Instances not yet handed to a client; closing the listener closes them.
         self._waiting: set[windows_utils.PipeHandle] = set()
         self._accepting: asyncio.Future[windows_utils.PipeHandle] | None = None
+        # The instance that wait is for, so a failed wait can release it.
+        self._accepting_pipe: windows_utils.PipeHandle | None = None
         self._next: windows_utils.PipeHandle | None = self._instance(first=True)
 
     def _instance(self, *, first: bool) -> windows_utils.PipeHandle | None:
@@ -443,24 +451,40 @@ class _PipeListener:
         """Begin accepting clients on the running loop."""
         asyncio.get_running_loop().call_soon(self._accept)
 
+    def _drop(self, pipe: windows_utils.PipeHandle | None) -> None:
+        """Close an instance no client will use and forget it."""
+        if pipe is not None:
+            self._waiting.discard(pipe)
+            # Closing twice is harmless; asking a closed handle for its number
+            # is an error, so it is not asked.
+            pipe.close()
+
     def _accept(
         self, accepted: asyncio.Future[windows_utils.PipeHandle] | None = None
     ) -> None:
         loop = asyncio.get_running_loop()
+        # The instance this call is responsible for until a client's transport
+        # owns it or a later wait has been registered for it.
         pipe: windows_utils.PipeHandle | None = None
         try:
             if accepted is not None:
-                pipe = accepted.result()
-                self._waiting.discard(pipe)
-                if self._name is None:
-                    pipe.close()
+                # The wait that just finished was for this instance. It is
+                # taken before the result is read, so a failed wait still
+                # releases it.
+                pipe, self._accepting_pipe = self._accepting_pipe, None
+                accepted.result()
+                if pipe is None or self._name is None:
+                    self._drop(pipe)
                     return
+                self._waiting.discard(pipe)
                 protocol = asyncio.StreamReaderProtocol(
                     asyncio.StreamReader(limit=self._limit), self._client_connected
                 )
                 self._loop._make_duplex_pipe_transport(  # pyright: ignore[reportPrivateUsage]
                     pipe, protocol, extra={"addr": self._name}
                 )
+                # The transport owns that instance now.
+                pipe = None
             # Keep one unconnected instance ready before waiting on this one,
             # so the name is never without an instance while it is served.
             pipe, self._next = self._next, self._instance(first=False)
@@ -469,38 +493,35 @@ class _PipeListener:
             pending = self._loop._proactor.accept_pipe(pipe)  # pyright: ignore[reportPrivateUsage]
         except BrokenPipeError:
             # A client that connected and left before it was accepted: an
-            # ordinary departure. Drop that instance and keep serving.
-            if pipe is not None and pipe.fileno() != -1:
-                pipe.close()
+            # ordinary departure. Release that instance and keep serving.
+            self._drop(pipe)
             loop.call_soon(self._accept)
         except OSError as error:
-            if pipe is not None and pipe.fileno() != -1:
-                loop.call_exception_handler(
-                    {
-                        "message": "Local endpoint accept failed",
-                        "exception": error,
-                    }
-                )
-                pipe.close()
-            loop.call_soon(self._accept)
+            loop.call_exception_handler(
+                {"message": "Local endpoint accept failed", "exception": error}
+            )
+            self._drop(pipe)
+            # Not immediately: a fault that persists must not spin the loop.
+            loop.call_later(_ACCEPT_RETRY_SECONDS, self._accept)
         except asyncio.CancelledError:
-            if pipe is not None:
-                pipe.close()
+            self._drop(pipe)
         else:
             self._accepting = pending
+            self._accepting_pipe = pipe
             pending.add_done_callback(self._accept)
 
     def close(self) -> None:
         """Stop accepting clients and release the endpoint's name."""
+        if self._name is None:
+            return
+        self._name = None
         if self._accepting is not None:
             self._accepting.cancel()
             self._accepting = None
-        if self._name is not None:
-            self._name = None
-            for pipe in self._waiting:
-                pipe.close()
-            self._waiting.clear()
-            self._next = None
+        for pipe in tuple(self._waiting):
+            self._drop(pipe)
+        self._next = None
+        self._accepting_pipe = None
 
     async def wait_closed(self) -> None:
         """Return once the endpoint is released; closing is immediate."""
