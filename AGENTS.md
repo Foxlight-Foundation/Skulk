@@ -261,6 +261,15 @@ a file or opens one link-safely by calling the operating system itself: it uses
 module, and a guard in `utils/tests/test_runtime_files_platforms.py` lists the
 modules not yet moved (`runtime_integrity.py`, `local_setup.py` and the
 `service_*` modules). Take a module off that list when it is ported; add none.
+The runtime installer starts its child programs through
+`utils/owned_process.py` (`start_owned`, `OwnedProcess.kill`/`close`,
+`isolated_environment`): the whole tree can be stopped, and it never outlives
+the directory lock. POSIX does that with a new session and the inherited lock
+descriptor; Windows with a Job Object set to end its processes when this
+process's handle closes (`utils/_owned_process_windows.py`), because a Windows
+file lock belongs to one process. `utils/tests/test_owned_process.py` lists the
+modules that still start process trees themselves (`runtime_service.py`,
+`service_snapshot.py`).
 
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`, dark = the operator design system's Den palette); components never branch on the theme name. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field (scene crown + shooting stars, mesh retired); default builds ship a CSS-only night gradient with the mesh.
