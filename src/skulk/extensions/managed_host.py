@@ -14,6 +14,7 @@ from skulk.extensions.capabilities import CapabilityDescriptor, descriptor_revis
 from skulk.extensions.configuration import ConfigurationNodeId
 from skulk.extensions.managed_limits import MAX_MANAGED_OWNER_DESCRIPTORS
 from skulk.extensions.types import ExtensionContext
+from skulk.utils.local_transport import connect
 
 
 class _Wire(BaseModel):
@@ -111,7 +112,7 @@ class HostCallbacks:
 
     async def serve(self, socket: Path) -> None:
         """Serve one verified local connection; the adapter owns reconnection."""
-        reader, writer = await asyncio.open_unix_connection(socket, limit=65537)
+        reader, writer = await connect(socket, limit=65537)
         try:
             async with asyncio.timeout(3):
                 writer.write(
