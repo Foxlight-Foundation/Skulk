@@ -65,6 +65,7 @@ from skulk.shared.types.capability_nodes import (
     CapabilityNodeSummary,
     CapabilityNodeSurface,
 )
+from skulk.utils.local_transport import connect, endpoint_directory, endpoint_is_private
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 
@@ -421,15 +422,10 @@ class ManagedOwner:
     def _socket_path(self, name: Literal["control.sock", "host.sock"]) -> Path:
         _private_directory(self.root)
         digest = hashlib.sha256(str(self.root.absolute()).encode()).hexdigest()[:24]
-        directory = Path("/tmp") / f"skulk-control-{os.getuid()}-{digest}"
+        directory = endpoint_directory("control", digest)
         _private_directory(directory)
         socket = directory / name
-        info = socket.lstat()
-        if (
-            not stat.S_ISSOCK(info.st_mode)
-            or info.st_uid != os.getuid()
-            or info.st_mode & 0o077
-        ):
+        if not endpoint_is_private(socket):
             raise ValueError("managed socket is not protected")
         return socket
 
@@ -446,7 +442,7 @@ class ManagedOwner:
             else 131072
         )
         async with asyncio.timeout(timeout):
-            reader, writer = await asyncio.open_unix_connection(socket, limit=limit + 1)
+            reader, writer = await connect(socket, limit=limit + 1)
             try:
                 writer.write(raw)
                 await writer.drain()
@@ -1047,7 +1043,7 @@ class ManagedOwner:
         writer: asyncio.StreamWriter | None = None
         async with asyncio.timeout(call.timeout_seconds):
             try:
-                reader, writer = await asyncio.open_unix_connection(
+                reader, writer = await connect(
                     self._socket_path("control.sock"), limit=65_540
                 )
                 writer.write(request)

@@ -1393,6 +1393,11 @@ source for a member). The pin must equal the bindings version
 (`tests/test_windows_bindings_wheel.py`), so a bindings version bump moves the
 pin and needs the Windows wheel published from that branch before `uv lock`. Capability
 hosting, signed installs and an unattended service on Windows are not built yet.
+Local streams between the node, the plugin manager and plugin owners go through
+`utils/local_transport.py` (endpoint directory, privacy check, `connect`,
+`serve`, `discard`); it is the only module that opens or binds a local socket
+or names an endpoint directory (`utils/tests/test_local_transport.py` enforces
+this), and today it has a POSIX implementation only.
 
 ### Extension API (plugins)
 
