@@ -19,6 +19,7 @@ itself unavailable and the host behaves as it did before the store existed.
 
 import contextlib
 import hashlib
+import re
 import time
 from pathlib import Path
 from typing import Final, final
@@ -62,6 +63,12 @@ The plugin manager runs from a staged copy of the Skulk package, which copies
 every file under the package, so the root travels with the manager. Absent,
 the built-in store is inactive."""
 
+_TRUST_TARGET_NAME: Final = re.compile(r"^v[0-9]+/[a-z0-9]+(?:-[a-z0-9]+)*\.json$")
+"""Shape of a trust target path. The path is always chosen by host code."""
+
+_CAPABILITY_RETAINED_NAME: Final = "last-known-good-trust.json"
+"""Retained copy of the capability publisher trust; its name predates targets."""
+
 _TRUST_BYTES: Final = 65536
 """Upper bound on the signed trust document; a real one is a few kilobytes."""
 
@@ -79,6 +86,19 @@ class StoreTrustUnavailableError(ValueError):
     the last verified copy yields trust that is still in force. Carries no
     address or document: callers name the refusal from a fixed vocabulary.
     """
+
+
+def _retained_name(trust_target: str) -> str:
+    """Name the retained copy of one trust target.
+
+    The capability target keeps the name hosts already hold. Every other
+    target gets a name derived from its own path, so two authorities can
+    never read or overwrite each other's retained trust, even in one
+    directory.
+    """
+    if trust_target == CAPABILITY_STORE_TRUST_TARGET:
+        return _CAPABILITY_RETAINED_NAME
+    return f"last-known-good-{hashlib.sha256(trust_target.encode()).hexdigest()[:16]}.json"
 
 
 class _RetainedTrust(BaseModel):
@@ -117,6 +137,7 @@ class StoreTrustClient:
         catalog_document: str = CAPABILITY_STORE_CATALOG_DOCUMENT,
         fetcher: FetcherInterface | None = None,
         socket_timeout_seconds: int = 4,
+        trust_target: str = CAPABILITY_STORE_TRUST_TARGET,
     ) -> None:
         """Configure the store without touching the network or the disk.
 
@@ -131,7 +152,18 @@ class StoreTrustClient:
                 to python-tuf's urllib3 fetcher.
             socket_timeout_seconds: Connect and between-bytes timeout of the
                 default fetcher.
+            trust_target: The signed trust target this client reads, and the
+                only one it ever returns. The default is the capability
+                publisher trust. Another authority under the same root, such
+                as engine packages, names its own target here from host
+                code; it then has its own retained copy and its own revision
+                floor, and never receives the capability publishers.
+
+        Raises:
+            ValueError: ``trust_target`` is not a versioned JSON target path.
         """
+        if _TRUST_TARGET_NAME.fullmatch(trust_target) is None:
+            raise ValueError("trust target must be a versioned JSON target path")
         self.cache_dir = cache_dir
         self.embedded_root = embedded_root
         self.base_url = base_url.rstrip("/") + "/"
@@ -139,7 +171,8 @@ class StoreTrustClient:
         self.catalog_document = catalog_document
         self.fetcher = fetcher
         self.socket_timeout_seconds = socket_timeout_seconds
-        self.retained_path = cache_dir / "last-known-good-trust.json"
+        self.trust_target = trust_target
+        self.retained_path = cache_dir / _retained_name(trust_target)
 
     @property
     def available(self) -> bool:
@@ -238,7 +271,7 @@ class StoreTrustClient:
             bootstrap=root,
         )
         updater.refresh()
-        target = updater.get_targetinfo(CAPABILITY_STORE_TRUST_TARGET)
+        target = updater.get_targetinfo(self.trust_target)
         if target is None:
             raise ValueError("store repository signs no publisher trust")
         if target.length > _TRUST_BYTES:

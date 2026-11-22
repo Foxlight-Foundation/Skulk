@@ -67,7 +67,7 @@ class MemoryFetcher(FetcherInterface):
 
 @final
 class StoreRepository:
-    """The store's TUF repository: root, online roles and the one trust target.
+    """The store's TUF repository: root, online roles and its trust targets.
 
     The root starts on an ECDSA P-256 key, as a hardware key holds it; the
     online roles use Ed25519. ``rotate_keys`` publishes a root version that
@@ -102,18 +102,29 @@ class StoreRepository:
     def _metadata_url(self, name: str) -> str:
         return f"{self.base_url}metadata/{name}"
 
-    def publish_trust(self, document: bytes, *, served: bytes | None = None) -> None:
-        """Sign ``document`` as the trust target under new role versions.
+    def publish_trust(
+        self,
+        document: bytes,
+        *,
+        served: bytes | None = None,
+        trust_target: str = CAPABILITY_STORE_TRUST_TARGET,
+    ) -> None:
+        """Sign ``document`` as one trust target under new role versions.
+
+        Targets published earlier under other paths stay signed, as they
+        would in a real repository.
 
         Args:
             document: The trust bytes the targets role signs.
             served: Bytes served at the target's address instead, to model a
                 tampered mirror; the signed document by default.
+            trust_target: Target path to sign the document under; the
+                capability publisher trust by default.
         """
         self.publications += 1
-        target = TargetFile.from_data(CAPABILITY_STORE_TRUST_TARGET, document)
+        target = TargetFile.from_data(trust_target, document)
         self.targets.signed.version = self.publications
-        self.targets.signed.targets = {CAPABILITY_STORE_TRUST_TARGET: target}
+        self.targets.signed.targets[trust_target] = target
         self.targets.sign(self.targets_signer)
         self.files[self._metadata_url(f"{self.publications}.targets.json")] = (
             self.targets.to_bytes()
@@ -124,7 +135,7 @@ class StoreRepository:
         self.files[self._metadata_url(f"{self.publications}.snapshot.json")] = (
             self.snapshot.to_bytes()
         )
-        directory, _, name = CAPABILITY_STORE_TRUST_TARGET.rpartition("/")
+        directory, _, name = trust_target.rpartition("/")
         self.files[
             f"{self.base_url}targets/{directory}/{target.hashes['sha256']}.{name}"
         ] = served if served is not None else document
