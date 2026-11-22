@@ -263,9 +263,13 @@ required-version = ">=0.8.6"
 # The MLX hard dependency already has binaries only for Apple Silicon and
 # Linux x86_64/aarch64. Declare those real installation targets so a new
 # platform-specific dependency does not ask uv to solve imaginary architectures.
+# Windows (win32, x86-64) is a non-compute target only: it runs the management
+# participation mode and never an inference engine, so it installs neither MLX
+# nor the native capability kernel.
 environments = [
   "sys_platform == 'darwin' and platform_machine == 'arm64'",
   "sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+  "sys_platform == 'win32' and platform_machine == 'AMD64'",
 ]
 extra-build-dependencies = { "miniaudio" = ["setuptools", "cffi", "pycparser"] }
 
