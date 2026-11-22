@@ -19,6 +19,8 @@ from collections.abc import Callable
 SYSTEM_ACCOUNT = "S-1-5-18"
 
 _TOKEN_QUERY = 0x0008
+_TOKEN_DUPLICATE = 0x0002
+_SECURITY_IDENTIFICATION = 1
 _TOKEN_USER = 1
 _BUILTIN_ADMINISTRATORS = 26  # WinBuiltinAdministratorsSid
 _MAXIMUM_SID_BYTES = 68
@@ -49,6 +51,8 @@ _advapi32.CreateWellKnownSid.argtypes = (
     wt.LPVOID,
     ctypes.POINTER(wt.DWORD),
 )
+_advapi32.DuplicateToken.restype = wt.BOOL
+_advapi32.DuplicateToken.argtypes = (wt.HANDLE, ctypes.c_int, ctypes.POINTER(wt.HANDLE))
 _advapi32.CheckTokenMembership.restype = wt.BOOL
 _advapi32.CheckTokenMembership.argtypes = (
     wt.HANDLE,
@@ -68,6 +72,7 @@ _get_token_information: Callable[..., int] = _advapi32.GetTokenInformation
 _sid_to_text: Callable[..., int] = _advapi32.ConvertSidToStringSidW
 _create_well_known_sid: Callable[..., int] = _advapi32.CreateWellKnownSid
 _check_token_membership: Callable[..., int] = _advapi32.CheckTokenMembership
+_duplicate_token: Callable[..., int] = _advapi32.DuplicateToken
 
 
 def _last_error(action: str) -> OSError:
@@ -129,6 +134,10 @@ def this_process_is_administrator() -> bool:
     the group for denials only and is not a member; an elevated token and the
     SYSTEM account are. The token's elevation flag is not used: it stays set
     on a token that has had its administrator rights removed.
+
+    The process's own token is examined, never the calling thread's. A thread
+    can wear a lesser identity for a while and then drop it, which says
+    nothing about what the process can do.
     """
     size = wt.DWORD(_MAXIMUM_SID_BYTES)
     administrators = ctypes.create_string_buffer(_MAXIMUM_SID_BYTES)
@@ -136,11 +145,30 @@ def this_process_is_administrator() -> bool:
         _BUILTIN_ADMINISTRATORS, None, administrators, ctypes.byref(size)
     ):
         raise _last_error("CreateWellKnownSid")
-    member = wt.BOOL()
-    # A null token means "the calling thread's effective token".
-    if not _check_token_membership(None, administrators, ctypes.byref(member)):
-        raise _last_error("CheckTokenMembership")
-    return bool(member.value)
+    process_token = wt.HANDLE()
+    if not _open_process_token(
+        _get_current_process(),
+        _TOKEN_QUERY | _TOKEN_DUPLICATE,
+        ctypes.byref(process_token),
+    ):
+        raise _last_error("OpenProcessToken")
+    try:
+        # Membership can only be asked of an impersonation token, so the
+        # process's token is copied as one; nothing impersonates with it.
+        copy = wt.HANDLE()
+        if not _duplicate_token(
+            process_token, _SECURITY_IDENTIFICATION, ctypes.byref(copy)
+        ):
+            raise _last_error("DuplicateToken")
+        try:
+            member = wt.BOOL()
+            if not _check_token_membership(copy, administrators, ctypes.byref(member)):
+                raise _last_error("CheckTokenMembership")
+            return bool(member.value)
+        finally:
+            _close_handle(copy)
+    finally:
+        _close_handle(process_token)
 
 
 def this_process_has_machine_authority() -> bool:
