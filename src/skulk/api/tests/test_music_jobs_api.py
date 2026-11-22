@@ -635,6 +635,7 @@ async def test_music_place_dry_run_uses_ordered_preparation_resources(
     api: Any = object.__new__(API)
     api.state = SimpleNamespace(
         topology=Topology(), instances={}, node_network={}, downloads={},
+        model_engine_orders={},
     )
 
     def empty_downloads(_downloads: object) -> dict[str, object]:

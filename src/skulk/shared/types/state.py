@@ -11,7 +11,7 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 from skulk.shared.topology import Topology, TopologySnapshot
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.profiling import (
     NodeNetworkInfo,
     NodeThunderboltInfo,
@@ -144,6 +144,27 @@ class State(CamelCaseModel):
         """Restore the immutable trust set from JSON array wire values."""
         if isinstance(value, list):
             return tuple(cast("list[object]", value))
+        return value
+
+    model_engine_orders: Mapping[ModelId, tuple[str, ...]] = Field(
+        default={},
+        description=(
+            "Each person-set engine order, by model name: backend tags, most "
+            "preferred first. Placement consults a model's order ahead of its "
+            "card's default order. A model with no entry follows its card. "
+            "Set and cleared only by an explicit request, never by a launch."
+        ),
+    )
+
+    @field_validator("model_engine_orders", mode="before")
+    @classmethod
+    def _coerce_model_engine_orders(cls, value: object) -> object:
+        """Restore each order's immutable tuple from a JSON array."""
+        if isinstance(value, Mapping):
+            return {
+                key: tuple(cast("list[object]", item)) if isinstance(item, list) else item
+                for key, item in cast("Mapping[object, object]", value).items()
+            }
         return value
 
     last_event_applied_idx: int = Field(default=-1, ge=-1)

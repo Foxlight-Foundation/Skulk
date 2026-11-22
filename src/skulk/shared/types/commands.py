@@ -1,7 +1,7 @@
 from typing import Literal, final
 from uuid import UUID
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 
 from skulk.api.types import (
     ImageEditsTaskParams,
@@ -21,6 +21,7 @@ from skulk.shared.types.audio_separation import AudioSeparationTaskParams
 from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
+from skulk.shared.types.engine_orders import engine_order_problem
 from skulk.shared.types.music import MusicGenerationTaskParams
 from skulk.shared.types.music_edits import MusicEditingTaskParams
 from skulk.shared.types.native_music import NativeMusicDevice
@@ -220,6 +221,33 @@ class SetModelTrustApproval(BaseCommand):
     )
 
 
+class SetModelEngineOrder(BaseCommand):
+    """Ask the master to set or clear a person's engine order for one model.
+
+    The order is the person's own ranking of the engines that can run the
+    model. It is explicit: launching a model on an engine never sets it. The
+    master orders the change, every node saves it, and placement consults it
+    ahead of the model card's default order.
+    """
+
+    model_id: ModelId = Field(description="Name of the model the order is for.")
+    engine_order: list[str] | None = Field(
+        default=None,
+        description=(
+            "Backend tags, most preferred first, such as "
+            "``llama_server-vulkan``. ``None`` clears the model's order."
+        ),
+    )
+
+    @field_validator("engine_order")
+    @classmethod
+    def _require_well_formed_order(cls, value: list[str] | None) -> list[str] | None:
+        """Refuse a malformed order where the command is built."""
+        if value is not None and (problem := engine_order_problem(value)) is not None:
+            raise ValueError(problem)
+        return value
+
+
 class PlaceInstance(BaseCommand):
     model_card: ModelCard
     sharding: Sharding
@@ -256,6 +284,25 @@ class PlaceInstance(BaseCommand):
             "take the fleet's served context default."
         ),
     )
+    engine_order: list[str] | None = Field(
+        default=None,
+        description=(
+            "An engine order for this launch only: backend tags, most "
+            "preferred first. It is consulted ahead of the person's order for "
+            "the model and the card's default, is stamped on the instance so "
+            "repairs keep it, and sets no standing order."
+        ),
+    )
+
+    @field_validator("engine_order")
+    @classmethod
+    def _require_well_formed_launch_order(
+        cls, value: list[str] | None
+    ) -> list[str] | None:
+        """Refuse a malformed order where the command is built."""
+        if value is not None and (problem := engine_order_problem(value)) is not None:
+            raise ValueError(problem)
+        return value
 
 
 class CreateInstance(BaseCommand):
@@ -466,6 +513,7 @@ Command = (
     | RealtimeAudioTranscription
     | SetTracingEnabled
     | SetModelTrustApproval
+    | SetModelEngineOrder
     | PlaceInstance
     | CreateInstance
     | DeleteInstance

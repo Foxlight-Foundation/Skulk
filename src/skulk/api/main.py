@@ -269,6 +269,8 @@ from skulk.api.types import (
     InstanceImageGenerationRequest,
     LicenseSection,
     ModalitiesCapabilitySection,
+    ModelEngineOrder,
+    ModelEngineOrdersResponse,
     ModelList,
     ModelListModel,
     ModelRequirements,
@@ -292,6 +294,7 @@ from skulk.api.types import (
     ResolvedModelCapabilities,
     RuntimeCapabilitySection,
     SeparationCapabilitySection,
+    SetModelEngineOrderRequest,
     StartDownloadParams,
     StartDownloadResponse,
     StoreDownloadRequest,
@@ -576,6 +579,7 @@ from skulk.shared.types.commands import (
     ProposeStewardAction,
     RealtimeAudioTranscription,
     RetryDownload,
+    SetModelEngineOrder,
     SetModelTrustApproval,
     SetTracingEnabled,
     SpeechSynthesis,
@@ -616,6 +620,11 @@ from skulk.shared.types.diagnostics import (
     RunnerTaskDiagnostics,
     TelemetryPlaneDiagnostics,
     VisionMediaIngressDiagnostics,
+)
+from skulk.shared.types.engine_orders import (
+    MAX_MODEL_ENGINE_ORDERS,
+    engine_order_level,
+    engine_order_problem,
 )
 from skulk.shared.types.events import (
     AceStepPreparationCompleted,
@@ -1462,6 +1471,10 @@ _TERMINAL_TASK_STATUSES: frozenset[task_types.TaskStatus] = frozenset(
         task_types.TaskStatus.Cancelled,
     }
 )
+
+# How long an engine order change may take to appear in replicated State
+# before the caller is told it is unconfirmed.
+_ENGINE_ORDER_CONFIRM_SECONDS: Final = 10.0
 
 # How long POST /place_instance waits for node memory info to finish
 # gossiping before giving up with 503. Covers the window between cluster
@@ -2845,6 +2858,46 @@ class API:
             summary="Delete a running instance",
             description="Send a deletion command for the exact instance ID and return its acknowledgement. Unknown instances return 404; the maintained Steward placement returns 409 while intelligent fabric is enabled.",
         )(self.delete_instance)
+        self.app.get(
+            "/models/engine-orders",
+            tags=["Models"],
+            summary="List person-set engine orders",
+            description=(
+                "Return every model that has an engine order of its own, with "
+                "that order and the model card's default order. When several "
+                "engines can run a model, placement ranks them by the person-set "
+                "order, then the card's default order, then the built-in "
+                "fallback (built-in engines before installed engine packages). "
+                "An order only ranks: entries a node does not have are skipped, "
+                "and it never makes a model impossible to launch."
+            ),
+        )(self.list_model_engine_orders)
+        self.app.put(
+            "/models/engine-order",
+            tags=["Models"],
+            summary="Set a model's engine order",
+            description=(
+                "Set the person's own engine order for one model in the catalog "
+                "and share it with every node. The order replaces any earlier "
+                "one for that model and takes effect at the next launch; running "
+                "instances are not moved. Launching a model never sets an order. "
+                "Returns 404 for a model the catalog does not hold, 422 for a "
+                "malformed order, 409 when the cluster already holds the most "
+                "orders it keeps, and 503 when the change was sent but not "
+                "confirmed in time."
+            ),
+        )(self.set_model_engine_order)
+        self.app.delete(
+            "/models/engine-order",
+            tags=["Models"],
+            summary="Clear a model's engine order",
+            description=(
+                "Remove the person-set engine order for one model, so its card's "
+                "default order decides again. Clearing a model that has no order "
+                "succeeds. Returns 503 when the change was sent but not confirmed "
+                "in time."
+            ),
+        )(self.clear_model_engine_order)
         self.app.get(
             "/models/requirements",
             tags=["Models"],
@@ -4352,6 +4405,7 @@ class API:
             ),
             excluded_nodes=list(payload.excluded_nodes),
             requested_context_tokens=payload.context_tokens,
+            engine_order=payload.engine_order,
         )
 
         # Dry-run the placement against this node's replicated state before
@@ -4397,6 +4451,7 @@ class API:
                         node_memory=self._telemetry_view.node_memory,
                     ),
                     approved_remote_code_identities=self._cluster_remote_code_approvals(),
+                    model_engine_orders=self.state.model_engine_orders,
                 )
                 break
             except PlacementInfoPendingError as exc:
@@ -4420,9 +4475,41 @@ class API:
                     headers={"X-Skulk-Placement-Failure": "no_valid_placement"},
                 ) from exc
 
+        instance_id = InstanceId(str(command.command_id))
+        if payload.engine_order is not None:
+            # A launch that names its engines is a trial of them. Starting it
+            # on some other engine would answer a question nobody asked.
+            trial = planned.get(instance_id)
+            chosen = sorted(
+                {
+                    shard.resolved_backend
+                    for shard in (
+                        trial.shard_assignments.runner_to_shard.values()
+                        if trial is not None
+                        else ()
+                    )
+                    if shard.resolved_backend is not None
+                    and engine_order_level(
+                        shard.resolved_backend,
+                        card_order=(),
+                        launch_order=payload.engine_order,
+                    )
+                    != "launch"
+                }
+            )
+            if chosen:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "None of the engines asked for can run this model "
+                        f"here right now; it would start on {', '.join(chosen)} "
+                        "instead. Nothing was launched."
+                    ),
+                    headers={"X-Skulk-Placement-Failure": "no_valid_placement"},
+                )
+
         await self._send(command)
 
-        instance_id = InstanceId(str(command.command_id))
         # The master places the command itself; this node's dry run is the same
         # algorithm over the same replicated state, so it is what a quick launch
         # without a preview can show about an engine install.
@@ -4575,6 +4662,7 @@ class API:
                     node_memory=self._telemetry_view.node_memory,
                 ),
                 approved_remote_code_identities=self._cluster_remote_code_approvals(),
+                model_engine_orders=self.state.model_engine_orders,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4790,6 +4878,7 @@ class API:
                     node_vram=placement_node_vram,
                     unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
                     approved_remote_code_identities=self._cluster_remote_code_approvals(),
+                    model_engine_orders=self.state.model_engine_orders,
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:
@@ -4951,6 +5040,7 @@ class API:
                             node_vram=placement_node_vram,
                             unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
                             approved_remote_code_identities=self._cluster_remote_code_approvals(),
+                            model_engine_orders=self.state.model_engine_orders,
                         )
                     except ValueError:
                         continue
@@ -10932,6 +11022,7 @@ class API:
             network=self.state.node_network, telemetry=self._telemetry_view,
             runners=self.state.runners,
             excluded_nodes=set(excluded_node_ids or ()),
+            model_engine_orders=self.state.model_engine_orders,
         )
 
     async def get_model_requirements(
@@ -16736,6 +16827,121 @@ class API:
                 )
             response.raise_for_status()
             return parse_peer_node_diagnostics(cast(object, response.json()))
+
+    def _model_engine_order_view(self, model_id: ModelId) -> ModelEngineOrder:
+        """Describe one model's person-set order beside its card's default."""
+        order = self.state.model_engine_orders.get(model_id)
+        card = get_card(model_id)
+        return ModelEngineOrder(
+            model_id=str(model_id),
+            engine_order=list(order) if order else None,
+            card_engine_order=(
+                list(card.placement.backend_preference) if card is not None else []
+            ),
+        )
+
+    async def list_model_engine_orders(self) -> ModelEngineOrdersResponse:
+        """Return every person-set engine order the cluster holds.
+
+        Returns:
+            One entry per model with an order of its own, sorted by model name.
+        """
+        return ModelEngineOrdersResponse(
+            orders=[
+                self._model_engine_order_view(model_id)
+                for model_id in sorted(self.state.model_engine_orders)
+            ]
+        )
+
+    async def _change_model_engine_order(
+        self, model_id: ModelId, order: tuple[str, ...] | None
+    ) -> ModelEngineOrder:
+        """Send one engine order change and wait for the cluster to hold it.
+
+        Args:
+            model_id: Name of the model.
+            order: The new order, or ``None`` to clear it.
+
+        Returns:
+            The model's order as replicated State now holds it.
+
+        Raises:
+            HTTPException: 503 when the change is not confirmed in time.
+        """
+        await self._send(
+            SetModelEngineOrder(
+                model_id=model_id,
+                engine_order=list(order) if order is not None else None,
+            )
+        )
+        deadline = time.monotonic() + _ENGINE_ORDER_CONFIRM_SECONDS
+        while self.state.model_engine_orders.get(model_id) != order:
+            if time.monotonic() >= deadline:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "The engine order change was sent but the cluster has "
+                        "not confirmed it yet. Read /models/engine-orders to see "
+                        "what is in force before trying again."
+                    ),
+                )
+            await anyio.sleep(0.05)
+        return self._model_engine_order_view(model_id)
+
+    async def set_model_engine_order(
+        self, payload: SetModelEngineOrderRequest
+    ) -> ModelEngineOrder:
+        """Set a person's engine order for one catalog model.
+
+        Args:
+            payload: The model and its order, most preferred first.
+
+        Returns:
+            The order now in force for the model.
+
+        Raises:
+            HTTPException: 404 for a model the catalog does not hold, 422 for
+                a malformed order, 409 when no further model may hold an
+                order, 503 when the change is not confirmed in time.
+        """
+        model_id = ModelId(payload.model_id)
+        await self._load_authorized_model_card(model_id)
+        if (problem := engine_order_problem(payload.engine_order)) is not None:
+            raise HTTPException(status_code=422, detail=problem)
+        if (
+            model_id not in self.state.model_engine_orders
+            and len(self.state.model_engine_orders) >= MAX_MODEL_ENGINE_ORDERS
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"The cluster already holds an engine order for "
+                    f"{MAX_MODEL_ENGINE_ORDERS} models. Clear one first."
+                ),
+            )
+        return await self._change_model_engine_order(
+            model_id, tuple(payload.engine_order)
+        )
+
+    async def clear_model_engine_order(
+        self,
+        model_id: Annotated[str, Query(min_length=1, max_length=512)],
+    ) -> ModelEngineOrder:
+        """Clear the person-set engine order for one model.
+
+        The model need not be in the catalog, so an order left behind by a
+        model that was removed can still be cleared.
+
+        Args:
+            model_id: Name of the model.
+
+        Returns:
+            The model's order, now unset.
+
+        Raises:
+            HTTPException: 503 when the change is not confirmed in time.
+        """
+        return await self._change_model_engine_order(ModelId(model_id), None)
 
     async def get_tracing_state(self) -> TracingStateResponse:
         return TracingStateResponse(enabled=self.state.tracing_enabled)

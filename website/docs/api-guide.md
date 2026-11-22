@@ -2736,6 +2736,70 @@ Steward's `assess_inference` tool reads this same contract with bounded details
 and explicit coverage. Model selection displays this assessment; the coarse
 discovery Burst chip remains only a browsing hint.
 
+### Engine order for a model
+
+Several engines can often run the same model. Placement ranks them by the
+first of these that has an answer for a node:
+
+1. the order a person set for that model, described here;
+2. the model card's default order (`placement.backend_preference`);
+3. the built-in fallback: built-in engines first, installed engine packages
+   after them.
+
+An order is a list of backend tags, most preferred first. Each entry is an
+engine name, optionally followed by its hardware, such as
+`llama_server-vulkan`; an engine name on its own accepts whichever hardware a
+node has. An order only ranks. Entries a node does not have are skipped, and
+where a person's order names nothing a node has, the card's default decides
+for that node. An order therefore never makes a model impossible to launch.
+
+An order is set only by these routes. Launching a model, on any engine, never
+sets one. It is kept by model name rather than on the model card, shared with
+every node, and saved on each node so it survives a restart. It takes effect
+at the next launch; running instances are not moved.
+
+**GET** `/models/engine-orders`
+
+Returns `orders`, one entry per model that has an order of its own, sorted by
+model name. Each entry has `modelId`, `engineOrder` and `cardEngineOrder` (the
+card's default order, empty when the card has none or the model is no longer
+in the catalog).
+
+**PUT** `/models/engine-order`
+
+| Field | Required | Behavior |
+|---|---|---|
+| `modelId` | Yes | Exact model name in the catalog, 1 to 512 characters. An unknown name returns 404. |
+| `engineOrder` | Yes | 1 to 16 distinct backend tags, most preferred first. A malformed list returns 422. |
+
+```bash
+curl -X PUT http://localhost:52415/models/engine-order \
+  -H 'Content-Type: application/json' \
+  -d '{"modelId": "organization/model", "engineOrder": ["llama_server-vulkan", "llama_cpp-vulkan"]}'
+```
+
+The new order replaces any earlier one for the model. The response is the
+model's entry as the cluster now holds it. The cluster keeps an order for at
+most 512 models; a further model returns 409 until one is cleared. If the
+change is sent but the cluster does not confirm it within ten seconds, the
+route returns 503: read `/models/engine-orders` to see what is in force before
+trying again.
+
+**DELETE** `/models/engine-order`
+
+| Parameter | Required | Behavior |
+|---|---|---|
+| `model_id` | Yes | Model name, 1 to 512 characters. It need not be in the catalog, so an order left by a removed model can be cleared. |
+
+```bash
+curl -X DELETE --get http://localhost:52415/models/engine-order \
+  --data-urlencode 'model_id=organization/model'
+```
+
+Clears the model's order, so its card's default decides again. Clearing a
+model that has no order succeeds. The response is the model's entry with a
+null `engineOrder`. An unconfirmed change returns 503, as for the PUT.
+
 ### Read model capacity requirements
 
 **GET** `/models/requirements`
@@ -3104,6 +3168,7 @@ curl -X POST http://localhost:52415/place_instance \
 | `min_nodes` | Minimum nodes required for the placement |
 | `context_tokens` | Optional context window for this placement, 256 to 1,048,576 tokens. The placer honors it exactly up to the largest window the chosen nodes hold (the preview's `max_context_tokens`) and answers **400** naming that maximum for a larger request; it is never silently lowered. Repair re-placements of the instance keep the same request. When omitted, llama-server, in-process llama.cpp and vLLM placements take the fleet default `inference.served_context_tokens` (32768 unless changed in Settings), because those engines reserve the whole window's KV memory at load; MLX placements keep the full memory fit, since MLX grows its cache per request. |
 | `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected (exclusion is per-placement, not cluster-wide), and automatic repair re-placements of this instance (memory refusal, download failure) keep honoring the same exclusions. Default: `[]`. Note: node IDs are per-session, so they change when a cluster session restarts. |
+| `engine_order` | Optional. Engines to try for this launch only: 1 to 16 backend tags, most preferred first, such as `llama_server-vulkan`. They are consulted ahead of the model's person-set engine order (see [Engine order for a model](#engine-order-for-a-model)) and the card's default. This sets no standing order; it is how a person tries an engine before settling on one. Automatic repair re-placements of the instance keep the same engines. A launch that cannot run on any listed engine answers **409** and starts nothing, rather than starting on a different engine. A launch brought back after every node restarted, and one made by an approved Steward proposal, follow the standing order instead. |
 
 The placement is validated against the current cluster state **before** the
 command is forwarded, so an impossible placement fails at the API instead of

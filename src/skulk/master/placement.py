@@ -79,6 +79,10 @@ from skulk.shared.types.commands import (
     PlaceInstance,
 )
 from skulk.shared.types.common import NodeId
+from skulk.shared.types.engine_orders import (
+    layered_engine_order,
+    model_engine_order,
+)
 from skulk.shared.types.events import (
     Event,
     InstanceCreated,
@@ -254,6 +258,7 @@ def add_instance_to_placements(
     approved_remote_code_identities: AbstractSet[str] | None = None,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     native_music_commitments: Mapping[InstanceId, Instance] | None = None,
+    model_engine_orders: Mapping[ModelId, Sequence[str]] | None = None,
 ) -> Mapping[InstanceId, Instance]:
     """Validate and add one caller-specified exact instance placement.
 
@@ -269,6 +274,9 @@ def add_instance_to_placements(
         node_resources: Advertised engines used to resolve unstamped exact shards.
         native_music_commitments: Complete deduplicated pending and committed
             native-admission owners; generic node_memory is already reserved.
+        model_engine_orders: Each person-set engine order by model name. It
+            ranks the engine for a shard that names none; a stamped shard
+            keeps the engine it names.
 
     Returns:
         Existing placements plus the validated, memory-stamped instance.
@@ -290,6 +298,7 @@ def add_instance_to_placements(
     # still unknown, so a transient missing reading yields the card guard rather
     # than None (review catch on #292).
     assignments = command.instance.shard_assignments
+    launch_order = command.instance.engine_order or None
     require_instance_model_card_identity(command.instance)
     music_instance = any(
         shard.model_card.music is not None
@@ -346,6 +355,7 @@ def add_instance_to_placements(
                     current_instances if native_music_commitments is None else native_music_commitments,
                     explicit_backend=shard.resolved_backend,
                     node_is_unified=node_id in (unified_memory_gpu_nodes or ()) or None,
+                    engine_order=_engine_order(shard.model_card, model_engine_orders, launch_order),
                 )
                 build = "ace_step@sha256:" + assessment.policy.payload_sha256
                 if shard.resolved_engine_build is not None and shard.resolved_engine_build != build:
@@ -363,7 +373,7 @@ def add_instance_to_placements(
                     raise PlacementInfoPendingError("Verified native separation backend telemetry is required before placement")
                 ready = _card_platform_backends(shard.model_card, resources)
                 backend = shard.resolved_backend or resolve_node_backend(
-                    ready, shard.model_card.placement.backend_preference, resources.backends
+                    ready, _engine_order(shard.model_card, model_engine_orders, launch_order), resources.backends
                 )
                 if backend is None or backend not in ready:
                     raise PlacementInfoPendingError("Prepare a compatible native separation package before placement")
@@ -432,7 +442,7 @@ def add_instance_to_placements(
                 continue
             backend = resolve_node_backend(
                 _card_platform_backends(shard.model_card, resources),
-                shard.model_card.placement.backend_preference,
+                _engine_order(shard.model_card, model_engine_orders, launch_order),
                 resources.backends,
             )
             if backend is None:
@@ -575,13 +585,16 @@ def _assess_native_music_node(
     *,
     explicit_backend: str | None = None,
     node_is_unified: bool | None = None,
+    engine_order: tuple[str, ...] | None = None,
 ) -> NativeMusicPlacementAssessment:
     """Choose a genuinely ready native lane with complete shared fit policy.
 
     Installed package and actual memory are technical requirements; empirical
     qualification is never a hardware permission list. All candidates use the
     raw native observation rather than generic already-reserved pool inputs.
+    ``engine_order`` ranks the ready lanes; without one the card's order does.
     """
+    preference = _engine_order(card) if engine_order is None else engine_order
     if resources is None or resources.participation != "full":
         raise PlacementInfoPendingError("Prepare and publish native music resources before placement")
     ready = _card_platform_backends(card, resources) & resources.backends - resources.on_demand_backends
@@ -592,7 +605,7 @@ def _assess_native_music_node(
     reasons: list[str] = []
     refresh_needed = False
     while ready:
-        backend = resolve_node_backend(ready, card.placement.backend_preference, ready)
+        backend = resolve_node_backend(ready, preference, ready)
         assert backend is not None
         try:
             assessed = assess_native_music_placement(
@@ -795,10 +808,31 @@ def _cycle_backend_preference_score(
     return 0
 
 
+def _engine_order(
+    card: ModelCard,
+    model_engine_orders: Mapping[ModelId, Sequence[str]] | None = None,
+    launch_order: Sequence[str] | None = None,
+) -> tuple[str, ...]:
+    """The order that ranks a card's engines for one placement.
+
+    An order given for this launch comes first, then the person's order for
+    the model, then the card's own default. Every placement read of the
+    card's preference goes through here, so eligibility scoring, memory
+    admission and the backend stamped on each shard rank engines the same
+    way. With no order given this is exactly the card's preference.
+    """
+    return layered_engine_order(
+        card.placement.backend_preference,
+        model_engine_order(model_engine_orders, card.model_id),
+        launch_order,
+    )
+
+
 def _cycle_built_in_engine_score(
     cycle: Cycle,
     card: ModelCard,
     node_resources: Mapping[NodeId, NodeResources],
+    preference: tuple[str, ...],
 ) -> int:
     """Prefer a cycle that does not fall back to an installed engine package.
 
@@ -808,11 +842,10 @@ def _cycle_built_in_engine_score(
     Such a cycle scores ``0`` and every other cycle ``1``, so a model goes to
     a package-only node when no node with a built-in engine can take it, and
     installing a package never draws a model away from one that can. A
-    package the card's own preference names was chosen by the card's author
-    and scores ``1``. A cluster with no package scores every cycle ``1``, which
-    leaves the ranking as it was.
+    package that ``preference`` names was chosen, by the person or by the
+    card's author, and scores ``1``. A cluster with no package scores every
+    cycle ``1``, which leaves the ranking as it was.
     """
-    preference = card.placement.backend_preference
     for node_id in cycle:
         resources = node_resources.get(node_id)
         if resources is None:
@@ -1203,7 +1236,14 @@ def place_instance(
     served_context_default: int | None = None,
     node_install_ids: Mapping[NodeId, UUID] | None = None,
     native_music_commitments: Mapping[InstanceId, Instance] | None = None,
+    model_engine_orders: Mapping[ModelId, Sequence[str]] | None = None,
 ) -> dict[InstanceId, Instance]:
+    # One order ranks this placement's engines everywhere below: an order given
+    # for this launch, then the person's order for the model, then the card's
+    # default.
+    backend_preference = _engine_order(
+        command.model_card, model_engine_orders, command.engine_order
+    )
     native_music = command.model_card.music is not None and command.model_card.music.native is not None
     if native_music and command.sharding != Sharding.Pipeline:
         raise PlacementError("Native music requires single-host pipeline placement")
@@ -1559,6 +1599,7 @@ def place_instance(
                     command.model_card, node, resolved_node_resources.get(node),
                     current_instances if native_music_commitments is None else native_music_commitments,
                     node_is_unified=node in (unified_memory_gpu_nodes or ()) or None,
+                    engine_order=backend_preference,
                 )
             except PlacementInfoPendingError as error:
                 memory_diagnostics.pending_info_node_ids.append(node)
@@ -1584,7 +1625,7 @@ def place_instance(
             resolved_backends={
                 node_id: resolve_node_backend(
                     _card_platform_backends(command.model_card, resources),
-                    command.model_card.placement.backend_preference,
+                    backend_preference,
                     resources.backends,
                 )
                 for node_id in standard_cycle.node_ids
@@ -1767,7 +1808,6 @@ def place_instance(
     # package nobody chose, then download locality, then an engine that is
     # already installed (rather than installed on demand), then free memory
     # decide.
-    backend_preference = command.model_card.placement.backend_preference
     selected_cycle = max(
         candidate_cycles,
         key=lambda cycle: (
@@ -1775,7 +1815,7 @@ def place_instance(
                 cycle, resolved_node_resources, backend_preference
             ),
             _cycle_built_in_engine_score(
-                cycle, command.model_card, resolved_node_resources
+                cycle, command.model_card, resolved_node_resources, backend_preference
             ),
             _cycle_download_score(
                 cycle, command.model_card.model_id, resolved_download_status
@@ -2041,6 +2081,7 @@ def place_instance(
             excluded_nodes=stamped_exclusions_list,
             excluded_install_ids=sorted(command.excluded_install_ids),
             system_role=command.system_role,
+            engine_order=list(command.engine_order or ()),
             driver_node=driver_node,
             donor_endpoints=donor_endpoints,
         )
@@ -2091,6 +2132,7 @@ def place_instance(
                 excluded_nodes=stamped_exclusions_list,
                 excluded_install_ids=sorted(command.excluded_install_ids),
                 system_role=command.system_role,
+                engine_order=list(command.engine_order or ()),
                 jaccl_devices=mlx_jaccl_devices,
                 jaccl_coordinators=mlx_jaccl_coordinators,
             )
@@ -2112,6 +2154,7 @@ def place_instance(
                 excluded_nodes=stamped_exclusions_list,
                 excluded_install_ids=sorted(command.excluded_install_ids),
                 system_role=command.system_role,
+                engine_order=list(command.engine_order or ()),
                 hosts_by_node=hosts_by_node,
                 ephemeral_port=ephemeral_port,
             )
@@ -2181,6 +2224,8 @@ def fallback_command_for_refused_instance(
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,
         requested_context_tokens=instance.requested_context_tokens,
+        # A launch that picked its engine keeps the pick through a repair.
+        engine_order=list(instance.engine_order) or None,
     )
 
 
@@ -2218,6 +2263,8 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,
         requested_context_tokens=instance.requested_context_tokens,
+        # A launch that picked its engine keeps the pick through a repair.
+        engine_order=list(instance.engine_order) or None,
     )
 
 
@@ -2256,6 +2303,8 @@ def replacement_command_for_download_failed_instance(
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,
         requested_context_tokens=instance.requested_context_tokens,
+        # A launch that picked its engine keeps the pick through a repair.
+        engine_order=list(instance.engine_order) or None,
     )
 
 

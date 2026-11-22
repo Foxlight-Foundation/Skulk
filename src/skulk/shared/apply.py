@@ -21,6 +21,7 @@ from skulk.shared.types.events import (
     InstanceCreated,
     InstanceDeleted,
     InstanceFailureRecorded,
+    ModelEngineOrderChanged,
     ModelTrustApprovalChanged,
     NodeDownloadProgress,
     NodeGatheredInfo,
@@ -137,6 +138,8 @@ def event_apply(event: Event, state: State) -> State:
             return apply_topology_edge_deleted(event, state)
         case TracingStateChanged():
             return state.model_copy(update={"tracing_enabled": event.enabled})
+        case ModelEngineOrderChanged():
+            return apply_model_engine_order_changed(event, state)
         case ModelTrustApprovalChanged():
             approvals = set(state.model_trust_approved_remote_code_identities)
             if event.approved:
@@ -446,6 +449,22 @@ def apply_runner_status_updated(event: RunnerStatusUpdated, state: State) -> Sta
         event.runner_id: event.runner_status,
     }
     return state.model_copy(update={"runners": new_runners})
+
+
+def apply_model_engine_order_changed(
+    event: ModelEngineOrderChanged, state: State
+) -> State:
+    """Set or clear one model's person-set engine order.
+
+    An empty order is treated as a clear, so State never holds a model with
+    an order that ranks nothing.
+    """
+    orders = dict(state.model_engine_orders)
+    if event.engine_order:
+        orders[event.model_id] = tuple(event.engine_order)
+    else:
+        orders.pop(event.model_id, None)
+    return state.model_copy(update={"model_engine_orders": orders})
 
 
 def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:

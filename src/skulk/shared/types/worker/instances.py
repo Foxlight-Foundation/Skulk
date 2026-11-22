@@ -14,6 +14,7 @@ from skulk.shared.models.memory_estimate import (
 )
 from skulk.shared.models.model_cards import ModelTask
 from skulk.shared.types.common import Host, Id, ModelId, NodeId
+from skulk.shared.types.engine_orders import engine_order_problem
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments, ShardMetadata
 from skulk.utils.pydantic_ext import CamelCaseModel, FrozenModel, TaggedModel
 
@@ -209,6 +210,25 @@ class BaseInstance(TaggedModel):
             "the operator chose rather than falling back to the fleet default."
         ),
     )
+
+    engine_order: list[str] = Field(
+        default_factory=list,
+        description=(
+            "An engine order given for this launch only: backend tags, most "
+            "preferred first. Placement consulted it ahead of the person's "
+            "order for the model and the card's default. Repair re-placements "
+            "carry it so a trial launch stays on the engine it was started on. "
+            "Empty for an ordinary launch and for instances from older logs."
+        ),
+    )
+
+    @field_validator("engine_order")
+    @classmethod
+    def _require_well_formed_engine_order(cls, value: list[str]) -> list[str]:
+        """Refuse a malformed order on an instance a caller supplies whole."""
+        if value and (problem := engine_order_problem(value)) is not None:
+            raise ValueError(problem)
+        return value
 
     def shard(self, runner_id: RunnerId) -> ShardMetadata | None:
         return self.shard_assignments.runner_to_shard.get(runner_id, None)

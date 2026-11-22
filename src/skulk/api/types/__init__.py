@@ -69,6 +69,8 @@ from .api import LicenseSection as LicenseSection
 from .api import Logprobs as Logprobs
 from .api import LogprobsContentItem as LogprobsContentItem
 from .api import ModalitiesCapabilitySection as ModalitiesCapabilitySection
+from .api import ModelEngineOrder as ModelEngineOrder
+from .api import ModelEngineOrdersResponse as ModelEngineOrdersResponse
 from .api import ModelList as ModelList
 from .api import ModelListModel as ModelListModel
 from .api import ModelRequirements as ModelRequirements
@@ -95,6 +97,7 @@ from .api import RemoteCodeApprovalView as RemoteCodeApprovalView
 from .api import ResolvedModelCapabilities as ResolvedModelCapabilities
 from .api import RuntimeCapabilitySection as RuntimeCapabilitySection
 from .api import SeparationCapabilitySection as SeparationCapabilitySection
+from .api import SetModelEngineOrderRequest as SetModelEngineOrderRequest
 from .api import StartDownloadParams as StartDownloadParams
 from .api import StartDownloadResponse as StartDownloadResponse
 from .api import StoreDownloadRequest as StoreDownloadRequest

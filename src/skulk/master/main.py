@@ -105,6 +105,7 @@ from skulk.shared.types.commands import (
     RefuseInstancePlacement,
     RequestEventLog,
     SendInputChunk,
+    SetModelEngineOrder,
     SetModelTrustApproval,
     SetTracingEnabled,
     SpeechSynthesis,
@@ -117,6 +118,7 @@ from skulk.shared.types.commands import (
     VideoGeneration,
 )
 from skulk.shared.types.common import CommandId, NodeId, SessionId, SystemId
+from skulk.shared.types.engine_orders import MAX_MODEL_ENGINE_ORDERS
 from skulk.shared.types.events import (
     AceStepPreparationCompleted,
     AceStepPreparationRequested,
@@ -133,6 +135,7 @@ from skulk.shared.types.events import (
     InstanceDeleted,
     InstanceFailureRecorded,
     LocalForwarderEvent,
+    ModelEngineOrderChanged,
     ModelTrustApprovalChanged,
     NodeDownloadProgress,
     NodeGatheredInfo,
@@ -1286,6 +1289,7 @@ class Master:
         telemetry_view: TelemetryView | None = None,
         state_sync_store_http_host: str | None = None,
         initial_model_trust_identities: tuple[str, ...] = (),
+        initial_model_engine_orders: Mapping[ModelId, Sequence[str]] | None = None,
         restart_recovery_record: ClusterIntentRecord | None = None,
         restart_recovery_enabled: bool = False,
         restart_recovery_fetcher: RestartRecordFetcher = fetch_peer_record,
@@ -1312,6 +1316,9 @@ class Master:
             telemetry_view: Node-owned live resources and liveness observations.
             state_sync_store_http_host: Optional store host included in snapshots.
             initial_model_trust_identities: Initially approved remote-code identities.
+            initial_model_engine_orders: Person-set engine orders this node
+                saved, for a session that starts with no replicated view to
+                carry them. ``None`` keeps whatever ``initial_state`` carries.
             restart_recovery_record: Optional durable local restart record.
             restart_recovery_enabled: Whether cold-start recovery is enabled.
             restart_recovery_fetcher: Effect used to retrieve peer restart records.
@@ -1355,6 +1362,29 @@ class Master:
         # back-to-back mutations cannot each read the same stale State snapshot
         # and accidentally resurrect a revocation or discard an approval.
         self._model_trust_approvals = set(initial_trust_identities)
+        # Person-set engine orders, by model name. Like trust decisions, the
+        # master keeps its own ordered copy so back-to-back changes do not each
+        # read a State snapshot that predates the other's indexed echo. A
+        # session that carries a replicated view keeps that view's orders; one
+        # that starts without a view takes the orders this node saved.
+        starting_engine_orders: Mapping[ModelId, Sequence[str]] = (
+            initial_model_engine_orders
+            if initial_model_engine_orders is not None
+            else initial_state.model_engine_orders
+            if initial_state is not None
+            else {}
+        )
+        self._model_engine_orders: dict[ModelId, tuple[str, ...]] = {
+            model_id: tuple(order)
+            for model_id, order in starting_engine_orders.items()
+            if order
+        }
+        if initial_state is not None and initial_model_engine_orders is not None:
+            # A carried view that never applied an event is empty; index the
+            # saved orders with it so no node replaces its saved copy with none.
+            initial_state = initial_state.model_copy(
+                update={"model_engine_orders": dict(self._model_engine_orders)}
+            )
         # Custom-card events are pass-through State events, so authoritative
         # ownership races need a master-local ordered view. Seed aliases lazily
         # from this node's converged card cache, then update the view before the
@@ -1469,6 +1499,7 @@ class Master:
                 sorted(self._model_trust_approvals)
             ),
             steward_action_proposals=restored_proposals,
+            model_engine_orders=dict(self._model_engine_orders),
             # Every node keeps its record untouched until this session has
             # restored from it; RestartRecoveryCompleted clears the flag.
             restart_recovery_pending=cold_start,
@@ -1486,7 +1517,7 @@ class Master:
             initial_state
             if initial_state is not None
             else self.state
-            if self._model_trust_approvals or cold_start
+            if self._model_trust_approvals or cold_start or self._model_engine_orders
             else None
         )
         self._started_monotonic = time.monotonic()
@@ -1785,6 +1816,7 @@ class Master:
                 node_memory=credited_memory,
             ),
             approved_remote_code_identities=self._model_trust_approvals,
+            model_engine_orders=self._model_engine_orders,
             served_context_default=self._served_context_default(),
             native_music_commitments=self._native_music_placement_commitments(command, self.state.instances),
         )
@@ -1811,6 +1843,7 @@ class Master:
                 node_memory=credited_memory,
             ),
             approved_remote_code_identities=self._model_trust_approvals,
+            model_engine_orders=self._model_engine_orders,
             node_resources=resources,
             native_music_commitments=self._native_music_placement_commitments(command, self.state.instances),
         )
@@ -1885,6 +1918,43 @@ class Master:
         ):
             return effective_card
         return ordered_card
+
+    def _order_model_engine_order(
+        self, command: SetModelEngineOrder
+    ) -> ModelEngineOrderChanged | None:
+        """Order one change to a model's person-set engine order.
+
+        A change that leaves the order as it is still answers its command, so
+        the caller is not left waiting. A new model is refused once
+        ``MAX_MODEL_ENGINE_ORDERS`` models hold an order; changing or clearing
+        an existing one is always accepted.
+
+        Args:
+            command: The set or clear request.
+
+        Returns:
+            The event to index, or ``None`` when the change is refused.
+        """
+        order = tuple(command.engine_order) if command.engine_order else None
+        if (
+            order is not None
+            and command.model_id not in self._model_engine_orders
+            and len(self._model_engine_orders) >= MAX_MODEL_ENGINE_ORDERS
+        ):
+            logger.warning(
+                "Rejected an engine order: the cluster already holds an order "
+                f"for {MAX_MODEL_ENGINE_ORDERS} models (model_id={command.model_id})"
+            )
+            return None
+        if order is None:
+            self._model_engine_orders.pop(command.model_id, None)
+        else:
+            self._model_engine_orders[command.model_id] = order
+        return ModelEngineOrderChanged(
+            model_id=command.model_id,
+            engine_order=list(order) if order is not None else None,
+            mutation_command_id=command.command_id,
+        )
 
     def _order_custom_model_card_add(
         self, command: AddCustomModelCard
@@ -2280,6 +2350,7 @@ class Master:
                 node_memory=credited_memory,
             ),
             approved_remote_code_identities=self._model_trust_approvals,
+            model_engine_orders=self._model_engine_orders,
             served_context_default=self._served_context_default(),
             native_music_commitments=self._native_music_placement_commitments(command, current_instances),
         )
@@ -4039,6 +4110,11 @@ class Master:
                                     approved=command.approved,
                                 )
                             )
+                        case SetModelEngineOrder():
+                            if (
+                                event := self._order_model_engine_order(command)
+                            ) is not None:
+                                generated_events.append(event)
                         case ProposeStewardAction():
                             proposal = command.proposal
                             now = datetime.now(tz=timezone.utc)
@@ -4361,6 +4437,7 @@ class Master:
                                             node_memory=repair_memory,
                                         ),
                                         approved_remote_code_identities=self._model_trust_approvals,
+                                        model_engine_orders=self._model_engine_orders,
                                         served_context_default=self._served_context_default(),
                                         native_music_commitments=self._native_music_placement_commitments(replace_command, after_delete),
                                     )
@@ -4428,6 +4505,7 @@ class Master:
                                                 node_memory=repair_memory,
                                             ),
                                             approved_remote_code_identities=self._model_trust_approvals,
+                                            model_engine_orders=self._model_engine_orders,
                                             served_context_default=self._served_context_default(),
                                             native_music_commitments=self._native_music_placement_commitments(fallback, after_delete),
                                         )
@@ -4902,6 +4980,7 @@ class Master:
                         node_memory=repair_memory,
                     ),
                     approved_remote_code_identities=self._model_trust_approvals,
+                    model_engine_orders=self._model_engine_orders,
                     served_context_default=self._served_context_default(),
                     native_music_commitments=self._native_music_placement_commitments(replace_command, after_delete),
                 )
@@ -5132,6 +5211,7 @@ class Master:
                 node_memory=placement_memory,
             ),
             approved_remote_code_identities=self._model_trust_approvals,
+            model_engine_orders=self._model_engine_orders,
             served_context_default=self._served_context_default(),
             native_music_commitments=self._native_music_placement_commitments(command, current_instances),
         )

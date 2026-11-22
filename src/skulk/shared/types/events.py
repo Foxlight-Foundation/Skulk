@@ -338,6 +338,22 @@ class CustomModelCardDeleted(BaseEvent):
     """Command acknowledged by this applied card mutation, when available."""
 
 
+class ModelEngineOrderChanged(BaseEvent):
+    """A person's engine order for one model was set or cleared."""
+
+    model_id: ModelId = Field(description="Name of the model the order is for.")
+    engine_order: list[str] | None = Field(
+        default=None,
+        description=(
+            "Backend tags, most preferred first. ``None`` means the model no "
+            "longer has an order of its own."
+        ),
+    )
+    mutation_command_id: CommandId | None = Field(
+        default=None, description="Command this change answers, when known."
+    )
+
+
 class StagedModelEvicted(BaseEvent):
     """A store-deleted model whose staged copies every node should drop (#427).
 
@@ -487,6 +503,7 @@ Event = (
     | RestartRecoveryCompleted
     | CustomModelCardAdded
     | CustomModelCardDeleted
+    | ModelEngineOrderChanged
     | StagedModelEvicted
     | StateSnapshotHydrated
 )
@@ -519,6 +536,7 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     RestartRecoveryCompleted,
     CustomModelCardAdded,
     CustomModelCardDeleted,
+    ModelEngineOrderChanged,
     StagedModelEvicted,
     StateSnapshotHydrated,
 )
