@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any, Literal, Self, cast
 
 from filelock import FileLock
+
+# python-tuf points root.json at the trusted root with a symbolic link, which an
+# ordinary Windows account may not create. This subclass writes a copy there
+# and is python-tuf's own client everywhere else.
+from foxlight_model_preservation.tuf_client import TufUpdater as Updater
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -16,7 +21,6 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from tuf.ngclient.updater import Updater
 from tuf.ngclient.urllib3_fetcher import Urllib3Fetcher
 
 from skulk.shared.models.registry_gguf_metadata import RegistryGgufMetadata

@@ -1420,6 +1420,11 @@ a file or opens one link-safely by calling the operating system itself: it uses
 module, and a guard in `utils/tests/test_runtime_files_platforms.py` lists the
 modules not yet moved (`runtime_integrity.py`, `local_setup.py` and the
 `service_*` modules). Take a module off that list when it is ported; add none.
+The signed model catalog and the capability store read TUF metadata through
+`foxlight_model_preservation.tuf_client.TufUpdater`, never python-tuf's own
+`Updater`: that one keeps its trusted root behind a symbolic link, which an
+ordinary Windows account may not create, so every refresh failed there
+(`tests/test_platform_participation.py` enforces the import).
 
 ### Extension API (plugins)
 
