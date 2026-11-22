@@ -117,6 +117,17 @@ pub enum Event {
     },
 }
 
+/// Whether outbound dials bind a fresh local port instead of the listening port.
+///
+/// libp2p dials from the listening port by default. Windows refuses to rebind
+/// that port for a second attempt to the same peer while the first socket's
+/// address pair is still held (error 10048), so every redial after one failed
+/// dial fails, and two peers that dial each other at once from their listening
+/// ports can cross as a TCP simultaneous open in which both act as the
+/// handshake initiator. A fresh port avoids both. POSIX keeps port reuse: its
+/// peers rely on it and it is unchanged behaviour there.
+const DIAL_FROM_FRESH_PORT: bool = cfg!(windows);
+
 /// Discovery behavior that wraps mDNS to produce truly discovered durable peer-connections.
 ///
 /// The behaviour operates as such:
@@ -175,9 +186,25 @@ impl Behaviour {
     }
 
     fn dial(&mut self, peer_id: PeerId, addr: Multiaddr) {
-        self.pending_events.push_back(ToSwarm::Dial {
-            opts: DialOpts::peer_id(peer_id).addresses(vec![addr]).build(),
-        })
+        let opts = DialOpts::peer_id(peer_id).addresses(vec![addr]);
+        let opts = if DIAL_FROM_FRESH_PORT {
+            opts.allocate_new_port()
+        } else {
+            opts
+        };
+        self.pending_events
+            .push_back(ToSwarm::Dial { opts: opts.build() })
+    }
+
+    fn dial_bootstrap(&mut self, addr: Multiaddr) {
+        let opts = DialOpts::unknown_peer_id().address(addr);
+        let opts = if DIAL_FROM_FRESH_PORT {
+            opts.allocate_new_port()
+        } else {
+            opts
+        };
+        self.pending_events
+            .push_back(ToSwarm::Dial { opts: opts.build() })
     }
 
     fn close_connection(&mut self, peer_id: PeerId, connection: ConnectionId) {
@@ -494,9 +521,7 @@ impl NetworkBehaviour for Behaviour {
                 .cloned()
                 .collect();
             for addr in bootstrap_to_dial {
-                self.pending_events.push_back(ToSwarm::Dial {
-                    opts: DialOpts::unknown_peer_id().address(addr).build(),
-                })
+                self.dial_bootstrap(addr);
             }
             self.retry_delay.reset(RETRY_CONNECT_INTERVAL) // reset timeout
         }

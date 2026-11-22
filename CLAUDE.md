@@ -402,7 +402,7 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
   even if their ingress tasks never started, so stale rendezvous subscriptions
   cannot block the replacement or the API's directed audio-source handshake.
 - **Master**: Coordinates cluster state, places model instances across nodes; retained event-log replay is coalesced onto one asynchronously paced worker, and sustained idle-state event-log growth emits an operator warning
-- **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration. Better same-round proposals arriving after the local timeout correct the completed result using the original vote ordering. Connected nodes republish that immutable winning vote every five seconds to repair lost startup broadcasts, with a fixed receive deadline so incoming traffic cannot starve repair. The timer starts no campaign, changes no clock/seniority and suppresses older results while a new round runs; peerless nodes stay quiet and receiver closure ends repair.
+- **Election**: Bully algorithm for master election, carried on the isolated election gossipsub behavior with duplicate candidate suppression during protocol migration. Better same-round proposals arriving after the local timeout correct the completed result using the original vote ordering. Connected nodes republish that immutable winning vote every five seconds to repair lost startup broadcasts, with a fixed receive deadline so incoming traffic cannot starve repair. The timer starts no campaign, changes no clock/seniority and suppresses older results while a new round runs; peerless nodes stay quiet and receiver closure ends repair. A management-participation node (`--no-worker` or `SKULK_NODE_PARTICIPATION=management`; every Windows node) is a last-resort candidate (`is_master_candidate` in `main.py`, `LAST_RESORT_SENIORITY_FLOOR` in `shared/election.py`): it loses to every ordinary candidate, because a new master's `skulk.yaml` replaces every follower's, and gains seniority only inside its own band; `--force-master` overrides.
 - **API**: FastAPI server for OpenAI-compatible chat completions. The scoped `/v1/instances/{instance_id}/chat/completions` extension requires `allowed_node_install_ids`, checks every assigned rank's persistent identity, and uses the existing exact-target command path without replica fallback; no placement authority is granted.
 - **Operator identity/authority foundation**: stable per-host and cluster
   identities, deterministic Ed25519 quorum certification, two-phase
@@ -529,8 +529,9 @@ against any branch that carries the workflow file
 the workflow has already run once on some branch (its pull-request or push
 trigger registers it with GitHub); only the website's Run button needs the
 file on the default branch. The index is
-append-only, so republishing needs a bindings version bump. macOS and Linux still build the bindings from the
-workspace source. Every Skulk build of `llama-server` (the engine wheels, the
+append-only, so republishing needs a bindings version bump. A Windows install takes the bindings from
+that index (pyproject pins the version for `win32`); macOS and Linux still build
+them from `rust/`. Every Skulk build of `llama-server` (the engine wheels, the
 CUDA pod image and both `install-deps.sh` scripts) passes
 `LLAMA_USE_PREBUILT_UI=OFF`: llama.cpp otherwise downloads its built-in chat
 page at build time, choosing the bundle by commit count, which is wrong on a
@@ -1369,6 +1370,24 @@ Rust code in `rust/` provides:
   a Python object in `IntoPyObject`. `routing/tests/test_bindings_interpreter_exit.py`
   covers it.
 - `system_custodian`: System-level operations
+
+Windows (`win32`) is a non-compute target: the entry point forces management
+participation (`apply_platform_participation`; an explicit `full` or `ffn_only`
+is refused), Ctrl-Break requests the same orderly shutdown as SIGTERM, and
+outbound libp2p dials use a fresh local port (`DIAL_FROM_FRESH_PORT` in
+`rust/networking/src/discovery.rs`) because Windows refuses the listening-port
+rebind. No module may import a POSIX-only standard-library module
+(`fcntl`, `grp`, `pwd`, `resource`, `termios`) at module level; import it in the
+function that needs it or under a platform check
+(`tests/test_platform_participation.py` enforces this). The bindings reach
+Windows as a wheel built by `.github/workflows/bindings-wheel.yml` and published
+to the Foxlight index by manual dispatch. `pyproject.toml` pins that wheel for
+`win32` on CPython 3.13 and splits the source by platform, which is why the
+bindings are a path source and not a uv workspace member (uv refuses an index
+source for a member). The pin must equal the bindings version
+(`tests/test_windows_bindings_wheel.py`), so a bindings version bump moves the
+pin and needs the Windows wheel published from that branch before `uv lock`. Capability
+hosting, signed installs and an unattended service on Windows are not built yet.
 
 ### Extension API (plugins)
 

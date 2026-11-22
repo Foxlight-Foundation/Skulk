@@ -1,7 +1,6 @@
 import contextlib
 import gc
 import os
-import resource
 import signal
 import sys
 import threading
@@ -575,6 +574,9 @@ def entrypoint(
     # to launchd, never receive a signal, and orphan ~5 GB of wired Metal
     # memory. The watchdog detects reparenting and self-exits cleanly.
     _install_parent_death_watchdog(initial_ppid=os.getppid())
+
+    # POSIX-only module, imported at use so this module loads on Windows.
+    import resource
 
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 2048), hard), hard))
