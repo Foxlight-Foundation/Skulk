@@ -25,12 +25,47 @@ import signal
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import final
+from typing import Protocol, final
 
 from skulk.utils.runtime_files import RuntimeLock
 
 if sys.platform == "win32":
     from skulk.utils import _owned_process_windows as _windows
+
+
+class OwnedProcess(Protocol):
+    """One started child and the means to stop everything it started."""
+
+    @property
+    def pid(self) -> int:
+        """The child's process identifier."""
+        ...
+
+    @property
+    def stdout(self) -> asyncio.StreamReader:
+        """The child's output and error output, as one stream."""
+        ...
+
+    @property
+    def returncode(self) -> int | None:
+        """The child's exit code, or ``None`` while it is still running."""
+        ...
+
+    async def wait(self) -> int:
+        """Wait for the child to end; return its exit code."""
+        ...
+
+    def kill(self) -> None:
+        """Stop every process in the tree at once; quiet when none is left."""
+        ...
+
+    def close(self) -> None:
+        """Release what the platform holds for the tree; call after waiting.
+
+        On Windows this also ends any member still running, which is the same
+        guarantee an abrupt exit of this process gives.
+        """
+        ...
 
 
 def isolated_environment() -> dict[str, str]:
@@ -45,33 +80,34 @@ def isolated_environment() -> dict[str, str]:
     return {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
 
 
-@final
-class OwnedProcess:
-    """One started child and the means to stop everything it started."""
+if sys.platform != "win32":
 
-    def __init__(self, process: asyncio.subprocess.Process, job: int | None) -> None:
-        """Bind a started child to the platform's handle on its tree."""
-        self.process = process
-        self._job = job
+    @final
+    class _SessionChild:
+        """A child that leads its own session and holds the lock's descriptor."""
 
-    def kill(self) -> None:
-        """Stop every process in the tree at once; quiet when none is left."""
-        if sys.platform == "win32":
-            if self._job is not None:
-                _windows.terminate(self._job)
-            return
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(self.process.pid, signal.SIGKILL)
+        def __init__(self, process: asyncio.subprocess.Process) -> None:
+            self._process = process
+            assert process.stdout is not None
+            self.stdout = process.stdout
 
-    def close(self) -> None:
-        """Release the platform's handle on the tree; call after waiting for it.
+        @property
+        def pid(self) -> int:
+            return self._process.pid
 
-        On Windows this also ends any member still running, which is the same
-        guarantee an abrupt exit of this process gives.
-        """
-        if sys.platform == "win32" and self._job is not None:
-            _windows.close(self._job)
-            self._job = None
+        @property
+        def returncode(self) -> int | None:
+            return self._process.returncode
+
+        async def wait(self) -> int:
+            return await self._process.wait()
+
+        def kill(self) -> None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self._process.pid, signal.SIGKILL)
+
+        def close(self) -> None:
+            """Nothing to release: the session ends with its last member."""
 
 
 async def start_owned(
@@ -79,8 +115,8 @@ async def start_owned(
 ) -> OwnedProcess:
     """Start a program whose whole tree this process owns.
 
-    The child gets no input, one combined output stream to read from
-    ``process.stdout``, and :func:`isolated_environment`.
+    The child gets no input, one combined output stream, and
+    :func:`isolated_environment`.
 
     Args:
         arguments: The program and its arguments.
@@ -89,21 +125,20 @@ async def start_owned(
             outlive it.
 
     Returns:
-        The started child. The caller waits for ``process`` and then calls
-        :meth:`OwnedProcess.close`, calling :meth:`OwnedProcess.kill` first
-        when it gives up on the child.
+        The started child. The caller waits for it and then calls ``close``,
+        calling ``kill`` first when it gives up on the child.
     """
     if sys.platform == "win32":
-        process, job = await _windows.start(arguments, cwd=cwd)
-        return OwnedProcess(process, job)
-    process = await asyncio.create_subprocess_exec(
-        *arguments,
-        cwd=cwd,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True,
-        pass_fds=(lock.descriptor,),
-        env=isolated_environment(),
+        return await _windows.start(arguments, cwd=cwd)
+    return _SessionChild(
+        await asyncio.create_subprocess_exec(
+            *arguments,
+            cwd=cwd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+            pass_fds=(lock.descriptor,),
+            env=isolated_environment(),
+        )
     )
-    return OwnedProcess(process, None)

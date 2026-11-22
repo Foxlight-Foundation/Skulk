@@ -2,11 +2,13 @@
 
 import ast
 import asyncio
+import contextlib
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import IO, cast
 
 import psutil
 import pytest
@@ -24,14 +26,26 @@ _DIRECT_PROCESS_CONTROL = frozenset(
 # so cannot run on Windows. Remove a module when it is ported; add none.
 _NOT_YET_PORTED = frozenset({"runtime_service.py", "service_snapshot.py"})
 
-# A child that starts a grandchild, reports both process identifiers, and
-# then both wait far longer than any test runs.
+# Appends one byte at a time, unbuffered, to the file it is given, for far
+# longer than any test runs: a file that has stopped growing means the writer
+# has stopped running.
+_WRITER = (
+    "import os, sys, time\n"
+    "log = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_APPEND)\n"
+    "while True:\n"
+    "    os.write(log, b'x')\n"
+    "    time.sleep(0.001)\n"
+)
+# A child that starts a grandchild, reports the grandchild's process
+# identifier, and then both write in the working directory.
 _TREE = (
-    "import subprocess, sys, time\n"
+    "import subprocess, sys\n"
+    f"writer = {_WRITER!r}\n"
     "grandchild = subprocess.Popen("
-    "[sys.executable, '-I', '-c', 'import time; time.sleep(120)'])\n"
+    "[sys.executable, '-I', '-c', writer, 'grandchild.log'])\n"
     "print(grandchild.pid, flush=True)\n"
-    "time.sleep(120)\n"
+    "sys.argv = ['-c', 'child.log']\n"
+    "exec(writer)\n"
 )
 
 
@@ -57,6 +71,30 @@ def _wait_until_gone(identifiers: list[int], seconds: float = 10) -> None:
         time.sleep(0.05)
 
 
+def _written(root: Path) -> tuple[int, int]:
+    """How much the child and the grandchild have each written so far."""
+    return (
+        (root / "child.log").stat().st_size,
+        (root / "grandchild.log").stat().st_size,
+    )
+
+
+def _wait_until_both_write(root: Path, seconds: float = 10) -> None:
+    deadline = time.monotonic() + seconds
+    while True:
+        with contextlib.suppress(FileNotFoundError):
+            if all(_written(root)):
+                return
+        assert time.monotonic() < deadline, "the tree never started writing"
+        time.sleep(0.02)
+
+
+def _assert_writing_has_stopped(root: Path) -> None:
+    before = _written(root)
+    time.sleep(0.5)
+    assert _written(root) == before
+
+
 async def test_a_child_runs_with_its_output_captured(root: Path) -> None:
     lock = RuntimeLock(root, "installer.lock")
     try:
@@ -66,9 +104,10 @@ async def test_a_child_runs_with_its_output_captured(root: Path) -> None:
             lock=lock,
         )
         try:
-            assert child.process.stdout is not None
-            assert (await child.process.stdout.read()).split() == [b"ready"]
-            assert await child.process.wait() == 3
+            assert (await child.stdout.read()).split() == [b"ready"]
+            assert child.returncode is None or child.returncode == 3
+            assert await child.wait() == 3
+            assert child.returncode == 3
         finally:
             child.close()
     finally:
@@ -92,9 +131,8 @@ async def test_a_child_starts_in_the_given_directory_without_the_callers_environ
             lock=lock,
         )
         try:
-            assert child.process.stdout is not None
-            output = (await child.process.stdout.read()).decode()
-            assert await child.process.wait() == 0
+            output = (await child.stdout.read()).decode()
+            assert await child.wait() == 0
         finally:
             child.close()
     finally:
@@ -108,6 +146,15 @@ async def test_a_child_starts_in_the_given_directory_without_the_callers_environ
     assert {name.upper() for name in isolated_environment()} <= seen
 
 
+async def test_a_program_that_cannot_be_started_is_an_error(root: Path) -> None:
+    lock = RuntimeLock(root, "installer.lock")
+    try:
+        with pytest.raises(OSError):
+            await start_owned((str(root / "no-such-program"),), cwd=root, lock=lock)
+    finally:
+        lock.close()
+
+
 async def test_stopping_a_child_stops_everything_it_started(root: Path) -> None:
     lock = RuntimeLock(root, "installer.lock")
     try:
@@ -115,14 +162,15 @@ async def test_stopping_a_child_stops_everything_it_started(root: Path) -> None:
             (sys.executable, "-I", "-c", _TREE), cwd=root, lock=lock
         )
         try:
-            assert child.process.stdout is not None
-            grandchild = int(await child.process.stdout.readline())
-            assert _running(child.process.pid) and _running(grandchild)
+            grandchild = int(await child.stdout.readline())
+            assert _running(child.pid) and _running(grandchild)
+            await asyncio.to_thread(_wait_until_both_write, root)
             child.kill()
-            await asyncio.wait_for(child.process.wait(), 10)
+            await asyncio.wait_for(child.wait(), 10)
             # With every holder gone the output ends, as a reader relies on.
-            assert await asyncio.wait_for(child.process.stdout.read(), 10) == b""
-            _wait_until_gone([child.process.pid, grandchild])
+            assert await asyncio.wait_for(child.stdout.read(), 10) == b""
+            await asyncio.to_thread(_wait_until_gone, [child.pid, grandchild])
+            await asyncio.to_thread(_assert_writing_has_stopped, root)
             # Stopping what has already stopped is quiet.
             child.kill()
         finally:
@@ -131,12 +179,41 @@ async def test_stopping_a_child_stops_everything_it_started(root: Path) -> None:
         lock.close()
 
 
-def test_a_tree_never_outlives_its_owners_lock(root: Path) -> None:
-    """The owner dies without warning; nobody else may work beside its orphans.
+async def test_closing_ends_what_a_finished_child_left_running_on_windows(
+    root: Path,
+) -> None:
+    """A descendant that outlives the first child is still part of the tree."""
+    if sys.platform != "win32":
+        pytest.skip("on POSIX such a descendant keeps holding the lock instead")
+    leaves_one_behind = (
+        "import subprocess, sys\n"
+        f"writer = {_WRITER!r}\n"
+        "print(subprocess.Popen("
+        "[sys.executable, '-I', '-c', writer, 'grandchild.log'],"
+        " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid, flush=True)\n"
+    )
+    lock = RuntimeLock(root, "installer.lock")
+    try:
+        child = await start_owned(
+            (sys.executable, "-I", "-c", leaves_one_behind), cwd=root, lock=lock
+        )
+        try:
+            left_behind = int(await child.stdout.readline())
+            assert await asyncio.wait_for(child.wait(), 10) == 0
+            assert _running(left_behind)
+        finally:
+            child.close()
+        await asyncio.to_thread(_wait_until_gone, [left_behind])
+    finally:
+        lock.close()
+
+
+def test_a_tree_never_writes_once_another_process_holds_the_lock(root: Path) -> None:
+    """The owner dies without warning while a competitor waits for its lock.
 
     POSIX keeps the lock held by the orphans until they exit. Windows ends the
-    orphans with the owner. Either way the lock is never free while a member
-    of the old tree is still running.
+    orphans with the owner. Either way, from the moment the competitor has the
+    lock, no member of the old tree writes again.
     """
     owner_script = (
         "import asyncio, os, sys\n"
@@ -148,42 +225,62 @@ def test_a_tree_never_outlives_its_owners_lock(root: Path) -> None:
         "    lock = RuntimeLock(root, 'installer.lock')\n"
         "    child = await start_owned("
         "(sys.executable, '-I', '-c', sys.argv[2]), cwd=root, lock=lock)\n"
-        "    grandchild = int(await child.process.stdout.readline())\n"
-        "    print(child.process.pid, grandchild, flush=True)\n"
+        "    grandchild = int(await child.stdout.readline())\n"
+        "    print(child.pid, grandchild, flush=True)\n"
+        "    sys.stdin.read()\n"
         "    os._exit(0)\n"
         "asyncio.run(main())\n"
     )
-    owner = subprocess.run(
+    owner = subprocess.Popen(
         [sys.executable, "-c", owner_script, str(root), _TREE],
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
-        timeout=60,
-        check=True,
     )
-    child, grandchild = (int(value) for value in owner.stdout.split())
+    child = grandchild = 0
     try:
-        if sys.platform == "win32":
-            _wait_until_gone([child, grandchild])
-        else:
-            assert _running(child) and _running(grandchild)
-            with pytest.raises(BlockingIOError):
-                RuntimeLock(root, "installer.lock")
-            os.killpg(child, 9)
-            _wait_until_gone([child, grandchild])
-        deadline = time.monotonic() + 10
+        assert owner.stdout is not None and owner.stdin is not None
+        reported = cast(IO[bytes], owner.stdout).readline()
+        child, grandchild = (int(value) for value in reported.split())
+        _wait_until_both_write(root)
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(root, "installer.lock")
+
+        # The owner goes, with the competitor already trying for the lock.
+        owner.stdin.close()
+        orphans_ended_by_hand = False
+        held_until = time.monotonic() + 1
+        deadline = time.monotonic() + 15
         while True:
             try:
-                RuntimeLock(root, "installer.lock").close()
+                competitor = RuntimeLock(root, "installer.lock")
                 break
             except BlockingIOError:
                 assert time.monotonic() < deadline
-                time.sleep(0.05)
+                if (
+                    sys.platform != "win32"
+                    and not orphans_ended_by_hand
+                    and time.monotonic() >= held_until
+                ):
+                    # Held this whole time by orphans that are still writing.
+                    assert _running(child) and _running(grandchild)
+                    os.killpg(child, 9)
+                    orphans_ended_by_hand = True
+        try:
+            before = _written(root)
+            assert orphans_ended_by_hand == (sys.platform != "win32")
+            time.sleep(0.5)
+            assert _written(root) == before
+            _wait_until_gone([child, grandchild])
+        finally:
+            competitor.close()
     finally:
+        owner.kill()
+        owner.wait()
         for identifier in (child, grandchild):
-            try:
-                psutil.Process(identifier).kill()
-            except psutil.NoSuchProcess:
-                pass
+            with contextlib.suppress(psutil.NoSuchProcess):
+                if identifier:
+                    psutil.Process(identifier).kill()
 
 
 def test_only_the_seam_starts_or_stops_a_process_tree() -> None:

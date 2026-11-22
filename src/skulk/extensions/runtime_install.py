@@ -194,17 +194,15 @@ async def _execute(
 ) -> bytes:
     async def owned() -> bytes:
         child = await start_owned(arguments, cwd=directory, lock=lock)
-        process = child.process
         output = bytearray()
         try:
-            assert process.stdout is not None
             async with asyncio.timeout(timeout):
-                while block := await process.stdout.read(16384):
+                while block := await child.stdout.read(16384):
                     output.extend(block)
                     if len(output) > 262144:
                         raise ValueError("runtime installer output exceeds bound")
-                await process.wait()
-            if process.returncode != 0:
+                await child.wait()
+            if child.returncode != 0:
                 raise ValueError("runtime installer failed")
             return bytes(output)
         except (OSError, ValueError, TimeoutError):
@@ -212,9 +210,9 @@ async def _execute(
             raise
         finally:
             try:
-                if process.returncode is None:
+                if child.returncode is None:
                     child.kill()
-                await finish_runtime_work(asyncio.create_task(process.wait()))
+                await finish_runtime_work(asyncio.create_task(child.wait()))
             finally:
                 child.close()
 

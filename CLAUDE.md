@@ -1431,7 +1431,10 @@ The runtime installer starts its child programs through
 the directory lock. POSIX does that with a new session and the inherited lock
 descriptor; Windows with a Job Object set to end its processes when this
 process's handle closes (`utils/_owned_process_windows.py`), because a Windows
-file lock belongs to one process. `utils/tests/test_owned_process.py` lists the
+file lock belongs to one process. The child is named a member of the job in the
+`CreateProcessW` call itself, so it never exists outside it; Python's process
+classes cannot do that, which is why that module creates the process and
+supplies its output stream and exit wait. `utils/tests/test_owned_process.py` lists the
 modules that still start process trees themselves (`runtime_service.py`,
 `service_snapshot.py`).
 
