@@ -39,6 +39,11 @@ from skulk.worker.runner.diagnostics import (
     record_runner_phase,
 )
 
+if sys.platform != "win32":
+    # POSIX-only; the guard keeps this module loadable on Windows. It stays a
+    # module-level name because tests patch it through this module.
+    import resource
+
 logger: "loguru.Logger" = loguru.logger
 
 # Set by signal handler so the layer-by-layer loading loop can bail early.
@@ -574,9 +579,6 @@ def entrypoint(
     # to launchd, never receive a signal, and orphan ~5 GB of wired Metal
     # memory. The watchdog detects reparenting and self-exits cleanly.
     _install_parent_death_watchdog(initial_ppid=os.getppid())
-
-    # POSIX-only module, imported at use so this module loads on Windows.
-    import resource
 
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 2048), hard), hard))
