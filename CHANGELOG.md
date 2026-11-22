@@ -29,6 +29,9 @@ This project records release notes here and mirrors public-facing notes in
 - Installs on macOS and Linux resolve the same packages as before, with one exception: the
   `foxlight-model-preservation` pin moves from 0.29.0 to 0.38.0 on every platform, because
   0.38.0 is the first release that imports on Windows.
+- The Windows bindings wheel workflow no longer rebuilds when it publishes. It promotes the
+  wheel of an earlier tested run, after checking that the Rust sources are unchanged and
+  that the wheel has the expected SHA-256.
 
 ### Management nodes and the master role
 

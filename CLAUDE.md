@@ -522,10 +522,15 @@ the fork's whole history, about 177 MB for mflux). The Rust bindings
 `.github/workflows/bindings-wheel.yml`: it builds the `win_amd64` CPython 3.13
 wheel on pull requests and `dev` pushes that touch `rust/**`, the workspace
 manifests or the workflow, checks the wheel's name, then installs it and starts
-the swarm on an isolated `SKULK_LIBP2P_NAMESPACE`. It publishes to the same
-index only on manual dispatch with `publish=true`. The command line runs it
-against any branch that carries the workflow file
-(`gh workflow run bindings-wheel.yml --ref <branch> -f publish=true`), provided
+the swarm on an isolated `SKULK_LIBP2P_NAMESPACE`. Publication never
+builds: a manual dispatch with `publish=true`, `publish_run_id` and
+`publish_sha256` promotes the wheel of an earlier successful dispatch or push
+run after checking that `rust/`, `Cargo.toml` and `Cargo.lock` are identical at
+that run's commit and at the dispatched ref, and that the wheel has that
+SHA-256 (each build prints it in its run summary). The command line runs both
+steps against any branch that carries the workflow file
+(`gh workflow run bindings-wheel.yml --ref <branch>` to build a candidate, then
+the same with `-f publish=true -f publish_run_id=<run> -f publish_sha256=<sha256>`), provided
 the workflow has already run once on some branch (its pull-request or push
 trigger registers it with GitHub); only the website's Run button needs the
 file on the default branch. The index is
