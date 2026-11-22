@@ -546,6 +546,28 @@ def test_the_shipped_store_root_is_signed_by_every_root_key(
     assert client.available
 
 
+async def test_the_trusted_root_is_kept_where_an_ordinary_account_can_write_it(
+    tmp_path: Path,
+) -> None:
+    """``root.json`` is the current trusted root on every platform.
+
+    python-tuf makes it a symbolic link. An ordinary Windows account may not
+    create one, so there it is a copy, and reading the store does not depend
+    on the account's privileges.
+    """
+    store = _Store(tmp_path)
+    store.publish(1)
+    await store.catalog.fetch()
+    metadata = tmp_path / "manager" / "store-trust" / "metadata"
+    current = metadata / "root.json"
+    history = metadata / "root_history" / "1.root.json"
+    assert current.read_bytes() == history.read_bytes()
+    assert current.is_symlink() == (sys.platform != "win32")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="the service snapshot is not ported to Windows"
+)
 def test_the_manager_snapshot_stages_package_data_beside_its_module(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
