@@ -88,6 +88,7 @@ Signature = Annotated[str, Field(pattern=r"^[a-f0-9]{128}$")]
 
 EnginePackageRefusal = Literal[
     "manifest_invalid",
+    "trust_unavailable",
     "trust_refused",
     "signature_refused",
     "window_refused",
