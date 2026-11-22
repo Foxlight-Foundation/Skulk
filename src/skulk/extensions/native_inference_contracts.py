@@ -23,11 +23,14 @@ from pydantic import (
     model_validator,
 )
 
-INFERENCE_KERNEL_VERSION = "0.7.0rc4"
-INFERENCE_KERNEL_SOURCE = "3431a3b220f854512d3bb10003e095e00585c443"
+INFERENCE_KERNEL_VERSION = "0.7.0rc5"
+INFERENCE_KERNEL_SOURCE = "52a9349252d896c5b0d73af0aa45a746295a4f76"
 # Reader compatibility never rewrites an issued application's signed closure.
-INFERENCE_READER_VERSIONS = ("0.7.0rc3", INFERENCE_KERNEL_VERSION)
+INFERENCE_READER_VERSIONS = ("0.7.0rc3", "0.7.0rc4", INFERENCE_KERNEL_VERSION)
 INFERENCE_COHORT_SHA256 = (
+    "fb6ca9e81f80cebd2cb6da735b30f888dc49f8ee6f38d57abc544e9362906f51"
+)
+_ISSUED_STREAM_COHORT_SHA256 = (
     "3702b717039632845f68557c87d10551480501505230134d973b04644b14e2d2"
 )
 _ISSUED_INFERENCE_COHORT_SHA256 = (
@@ -334,9 +337,14 @@ def inference_cohort(version: str = INFERENCE_KERNEL_VERSION) -> dict[str, JsonV
             "native-inference-cohort.json",
             _ISSUED_INFERENCE_COHORT_SHA256,
         )
-    elif version == INFERENCE_KERNEL_VERSION:
+    elif version == "0.7.0rc4":
         filename, digest = (
             "native-inference-stream-cohort.json",
+            _ISSUED_STREAM_COHORT_SHA256,
+        )
+    elif version == INFERENCE_KERNEL_VERSION:
+        filename, digest = (
+            "native-author-cohort.json",
             INFERENCE_COHORT_SHA256,
         )
     else:
@@ -435,12 +443,13 @@ class _Contract(BaseModel):
 class InferenceProfiles(_Contract):
     """Exact signed execution cohort, separately selected from issued runtimes."""
 
-    version: Literal["0.7.0rc3", "0.7.0rc4"] = Field(
+    version: Literal["0.7.0rc3", "0.7.0rc4", "0.7.0rc5"] = Field(
         description="Published native ABI package version."
     )
     source_commit: Literal[
         "c8f869ba525d6fdcff64e90cd3c14954eaad34da",
         "3431a3b220f854512d3bb10003e095e00585c443",
+        "52a9349252d896c5b0d73af0aa45a746295a4f76",
     ] = Field(description="Immutable public source selected by the closure.")
     portable: Literal[
         "7996ed84e821ddacfb48e00b99a5886948fd20e43bc2c7993c5ed98217834033"
@@ -469,7 +478,7 @@ class InferenceProfiles(_Contract):
         return self
 
     @classmethod
-    @lru_cache(maxsize=2)
+    @lru_cache(maxsize=3)
     def qualified(cls, version: str = INFERENCE_KERNEL_VERSION) -> "InferenceProfiles":
         """Supply publisher defaults; signed parsing requires every field."""
         receipt = inference_cohort(version)

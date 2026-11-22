@@ -9,6 +9,9 @@ This project records release notes here and mirrors public-facing notes in
 
 ### SDK 1 candidate composition
 
+- Adopt the issued native author runtime 0.7.0rc5 with its exact binary and
+  source receipts. Retain the 0.7.0rc3 and 0.7.0rc4 signed closures, refuse
+  crossed source/binary claims, and include every receipt in frozen packaging.
 - Forward delegated server, client and bidirectional streams through the
   protected owner/Core bridge under the original caller's current authority.
   Preserve binary packets, narrow optional target ceilings, and retain call
