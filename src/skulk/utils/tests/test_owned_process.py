@@ -1,4 +1,4 @@
-"""An owned child's whole tree can be stopped, and never outlives its owner's lock."""
+"""An owned child's whole tree can be stopped, and the child never outlives the lock."""
 
 import ast
 import asyncio
@@ -211,9 +211,9 @@ async def test_closing_ends_what_a_finished_child_left_running_on_windows(
 def test_a_tree_never_writes_once_another_process_holds_the_lock(root: Path) -> None:
     """The owner dies without warning while a competitor waits for its lock.
 
-    POSIX keeps the lock held by the orphans until they exit. Windows ends the
-    orphans with the owner. Either way, from the moment the competitor has the
-    lock, no member of the old tree writes again.
+    POSIX keeps the lock held by the orphaned child for as long as it runs.
+    Windows ends the orphans with the owner. Either way, from the moment the
+    competitor has the lock, no member of this tree writes again.
     """
     owner_script = (
         "import asyncio, os, sys\n"

@@ -6,16 +6,23 @@ must be true of such a child, on every platform:
 
 - **The whole tree can be stopped.** A timeout or a cancelled request ends
   the child and everything it started, not just the first process.
-- **The tree never outlives the lock.** If this process dies abruptly, no
-  other process may start work in the same directory while an orphan of the
-  old tree is still writing there.
+- **The child never outlives the lock.** If this process dies abruptly, no
+  other process may start work in the same directory while the orphaned child
+  is still running there.
 
 On POSIX the child leads a new session, so one signal reaches the tree, and
-it inherits the lock's descriptor, so the lock stays held until the last
-member exits. On Windows the tree runs inside a Job Object that the operating
-system destroys, with every process in it, when this process's handle to it
-closes (:mod:`skulk.utils._owned_process_windows`); a file lock there belongs
-to one process and cannot be inherited.
+it inherits the lock's descriptor, so the lock stays held for as long as the
+child runs. That covers a descendant only if it kept the descriptor: a program
+started with Python's ``subprocess`` closes it by default, so a descendant
+that outlived both this process and the child would run without the lock.
+The installer's children wait for the programs they start, so that case needs
+a second failure.
+
+On Windows the tree runs inside a Job Object that the operating system
+destroys, with every process in it, when this process's handle to it closes
+(:mod:`skulk.utils._owned_process_windows`); a file lock there belongs to one
+process and cannot be inherited. There the second guarantee covers the whole
+tree.
 """
 
 import asyncio
@@ -121,7 +128,7 @@ async def start_owned(
     Args:
         arguments: The program and its arguments.
         cwd: The directory the program starts in.
-        lock: The held lock that fences that directory; the tree must not
+        lock: The held lock that fences that directory; the child must not
             outlive it.
 
     Returns:
