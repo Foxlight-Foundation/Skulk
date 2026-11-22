@@ -49,6 +49,8 @@ EngineType = Literal[
     "test_video",
     "comfy",
     "audio_cpp",
+    "ace_step",
+    "demucs",
     "stable_diffusion_cpp", "mlx_video",
 ]
 """Inference runtime that loads and runs a model; selects the worker runner.
@@ -106,6 +108,8 @@ _ENGINES: Final[tuple[EngineType, ...]] = (
     "test_video",
     "comfy",
     "audio_cpp",
+    "ace_step",
+    "demucs",
     "stable_diffusion_cpp",
     "mlx_video",
 )
@@ -418,6 +422,7 @@ def engine_supports_multi_node(engine: EngineType) -> bool:
 _VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx", "llama_cpp"})
 _SPEECH_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx_audio"})
 _MUSIC_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"audio_cpp"})
+_SEPARATION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"demucs"})
 # Engines with an embedding runner: the transformers runner serves ``mlx``
 # placements (safetensors cards), and ``llama_server`` runs a dedicated
 # ``--embeddings`` server (GGUF cards). Without this gate a card declaring
@@ -440,6 +445,10 @@ AUDIO_CPP_COMPUTE_BACKENDS: Final[frozenset[str]] = frozenset(
         "audio_cpp-rocm",
     }
 )
+ACE_STEP_COMPUTE_BACKENDS: Final[frozenset[str]] = frozenset(
+    {"ace_step-cpu", "ace_step-metal", "ace_step-cuda", "ace_step-rocm"}
+)
+"""Implemented native ACE device vocabulary; package availability is separate."""
 
 # Engines whose runner binding cannot LOAD a family the served sibling serves
 # fine. The in-process ``llama_cpp`` engine runs whatever llama.cpp build the
@@ -461,6 +470,8 @@ def platform_compatible_backends(
     card_serves_vision: bool,
     card_serves_speech: bool = False,
     card_serves_music: bool = False,
+    card_has_native_music_profile: bool = False,
+    card_serves_separation: bool = False,
     card_serves_embeddings: bool = False,
     card_has_native_image_profile: bool = False,
     card_has_pinned_projector: bool = False,
@@ -485,6 +496,9 @@ def platform_compatible_backends(
         card_serves_vision: whether the card declares a vision capability.
         card_serves_speech: whether the card declares a speech capability.
         card_serves_music: whether the card declares a music workload.
+        card_has_native_music_profile: whether the selected native ACE artifacts
+            require their own runner; audio.cpp cannot load these components.
+        card_serves_separation: whether native source separation is required.
         card_serves_embeddings: whether the card declares a text-embedding
             workload; only engines with an embedding runner remain.
         card_has_native_image_profile: whether complete typed image components
@@ -503,6 +517,13 @@ def platform_compatible_backends(
     Returns:
         The subset of tags whose engine can serve everything the card declares.
     """
+    # Native ACE has a distinct safetensors/component and execution contract.
+    # Never let a generic music or text engine reinterpret those exact files.
+    # Actual fixed package/probe/phase admission is enforced by the placer.
+    if card_has_native_music_profile:
+        if not card_serves_music or card_serves_vision or card_serves_speech or card_serves_embeddings or card_serves_separation or card_has_native_image_profile:
+            return frozenset()
+        return expand_engine_backends(compatible_backends) & ACE_STEP_COMPUTE_BACKENDS
     # Legacy image runners do not yet consume the immutable component profile.
     if card_has_native_image_profile:
         filtered = frozenset(
@@ -518,7 +539,7 @@ def platform_compatible_backends(
         filtered = frozenset(
             tag
             for tag in compatible_backends
-            if engine_of(tag) != "stable_diffusion_cpp"
+            if engine_of(tag) not in {"stable_diffusion_cpp", "ace_step"}
         )
     if card_serves_vision:
         vision_engines = (
@@ -544,6 +565,17 @@ def platform_compatible_backends(
             if (engine := engine_of(tag)) is None
             or (engine in _MUSIC_SERVING_ENGINES and tag in AUDIO_CPP_COMPUTE_BACKENDS)
         )
+    if card_serves_separation:
+        filtered = frozenset(
+            tag
+            for tag in expand_engine_backends(filtered)
+            if engine_of(tag) in _SEPARATION_SERVING_ENGINES
+            and tag in {"demucs-cpu", "demucs-metal", "demucs-cuda", "demucs-rocm"}
+        )
+    else:
+        # A native separator cannot load a text/speech/music model merely
+        # because a broad card or operator declaration names its engine.
+        filtered = frozenset(tag for tag in filtered if engine_of(tag) != "demucs")
     if card_serves_embeddings:
         filtered = frozenset(
             tag
@@ -619,6 +651,9 @@ def expand_engine_backends(compatible_backends: AbstractSet[str]) -> frozenset[s
     expanded = set(compatible_backends)
     for tag in compatible_backends:
         if engine_of(tag) == tag:
+            if tag == "ace_step":
+                expanded.update(ACE_STEP_COMPUTE_BACKENDS)
+                continue
             # An embedding-only lane is never implied by a bare engine tag:
             # a card names it, or the embedding gate in
             # ``platform_compatible_backends`` opts embedding cards in.

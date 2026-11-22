@@ -25,6 +25,7 @@ from skulk.shared.models.llama_server_settings import (
     LlamaServerSettings,
 )
 from skulk.shared.models.model_cards import ModelCard, MusicModelFamily
+from skulk.shared.models.separation_runtime import estimate_demucs_peak
 from skulk.shared.models.video_memory import staged_video_weights
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
@@ -411,6 +412,10 @@ def estimate_weight_runtime_bytes(
     """
     if shard_fraction <= 0.0:
         return Memory()
+    if model_card.separation is not None:
+        if shard_fraction != 1.0:
+            raise ValueError("native source separation requires one complete model shard")
+        return estimate_demucs_peak(model_card, backend=resolved_backend)
     # Native video streams stages rather than retaining the complete selected pack.
     # Every admission caller must charge the same staged resident weights.
     staged_weights = (
@@ -461,6 +466,13 @@ def estimate_shard_footprint(
     """
     if shard_fraction <= 0.0:
         return Memory()
+    if model_card.separation is not None:
+        # A separator has no autoregressive context/KV cache. Every admission
+        # caller uses the same actual native forward/input/result policy.
+        return estimate_weight_runtime_bytes(
+            model_card, shard_fraction, resolved_backend=resolved_backend,
+            memory_settings=memory_settings,
+        )
     full_kv = Memory.from_bytes(
         per_token_kv_bytes(
             model_card,
@@ -789,6 +801,11 @@ def memory_estimate_notes(
     memory_settings: EngineMemorySettings | None,
 ) -> tuple[str, ...]:
     """Explain effective cache accounting and conservative unknown-layout fallback."""
+    if model_card.separation is not None:
+        return (
+            "Native separation reserves the implemented FP32, two-thread, 7.8-second trained forward window and bounded 120-second source/four-result buffers; no text KV cache is allocated.",
+            "The conservative 3 GiB CPU/MPS reference is a runtime/workload reservation, not universal model memory or hardware qualification. Live capacity and native allocation guards remain required.",
+        )
     if model_card.image is not None:
         return (
             "Native image auto-fit may stream parameters from RAM; effective runtime weight precision and margin are budgeted in system memory while the native engine fits GPU buffers.",

@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal, final
+from typing import Annotated, Literal, Self, final
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -22,10 +22,37 @@ from packaging.specifiers import SpecifierSet
 from packaging.tags import sys_tags
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
+from skulk.extensions.native_call_contracts import (
+    CallProfiles,
+    call_native_wheel,
+    public_call_kernel,
+)
+from skulk.extensions.native_contracts import (
+    NativeManifest,
+    NativeProfiles,
+    native_wheel,
+)
+from skulk.extensions.native_inference_contracts import (
+    InferenceManifest,
+    InferenceProfiles,
+    inference_native_wheel,
+    public_inference_kernel,
+)
 from skulk.extensions.runtime_files import is_desktop_metadata, read_private
+
+_OBJECT = TypeAdapter(dict[str, JsonValue])
 
 Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 Identifier = Annotated[
@@ -133,13 +160,17 @@ class RuntimeWheel(_Contract):
         return str(name), str(version)
 
 
-ACCEPTED_RELEASE_PROTOCOLS: tuple[int, ...] = (1,)
+ACCEPTED_RELEASE_PROTOCOLS: tuple[int, ...] = (1, 2, 3)
 """Release record protocols this host installs: the current and, once there is
 one, the previous. A capability published against the previous protocol keeps
 installing for one release cycle; anything else is refused by name."""
 
-ACCEPTED_RUNTIME_PROTOCOLS: tuple[int, ...] = (2,)
-"""Isolated runtime envelope protocols this host installs, on the same rule."""
+ACCEPTED_RUNTIME_PROTOCOLS: tuple[int, ...] = (2, 3, 4, 5)
+"""Explicit migration window: retain issued legacy/native envelopes and add calls.
+
+Existing installations keep their exact closure during controlled application
+migration. A new call envelope cannot inherit an older control interpretation.
+"""
 
 
 class ProtocolUnsupportedError(ValueError):
@@ -192,15 +223,13 @@ class _ManifestClaims(BaseModel):
     executable_sha256: Digest
 
 
-class _ReleaseClaims(_Contract):
-    protocol: ReleaseProtocol
+class _ReleaseFields(_Contract):
     publisher: Identifier
     sequence: int = Field(ge=1)
     created_at: int = Field(gt=0)
     expires_at: int = Field(gt=0)
     artifact_name: Literal["bundle.pyz"]
     artifact_size: int = Field(ge=1, le=67108864)
-    manifest: _ManifestClaims
     platforms: tuple[Literal["darwin", "linux"], ...] = Field(
         min_length=1, max_length=2
     )
@@ -214,12 +243,139 @@ class _ReleaseClaims(_Contract):
     )
 
 
+class _ReleaseClaims(_ReleaseFields):
+    protocol: Annotated[int, AfterValidator(_accepted("release", (1,)))]
+    manifest: _ManifestClaims
+
+
+class _NativeReleaseClaims(_ReleaseFields):
+    protocol: Literal[2]
+    manifest: NativeManifest
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def exact_protocol(cls, value: object) -> object:
+        """Refuse numeric-kind coercion before Pydantic admits the literal."""
+        if type(value) is not int or value != 2:
+            raise ValueError("native release protocol must be integer 2")
+        return value
+
+
+class _InferenceReleaseClaims(_ReleaseFields):
+    protocol: Literal[3]
+    manifest: InferenceManifest
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def exact_protocol(cls, value: object) -> object:
+        """Refuse numeric-kind coercion before Pydantic admits the literal."""
+        if type(value) is not int or value != 3:
+            raise ValueError("native release protocol must be integer 3")
+        return value
+
+
 class _RuntimeClaims(_Contract):
-    protocol: RuntimeProtocol
+    protocol: Annotated[int, AfterValidator(_accepted("runtime", (2, 3)))]
     implementation: Literal["cpython"]
     platform: RuntimePlatform
     release: _ReleaseClaims
     wheels: tuple[RuntimeWheel, ...] = Field(min_length=1, max_length=64)
+    application_roots: tuple[
+        Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=128)],
+        ...,
+    ] = Field(
+        default=(),
+        max_length=8,
+        description="V3 signed application dependency roots in the wheel inventory.",
+    )
+
+    @model_validator(mode="after")
+    def validate_application_roots(self) -> Self:
+        """Keep v2 wire shape intact and require explicit, unique v3 roots."""
+        if self.protocol == 2 and "application_roots" in self.model_fields_set:
+            raise ValueError("runtime v2 cannot declare application roots")
+        if self.protocol == 3 and not self.application_roots:
+            raise ValueError("runtime v3 requires application roots")
+        if len(set(self.application_roots)) != len(self.application_roots):
+            raise ValueError("runtime has duplicate application roots")
+        return self
+
+
+class _NativeRuntimeClaims(_Contract):
+    protocol: Literal[3]
+    implementation: Literal["cpython"]
+    platform: RuntimePlatform
+    release: _NativeReleaseClaims
+    kernel: NativeProfiles
+    wheels: tuple[RuntimeWheel, ...] = Field(min_length=1, max_length=64)
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def exact_protocol(cls, value: object) -> object:
+        """Preserve the version-three envelope's exact JSON integer kind."""
+        if type(value) is not int or value != 3:
+            raise ValueError("native runtime protocol must be integer 3")
+        return value
+
+
+class _CallRuntimeClaims(_Contract):
+    """A separately signed envelope selecting the complete composed-call cohort."""
+
+    protocol: Literal[4] = Field(
+        description="Separately signed call-runtime envelope version."
+    )
+    implementation: Literal["cpython"] = Field(
+        description="Interpreter implementation selected by the signed closure."
+    )
+    platform: RuntimePlatform = Field(description="Exact published artifact family.")
+    release: _NativeReleaseClaims = Field(
+        description="Native author and bundle identity, without legacy projection."
+    )
+    kernel: CallProfiles = Field(
+        description="All six explicit call-cohort fingerprints and source identity."
+    )
+    control_profile: Literal["skulk.calls/1"] = Field(
+        description="Active call control; never inferred from available methods."
+    )
+    wheels: tuple[RuntimeWheel, ...] = Field(min_length=1, max_length=64)
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def exact_protocol(cls, value: object) -> object:
+        """Refuse numeric coercion before selecting the call envelope."""
+        if type(value) is not int or value != 4:
+            raise ValueError("native call runtime protocol must be integer 4")
+        return value
+
+
+class _InferenceRuntimeClaims(_Contract):
+    """A separately signed envelope selecting the complete composed-call cohort."""
+
+    protocol: Literal[5] = Field(
+        description="Separately signed call-runtime envelope version."
+    )
+    implementation: Literal["cpython"] = Field(
+        description="Interpreter implementation selected by the signed closure."
+    )
+    platform: RuntimePlatform = Field(description="Exact published artifact family.")
+    release: _InferenceReleaseClaims = Field(
+        description="Native author and bundle identity, without legacy projection."
+    )
+    kernel: InferenceProfiles = Field(
+        description="All six explicit inference-cohort fingerprints and source identity."
+    )
+    control_profile: Literal["skulk.calls/2"] = Field(
+        description="Active call control; never inferred from available methods."
+    )
+    wheels: tuple[RuntimeWheel, ...] = Field(min_length=1, max_length=64)
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def exact_protocol(cls, value: object) -> object:
+        """Refuse numeric coercion before selecting the call envelope."""
+        if type(value) is not int or value != 5:
+            raise ValueError("native call runtime protocol must be integer 5")
+        return value
 
 
 class _Signed(_Contract):
@@ -245,17 +401,99 @@ class VerifiedRuntime:
 
     metadata: bytes
     payload: bytes
-    claims: _RuntimeClaims
+    claims: (
+        _RuntimeClaims
+        | _NativeRuntimeClaims
+        | _CallRuntimeClaims
+        | _InferenceRuntimeClaims
+    )
 
     @property
     def digest(self) -> str:
         """Bind every signed claim including opaque plugin policy."""
-        return hashlib.sha256(self.payload).hexdigest()
+        return hashlib.sha256(self.signature_message).hexdigest()
+
+    @property
+    def signature_message(self) -> bytes:
+        """Keep legacy signing bytes unchanged and domain-separate native records."""
+        return (
+            _runtime_signature_prefix(
+                self.claims.protocol, release_protocol=self.claims.release.protocol
+            )
+            + self.payload
+        )
+
+    @property
+    def release_digest(self) -> str:
+        """Bind the full bundle release under its original or native domain."""
+        payload = _OBJECT.validate_json(self.payload)
+        release = _OBJECT.validate_python(payload["release"], strict=True)
+        prefix = (
+            b"skulk.release/3\0"
+            if isinstance(self.claims, _InferenceRuntimeClaims)
+            else b"skulk.release/2\0"
+            if self.native_manifest is not None
+            else b""
+        )
+        return hashlib.sha256(prefix + canonical_json(release)).hexdigest()
+
+    @property
+    def native_manifest(self) -> NativeManifest | InferenceManifest | None:
+        """Return the admitted native record only for its explicit envelope."""
+        if isinstance(
+            self.claims,
+            (_NativeRuntimeClaims, _CallRuntimeClaims, _InferenceRuntimeClaims),
+        ):
+            return self.claims.release.manifest
+        return None
+
+    @property
+    def configuration_schema(self) -> JsonValue:
+        """Project the declared schema while preserving native boolean roots."""
+        if (manifest := self.native_manifest) is not None:
+            return manifest.configuration_schema
+        payload = _OBJECT.validate_json(self.payload)
+        release = _OBJECT.validate_python(payload["release"], strict=True)
+        manifest = _OBJECT.validate_python(release["manifest"], strict=True)
+        return manifest.get("configuration_schema")
 
     @property
     def inventory(self) -> dict[str, str]:
         """Return a fresh exact dependency inventory without installer tools."""
         return dict(sorted(wheel.distribution for wheel in self.claims.wheels))
+
+
+def is_native_runtime(runtime: dict[str, JsonValue]) -> bool:
+    """Recognize explicit native runtime/release version pairs without granting trust.
+
+    Application-root runtime three retains release one and its original signing
+    bytes. Native runtime three carries release two; later native formats also
+    have fixed pairs. Callers must authenticate metadata before admitting effects.
+    """
+    protocol = runtime.get("protocol")
+    release = runtime.get("release")
+    release_protocol = release.get("protocol") if isinstance(release, dict) else None
+    return (
+        type(protocol) is int
+        and type(release_protocol) is int
+        and (protocol, release_protocol) in {(3, 2), (4, 2), (5, 3)}
+    )
+
+
+def _runtime_signature_prefix(
+    protocol: JsonValue, *, release_protocol: JsonValue = None
+) -> bytes:
+    """Preserve each issued signing domain, including legacy application roots."""
+    if (
+        type(protocol) is int
+        and protocol == 3
+        and type(release_protocol) is int
+        and release_protocol == 1
+    ):
+        return b""
+    if type(protocol) is int and protocol in (3, 4, 5):
+        return f"skulk.runtime/{protocol}\0".encode("ascii")
+    return b""
 
 
 def canonical_json(value: JsonValue) -> bytes:
@@ -363,13 +601,28 @@ def _check_protocol_window(runtime: dict[str, JsonValue]) -> None:
 def verify_runtime(
     metadata: bytes, trust: RuntimeTrust, host: QualifiedHost, *, now: int
 ) -> VerifiedRuntime:
-    """Authenticate complete v2 metadata, then enforce local trust and compatibility.
+    """Authenticate legacy/native metadata before enforcing local compatibility.
 
     Plugin-specific manifest fields are signed opaque data. No plugin package,
     provider policy or private dependency is imported to inspect a release.
     """
     if len(metadata) > MAX_RUNTIME_METADATA_BYTES:
         raise ValueError("runtime metadata exceeds bound")
+
+    # Ambiguous JSON members must never acquire different identities in readers
+    # on either side of the signed installation handoff.
+    def unique_members(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
+        result: dict[str, JsonValue] = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError("duplicate runtime metadata member")
+            result[name] = value
+        return result
+
+    try:
+        json.loads(metadata, object_pairs_hook=unique_members)
+    except RecursionError:
+        raise ValueError("runtime metadata is invalid JSON") from None
     signed = _Signed.model_validate_json(metadata)
     payload = canonical_json(signed.runtime)
     # The publisher is read minimally so the signature can be checked before
@@ -385,15 +638,63 @@ def verify_runtime(
     ):
         raise ValueError("runtime publisher trust refused")
     try:
+        protocol = signed.runtime.get("protocol")
+        signed_release = signed.runtime.get("release")
+        release_protocol = (
+            signed_release.get("protocol") if isinstance(signed_release, dict) else None
+        )
+        # These two signed version fields select the original signature scheme,
+        # never a trial-verification fallback or authority-bearing interpretation.
+        message = (
+            _runtime_signature_prefix(protocol, release_protocol=release_protocol)
+            + payload
+        )
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(public)).verify(
-            bytes.fromhex(signed.signature), payload
+            bytes.fromhex(signed.signature), message
         )
     except (InvalidSignature, ValueError):
         raise ValueError("runtime signature refused") from None
     _check_protocol_window(signed.runtime)
-    claims = _RuntimeClaims.model_validate_json(payload)
+    claims: (
+        _RuntimeClaims
+        | _NativeRuntimeClaims
+        | _CallRuntimeClaims
+        | _InferenceRuntimeClaims
+    )
+    if type(protocol) is int and protocol == 5:
+        claims = _InferenceRuntimeClaims.model_validate_json(payload)
+    elif type(protocol) is int and protocol == 4:
+        claims = _CallRuntimeClaims.model_validate_json(payload)
+    elif type(protocol) is int and protocol == 3 and is_native_runtime(signed.runtime):
+        claims = _NativeRuntimeClaims.model_validate_json(payload)
+    else:
+        claims = _RuntimeClaims.model_validate_json(payload)
     release = claims.release
     runtime = VerifiedRuntime(metadata, payload, claims)
+    if isinstance(
+        claims, (_NativeRuntimeClaims, _CallRuntimeClaims, _InferenceRuntimeClaims)
+    ):
+        if isinstance(claims, _InferenceRuntimeClaims):
+            public_inference_kernel()
+            filename, digest, size = inference_native_wheel(
+                canonical_platform(claims.platform), version=claims.kernel.version
+            )
+        elif isinstance(claims, _CallRuntimeClaims):
+            public_call_kernel()
+            filename, digest, size = call_native_wheel(
+                canonical_platform(claims.platform)
+            )
+        else:
+            filename, digest, size = native_wheel(canonical_platform(claims.platform))
+        if (
+            not any(
+                (wheel.filename, wheel.sha256, wheel.size) == (filename, digest, size)
+                for wheel in claims.wheels
+            )
+            or "pip" in runtime.inventory
+            or claims.release.manifest.executable != "bundle.pyz"
+        ):
+            raise ValueError("native runtime requires the qualified kernel closure")
     family = canonical_platform(host.platform)
     expected_os = "darwin" if family.startswith("macos") else family.split("-")[0]
     # Skulk is the platform and a capability is software installed on it: a
@@ -408,6 +709,7 @@ def verify_runtime(
         or host.python_version not in SpecifierSet(release.python_requires)
         or host.skulk_version not in SpecifierSet(release.manifest.skulk_requires)
         or runtime.digest in trust.revoked_artifacts
+        or runtime.release_digest in trust.revoked_artifacts
         or release.manifest.executable_sha256 in trust.revoked_artifacts
         or any(wheel.sha256 in trust.revoked_artifacts for wheel in claims.wheels)
     ):
@@ -418,6 +720,8 @@ def verify_runtime(
         or sum(wheel.size for wheel in claims.wheels) > 536870912
     ):
         raise ValueError("ambiguous or oversized runtime inventory")
+    if isinstance(claims, _RuntimeClaims) and not set(claims.application_roots) <= set(inventory):
+        raise ValueError("runtime omits an application dependency root")
     if (
         hashlib.sha256(canonical_json(dict(inventory))).hexdigest()
         != release.dependency_lock_sha256
@@ -546,6 +850,8 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
     expanded = 0
     inventory = runtime.inventory
     launchers: list[str] = []
+    providers: set[str] = set()
+    dependencies: dict[str, tuple[str, ...]] = {}
     for wheel in runtime.claims.wheels:
         content = read_private(directory / wheel.filename, wheel.size)
         if (
@@ -592,7 +898,11 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
             # Only after the entry-count, expanded-size and single-metadata
             # bounds hold: a malformed wheel must not get decompression work
             # out of the launcher scan before it is rejected.
-            launchers += runtime_launchers(archive)
+            declared = runtime_launchers(archive)
+            launchers += declared
+            if declared:
+                providers.add(str(name))
+            required: list[str] = []
             for value in parsed.get_all("Requires-Dist", []):
                 requirement = Requirement(str(value))
                 if requirement.marker is not None and not requirement.marker.evaluate(
@@ -607,6 +917,8 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
                     or Version(inventory[dependency]) not in requirement.specifier
                 ):
                     raise ValueError("incomplete or incompatible wheel dependency")
+                required.append(dependency)
+            dependencies[str(name)] = tuple(required)
         result[wheel.filename] = content
     if len(launchers) != len(set(launchers)):
         # Which distribution answers importlib.metadata first is not bound by
@@ -619,4 +931,18 @@ def _verified_artifacts(runtime: VerifiedRuntime, directory: Path) -> dict[str, 
         raise ValueError(
             "bundle carries no owner entrypoint and no signed wheel declares one"
         )
+    if isinstance(runtime.claims, _RuntimeClaims) and runtime.claims.protocol == 3:
+        # V3 launchers declare their own dependency edges. The host can verify
+        # the complete graph without importing a plugin or knowing SDK-specific
+        # package names. V2 retains its original admission behavior.
+        pending = [*providers, *runtime.claims.application_roots]
+        visited: set[str] = set()
+        while pending:
+            name = pending.pop()
+            if name in visited:
+                continue
+            visited.add(name)
+            pending.extend(dependencies[name])
+        if visited != set(inventory):
+            raise ValueError("runtime contains undeclared dependency packages")
     return result

@@ -12,7 +12,7 @@ name = "skulk_pyo3_bindings"
 # Windows installs a published wheel of this exact version: the root
 # pyproject pins it for win32, so a bump here needs that pin moved and the
 # Windows wheel published (bindings-wheel.yml) before `uv lock`.
-version = "0.2.9"
+version = "0.2.11"
 description = "Add your description here"
 readme = "README.md"
 authors = [
@@ -30,6 +30,9 @@ dev = ["skulk_pyo3_bindings", "pytest>=8.4.0", "pytest-asyncio>=1.0.0"]
 #python-source = "python"
 module-name = "skulk_pyo3_bindings"
 features = ["pyo3/extension-module", "pyo3/experimental-async"]
+# Maturin relocates pyproject.toml to the archive root; keep the stub beside it
+# so rebuilding an sdist retains the wheel's PEP 561 typing information.
+include = [{ path = "skulk_pyo3_bindings.pyi", format = "sdist" }]
 
 [tool.pytest.ini_options]
 log_cli = true

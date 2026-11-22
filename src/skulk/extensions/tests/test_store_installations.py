@@ -8,12 +8,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import JsonValue, TypeAdapter
 
+import skulk.extensions.runtime_manager as runtime_manager_module
 from skulk.extensions.capability_store import (
     CAPABILITY_STORE_CATALOG_DOCUMENT,
     CAPABILITY_STORE_CATALOG_URL,
@@ -708,10 +710,30 @@ async def test_busy_followers_share_one_deadline(
             RuntimeLock(host.manager.downloads[plugin_id].installer.installer)
             for plugin_id in ("managed.first", "managed.second", "managed.third")
         ]
+        clock_seconds = 100.0
+        observed_waits: list[float] = []
+        original_follow_trust = RuntimeDownloads.follow_trust
+
+        async def follow_trust(
+            self: RuntimeDownloads, trust: RuntimeTrust, *, wait_seconds: float = 2.0
+        ) -> bool:
+            nonlocal clock_seconds
+            observed_waits.append(wait_seconds)
+            # Exhaust the common budget after the first follower. Real locks
+            # still refuse all three; catalog/fsync latency is not the fence
+            # budget and must not determine this assertion on slower storage.
+            clock_seconds += 0.6
+            return await original_follow_trust(self, trust, wait_seconds=wait_seconds)
+
         try:
-            started = time.monotonic()
-            refreshed = await host.refresh()
-            elapsed = time.monotonic() - started
+            with monkeypatch.context() as controlled:
+                controlled.setattr(
+                    runtime_manager_module,
+                    "time",
+                    SimpleNamespace(monotonic=lambda: clock_seconds, time=time.time),
+                )
+                controlled.setattr(RuntimeDownloads, "follow_trust", follow_trust)
+                refreshed = await host.refresh()
         finally:
             for lock in held:
                 lock.close()
@@ -720,7 +742,7 @@ async def test_busy_followers_share_one_deadline(
             "managed.second",
             "managed.third",
         }
-        assert elapsed < 1.5
+        assert observed_waits == pytest.approx([0.5, 0.0, 0.0])
         assert set((await host.refresh()).followed) == {
             "managed.first",
             "managed.second",

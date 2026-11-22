@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { ModelInfo } from '../types/models';
+import { operatorSession } from '../auth/operatorSession';
 
 /** Cached catalog shared by native chat and the Skulk conversation selector. */
 export interface ChatModelCatalog {
@@ -9,25 +10,28 @@ export interface ChatModelCatalog {
 
 /** Keep one owner-scoped catalog alive while either chat presentation is mounted. */
 export function useChatModelCatalog(provided?: ChatModelCatalog): ChatModelCatalog {
-  const [catalog, setCatalog] = useState<ChatModelCatalog>({ models: {}, loaded: false });
+  const session = useSyncExternalStore(operatorSession.subscribe, operatorSession.snapshot);
+  const [catalog, setCatalog] = useState(() => ({ models: {} as Record<string, ModelInfo>, loaded: false, session }));
   const shared = provided !== undefined;
   useEffect(() => {
     if (shared) return;
     let disposed = false;
     const refresh = async () => {
       try {
-        const response = await fetch('/models');
+        const response = await operatorSession.fetch('/models', { headers: { 'X-Skulk-Dashboard': 'pairing-v1' } });
         if (!response.ok) return;
         const value = await response.json() as { data?: ModelInfo[] };
         const models = Object.fromEntries((value.data ?? []).filter(model => model.id).map(model => [model.id, model]));
-        if (!disposed) setCatalog({ models, loaded: true });
+        if (!disposed) setCatalog({ models, loaded: true, session });
       } catch { /* Retain the last catalog; submission rechecks provider expiry. */ }
     };
     void refresh();
     const timer = window.setInterval(() => { void refresh(); }, 15000);
     return () => { disposed = true; window.clearInterval(timer); };
-  }, [shared]);
-  const current = provided ?? catalog;
+  }, [shared, session]);
+  // A new identity must never render the previous owner's cached choices while
+  // its own request is pending, failed or deliberately disconnected.
+  const current = provided ?? (catalog.session === session ? catalog : { models: {}, loaded: false });
   useEffect(() => {
     if (shared) return;
     const expiries = Object.values(catalog.models)

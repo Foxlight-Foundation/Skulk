@@ -489,6 +489,7 @@ def assess_inference(
             telemetry.node_memory,
         ),
         unreflected=unreflected,
+        node_resources=telemetry.node_resources,
     )
     vram = usable_vram_by_node(
         telemetry.node_system,

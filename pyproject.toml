@@ -5,6 +5,8 @@ description = "Skulk: distributed AI inference across heterogeneous clusters (Ap
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+  # Qualified public native contracts; other artifact families refuse this profile.
+  "skulk-capability-kernel==0.7.0rc4; (sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64'))",
   "aiofiles>=24.1.0",
   "aiohttp>=3.14.4",
   "types-aiofiles>=24.1.0.20250708",
@@ -19,12 +21,13 @@ dependencies = [
   # Rust bindings. macOS and Linux build them from rust/ during `uv sync`.
   # Windows has no compiler toolchain to assume, so it installs the wheel that
   # .github/workflows/bindings-wheel.yml publishes to the Foxlight index (see
-  # [tool.uv.sources]). That wheel exists for CPython 3.13 only. The Windows pin
+  # [tool.uv.sources]). That wheel exists for CPython 3.13 only, so the Windows
+  # entry in [tool.uv] environments stops at 3.13. The Windows pin
   # must equal the version in rust/skulk_pyo3_bindings/pyproject.toml
   # (src/skulk/tests/test_windows_bindings_wheel.py enforces it): bump both
   # together and publish the Windows wheel before running `uv lock`.
   "skulk_pyo3_bindings; sys_platform != 'win32'",
-  "skulk_pyo3_bindings==0.2.9; sys_platform == 'win32' and python_version < '3.14'",
+  "skulk_pyo3_bindings==0.2.11; sys_platform == 'win32'",
   "anyio==4.14.2",
   "mlx==0.32.4; sys_platform == 'darwin'",
   "mlx[cpu]==0.32.4; sys_platform == 'linux'",
@@ -131,6 +134,9 @@ hook-dirs = "skulk._pyinstaller:get_hook_dirs"
 [dependency-groups]
 dev = [
   "basedpyright>=1.29.0",
+  # The signed native stream qualification uses a real stock client on every
+  # platform; it must not depend on macOS-only transitive client dependencies.
+  "websockets>=17.1,<18",
   # Execute the immutable upstream patchifiers in the wheel reference check.
   "einops==0.8.1",
   # The native inpaint oracle uses the same pyramid math as the Comfy runtime.
@@ -177,6 +183,12 @@ skulk_pyo3_bindings = [
   { path = "rust/skulk_pyo3_bindings", editable = true, marker = "sys_platform != 'win32'" },
   { index = "foxlight", marker = "sys_platform == 'win32'" },
 ]
+# Public cohort assets remain immutable inputs to the normal frozen install.
+skulk-capability-kernel = [
+  { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-manylinux_2_34_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-manylinux_2_34_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+  { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-macosx_11_0_arm64.whl", marker = "sys_platform == 'darwin' and platform_machine == 'arm64'" },
+]
 # Using official mlx — the RDMA fork (rltakashige/mlx-jaccl-fix-small-recv) doesn't
 # build on macOS 26 Metal SDK. The fork's only change is a DSB memory barrier for
 # Thunderbolt RDMA GPU coherence, which we don't need (Skulk uses libp2p, not RDMA).
@@ -212,7 +224,7 @@ build-backend = "uv_build"
 ###
 
 [tool.basedpyright]
-include = [".venv/lib/mlx", ".venv/lib/mlx_lm", "src", "bench"]
+include = [".venv/lib/mlx", ".venv/lib/mlx_lm", "src", "bench", "scripts/qualify_native_startup.py", "scripts/qualify_native_inference.py", "scripts/qualify_native_streams.py"]
 typeCheckingMode = "strict"
 failOnWarnings = true
 
@@ -249,12 +261,18 @@ root = "src"
 # supported platforms for this project
 [tool.uv]
 required-version = ">=0.8.6"
-# Windows (win32) is a non-compute target only: it runs the management
-# participation mode and hosts capabilities, never an inference engine.
+# The MLX hard dependency already has binaries only for Apple Silicon and
+# Linux x86_64/aarch64. Declare those real installation targets so a new
+# platform-specific dependency does not ask uv to solve imaginary architectures.
+# Windows (win32, x86-64) is a non-compute target only: it runs the management
+# participation mode and never an inference engine, so it installs neither MLX
+# nor the native capability kernel. It is limited to CPython 3.13 because the
+# bindings wheel exists for that version only: uv refuses any other Windows
+# interpreter instead of installing a node without its bindings.
 environments = [
-  "sys_platform == 'darwin'",
-  "sys_platform == 'linux'",
-  "sys_platform == 'win32'",
+  "sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+  "sys_platform == 'win32' and platform_machine == 'AMD64' and python_full_version < '3.14'",
 ]
 extra-build-dependencies = { "miniaudio" = ["setuptools", "cffi", "pycparser"] }
 

@@ -23,8 +23,8 @@ old wire code.
 
 CI enforces the pairing: a PR touching anything under this crate's `src/`
 tree, this crate's `Cargo.toml`, or the workspace `Cargo.toml`/`Cargo.lock`
-at the repo root (a libp2p or zenoh dependency bump changes protocol
-behavior without touching our source) must either change the
+at the repo root, or the pinned gossipsub vendor source/manifests (a libp2p
+or zenoh dependency bump changes protocol behavior without touching our source) must either change the
 `NETWORK_VERSION` line or add an entry below explicitly recording that the
 change is wire-neutral (timing, comments, logging, refactors that provably
 keep protocol behavior identical). Deciding wire-neutrality is a review
@@ -39,6 +39,13 @@ membership. Eight days later the live fleet was still running the stale
 bindings while `versionStatus` reported "consistent".
 
 ## Entries (newest first)
+
+- **wire-neutral** (2026-11-20): the coordinated host combines the one-minute
+  mDNS query interval with the subscription-reannouncement repair and bounded
+  telemetry diagnostics below. Protocol ids, topics, frame shapes, authentication,
+  namespace/key derivation and behavior composition remain unchanged;
+  `NETWORK_VERSION` stays v0.0.3. Bindings advance to 0.2.10 so installations
+  carrying either earlier branch's 0.2.8 or 0.2.9 rebuild all three repairs.
 
 - **wire-neutral** (2026-11-19): the mDNS query interval drops from 1,500 s
   to 60 s (`MDNS_QUERY_INTERVAL` in `src/discovery.rs`); the record TTL stays
@@ -59,6 +66,26 @@ bindings while `versionStatus` reported "consistent".
   compile the same dial options as before, so `NETWORK_VERSION` stays v0.0.3.
   A peer that accepts a Windows node's connection now observes an ephemeral
   remote port, as it already does for any dialer behind address translation.
+
+- **wire-neutral** (2026-11-13): the workspace uses the pinned
+  `libp2p-gossipsub` 0.49.5 source with a subscription-reannouncement backport.
+  A handler can prefetch `Subscribe` and take it with it when its connection
+  closes while another survives. Existing local subscriptions are repeated on
+  additional authenticated connections and on close-with-remaining. Only the
+  timing/repetition of existing idempotent subscription RPCs changes; protocol
+  ids, topics, frame shapes, authentication, namespace/key derivation, behavior
+  composition and session configuration stay identical. Old peers already
+  understand these announcements, so `NETWORK_VERSION` remains v0.0.3. Bindings
+  advance to 0.2.9 so ordinary upgrades rebuild the repaired library.
+
+- **wire-neutral** (2026-11-06): persistent telemetry publication failures with
+  authenticated connected peers now emit a bounded local warning after 30
+  seconds, then at most once per minute. The warning reads negotiated protocol,
+  subscription and mesh counts without changing publications, subscriptions,
+  protocol identifiers, framing, key derivation or behaviour composition.
+  `NETWORK_VERSION` remains v0.0.3. Bindings advance to 0.2.8 so ordinary
+  upgrades rebuild the wheel and acquire the diagnostics on their first restart.
+
 - **wire-neutral** (2026-10-10): the lockfile moves to security-fixed
   patch releases. `libp2p-gossipsub` 0.49.2 to 0.49.5 ignores invalid and
   bounds remote PRUNE backoff values, caps subscriptions at 2,000 topics per

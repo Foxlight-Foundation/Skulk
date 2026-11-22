@@ -4,6 +4,7 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 import { Button } from '../common/Button';
 import { SectionLabel, Surface } from '../common/Surfaces';
 import type { RuntimeRelease } from '../../store/endpoints/plugins';
+import { NativeRuntimeConsent } from './NativeRuntimeConsent';
 import { canSpendMoney, capabilityName, displayTitle, formatMegabytes, platformLabel, type CatalogOffer } from './catalogJourney';
 
 /** Props for reviewing one catalog release before consenting to it. */
@@ -63,6 +64,7 @@ export function CatalogReviewPanel({ offer, onInstall, onCancel }: CatalogReview
       <SectionLabel>{t('plugins.catalog.models', 'Models')}</SectionLabel>
       <p>{t('plugins.catalog.modelSources', 'Local model downloads show their licences in the Model Store. Hosted model availability and usage are managed through the capability and its connected provider account.')}</p>
     </Section>
+    <NativeRuntimeConsent binding={entry.native} />
     <Consent>
       <input id="catalog-consent" type="checkbox" checked={accepted} onChange={(event) => setAccepted(event.target.checked)} />
       <label htmlFor="catalog-consent">{t('plugins.catalog.accept', 'I accept these permissions for this release.')}</label>
@@ -113,6 +115,7 @@ export function CatalogRetryReviewPanel({ title, updating, stopped = true, revie
       <SectionLabel>{t('plugins.catalog.allowedTo', 'What it will be allowed to do')}</SectionLabel>
       <ul>{review.permissions.map((permission) => <li key={permission}>{permission}</li>)}</ul>
     </Section>
+    <NativeRuntimeConsent binding={review.native} />
     <Consent>
       <input id="catalog-retry-consent" type="checkbox" checked={accepted} onChange={(event) => setAccepted(event.target.checked)} />
       <label htmlFor="catalog-retry-consent">{t('plugins.catalog.accept', 'I accept these permissions for this release.')}</label>

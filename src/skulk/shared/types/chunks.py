@@ -1,7 +1,7 @@
 from collections.abc import Generator
-from typing import Any, Literal
+from typing import Any, Literal, final
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
 from skulk.api.types import (
     FinishReason,
@@ -12,7 +12,9 @@ from skulk.api.types import (
     Usage,
 )
 from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
+from skulk.shared.types.audio_separation import AudioSeparationOutput
 from skulk.shared.types.music import MusicOutputManifest
+from skulk.shared.types.music_edits import MusicEditingOutput
 from skulk.shared.types.video import (
     VideoGenerationStats,
     VideoOutputManifest,
@@ -229,6 +231,54 @@ class PrefillProgressChunk(BaseChunk):
     total_tokens: int
 
 
+@final
+class SeparationChunk(BaseChunk):
+    """One complete native stem manifest, never raw audio or a partial stem set."""
+
+    model_config = ConfigDict(frozen=True)
+
+    output: AudioSeparationOutput | None = Field(
+        default=None, description="Complete source-aligned output facts."
+    )
+    finish_reason: Literal["stop", "error"] = Field(
+        description="Native render terminal."
+    )
+    error_message: str | None = Field(
+        default=None, max_length=1024, description="Bounded failure detail."
+    )
+
+    @model_validator(mode="after")
+    def validate_complete_set(self) -> "SeparationChunk":
+        """A successful terminal requires all four facts; failure exposes no output."""
+        if (self.finish_reason == "stop") != (self.output is not None):
+            raise ValueError(
+                "successful native separation requires one complete manifest"
+            )
+        if self.finish_reason == "stop" and self.error_message is not None:
+            raise ValueError("successful native separation cannot contain a failure")
+        return self
+
+
+@final
+class MusicEditingChunk(BaseChunk):
+    """Correlated native edit completion; raw WAV bytes use addressed media."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    output: MusicEditingOutput | None = Field(default=None, description="Complete native edit/source provenance.")
+    finish_reason: Literal["stop", "error"] = Field(description="Successful native completion or terminal failure.")
+    error_message: str | None = Field(default=None, max_length=1024, description="Bounded failure detail.")
+
+    @model_validator(mode="after")
+    def validate_result(self) -> "MusicEditingChunk":
+        """Require exactly one complete success manifest; failed edits expose none."""
+        if (self.finish_reason == "stop") != (self.output is not None):
+            raise ValueError("Native music edit success requires a complete manifest")
+        if self.finish_reason == "stop" and self.error_message is not None:
+            raise ValueError("Successful native music edit cannot contain a failure")
+        return self
+
+
 GenerationChunk = (
     TokenChunk
     | ImageChunk
@@ -240,6 +290,8 @@ GenerationChunk = (
     | PrefillProgressChunk
     | VideoChunk
     | MusicChunk
+    | SeparationChunk
+    | MusicEditingChunk
 )
 
 
@@ -298,9 +350,7 @@ class DataChunk(CamelCaseModel):
         if self.kind in ("failed", "cancelled") and not isinstance(
             self.chunk, ErrorChunk
         ):
-            raise ValueError(
-                f"{self.kind} data-plane frames must carry an ErrorChunk"
-            )
+            raise ValueError(f"{self.kind} data-plane frames must carry an ErrorChunk")
         return self
 
     @property

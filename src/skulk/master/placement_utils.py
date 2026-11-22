@@ -1,4 +1,5 @@
 import ipaddress
+import time
 from collections.abc import Generator, Mapping
 from collections.abc import Set as AbstractSet
 from typing import Final, final
@@ -35,9 +36,19 @@ from skulk.shared.models.memory_estimate import (
     estimate_kv_cache_bytes as _estimate_kv_cache_bytes,
 )
 from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.models.native_music_admission import (
+    native_music_instance_budget,
+    native_music_placement_commitments,
+)
+from skulk.shared.models.native_music_memory import reserve_native_music_memory
+from skulk.shared.models.native_music_runtime import resolve_native_music_policy
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import Host, NodeId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.native_music import (
+    NativeMusicMemoryBudget,
+    native_music_admission_capacity,
+)
 from skulk.shared.types.profiling import (
     MemoryUsage,
     NodeNetworkInfo,
@@ -225,7 +236,97 @@ def usable_vram_by_node(
         unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
             node_system, node_resources, node_memory
         ),
+        node_resources=node_resources,
     )
+
+
+def _native_reservation_budget(
+    instance: Instance,
+    node: NodeId,
+    node_resources: Mapping[NodeId, NodeResources] | None,
+) -> NativeMusicMemoryBudget | None:
+    """Resolve native ownership without interpreting idle state as free memory."""
+    assignments = instance.shard_assignments
+    runner = assignments.node_to_runner[node]
+    shard = assignments.runner_to_shard[runner]
+    if shard.model_card.music is None or shard.model_card.music.native is None:
+        return None
+    policy = shard.native_music_policy
+    resources = (node_resources or {}).get(node)
+    probe = (
+        resources.native_music_probes.get(policy.backend)
+        if resources is not None and policy is not None else None
+    )
+    observation = (
+        probe.memory_capacity
+        if probe is not None and policy is not None
+        and probe.payload_sha256 == policy.payload_sha256 else None
+    )
+    unified = (
+        policy is None or policy.execution.device == "mps"
+        or observation is None or observation.device_memory_kind != "discrete"
+    )
+    return native_music_instance_budget(instance, node, unified=unified)
+
+
+def _native_coexistence_gpu_limit(
+    node: NodeId,
+    resources: NodeResources | None,
+    instances: Mapping[InstanceId, Instance],
+) -> int:
+    """Bound ordinary GPU placement by the native owner's actual device zero.
+
+    Generic telemetry may describe another/larger accelerator or add a BIOS
+    carve to shared RAM. No loaded status proves exclusive reflected pages.
+    A missing/stale native observation requires refresh before admitting more.
+    """
+    if resources is None:
+        return 0
+    limits: list[int] = []
+    seen_backends: set[str] = set()
+    for instance in instances.values():
+        assignments = instance.shard_assignments
+        runner = assignments.node_to_runner.get(node)
+        shard = assignments.runner_to_shard.get(runner) if runner is not None else None
+        policy = shard.native_music_policy if shard is not None else None
+        if policy is None or policy.execution.device == "cpu":
+            continue
+        probe = resources.native_music_probes.get(policy.backend)
+        capacity = probe.memory_capacity if probe is not None else None
+        if (
+            probe is None or probe.payload_sha256 != policy.payload_sha256
+            or resources.engine_builds.get(policy.backend) != "ace_step@sha256:" + policy.payload_sha256
+            or capacity is None or capacity.device_index != 0
+            or capacity.device_memory_kind is None
+            or capacity.sampled_at_unix_ms <= 0
+            or not -30_000 <= int(time.time() * 1000) - capacity.sampled_at_unix_ms <= 120_000
+        ):
+            return 0
+        assert shard is not None
+        try:
+            if resolve_native_music_policy(shard.model_card, policy.backend, probe).execution != policy.execution:
+                return 0
+        except ValueError:
+            return 0
+        if policy.backend in seen_backends:
+            continue
+        seen_backends.add(policy.backend)
+        try:
+            remaining = reserve_native_music_memory(
+                native_music_admission_capacity(capacity), (),
+                additional_budgets=native_music_placement_commitments(
+                    node, resources, instances,
+                    target_device=probe.device,
+                    node_is_unified=capacity.device_memory_kind == "unified",
+                ),
+            )
+        except ValueError:
+            return 0
+        limit = remaining.device_available_bytes or 0
+        if remaining.shared_available_bytes is not None:
+            limit = min(limit, remaining.shared_available_bytes)
+        limits.append(limit)
+    return min(limits, default=0)
 
 
 def reserve_instance_vram(
@@ -234,6 +335,7 @@ def reserve_instance_vram(
     current_instances: Mapping[InstanceId, Instance],
     *,
     unified_memory_gpu_nodes: frozenset[NodeId] = frozenset(),
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
 ) -> dict[NodeId, Memory]:
     """Cap observed discrete VRAM by the capacity committed to concrete shards.
 
@@ -243,6 +345,8 @@ def reserve_instance_vram(
         current_instances: Placements that still own their shard reservations.
         unified_memory_gpu_nodes: APUs using host memory; retain their existing
             combined-pool admission instead of treating the VRAM carve as a cap.
+        node_resources: Actual selected-device native probes. Native ownership
+            cannot borrow a larger accelerator or an additive UMA carve pool.
 
     Returns:
         A fresh memory map bounded by both observations and uncommitted physical
@@ -250,8 +354,12 @@ def reserve_instance_vram(
         their runtime-selected per-device shares are not represented by shards.
     """
     committed: dict[NodeId, int] = {}
+    native_nodes: set[NodeId] = set()
+    invalid_nodes: set[NodeId] = set()
     for instance in current_instances.values():
         if isinstance(instance, LlamaRpcInstance):
+            if any(shard.model_card.music is not None and shard.model_card.music.native is not None for shard in instance.shard_assignments.runner_to_shard.values()):
+                invalid_nodes.update(instance.shard_assignments.node_to_runner)
             # The driver nominally spans every layer but llama.cpp chooses the
             # actual pooled split at runtime. Charging that nominal shard would
             # invent a full-model allocation on the driver and none on donors.
@@ -259,6 +367,16 @@ def reserve_instance_vram(
         assignments = instance.shard_assignments
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = assignments.runner_to_shard[runner_id]
+            try:
+                native = _native_reservation_budget(instance, node_id, node_resources)
+            except ValueError:
+                invalid_nodes.add(node_id)
+                continue
+            if native is not None:
+                if native.device_peak_bytes:
+                    native_nodes.add(node_id)
+                    committed[node_id] = committed.get(node_id, 0) + native.device_peak_bytes
+                continue
             # Older restored placements may predate master backend stamping.
             # Unknown engine ownership on a GPU host cannot expose fresh VRAM;
             # explicitly CPU-resolved shards still use only the system-RAM pool.
@@ -311,6 +429,14 @@ def reserve_instance_vram(
         usable[node_id] = Memory.from_bytes(
             min(observed.in_bytes, max(0, ceiling - committed.get(node_id, 0)))
         )
+    for node_id in native_nodes:
+        if node_id in usable:
+            usable[node_id] = min(usable[node_id], Memory.from_bytes(
+                _native_coexistence_gpu_limit(node_id, (node_resources or {}).get(node_id), current_instances)
+            ))
+    for node_id in invalid_nodes:
+        if node_id in usable:
+            usable[node_id] = Memory()
     return usable
 
 
@@ -322,6 +448,7 @@ def reserve_instance_system_ram(
     unified_memory_gpu_nodes: AbstractSet[NodeId] = frozenset(),
     carve_first_nodes: AbstractSet[NodeId] = frozenset(),
     unreflected: AbstractSet[InstanceId] = frozenset(),
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
 ) -> dict[NodeId, Memory]:
     """Live system RAM per node, net of placements telemetry may not show yet.
 
@@ -363,6 +490,8 @@ def reserve_instance_system_ram(
             without it every shard reads as loaded.
         unreflected: Placements whose load telemetry has not shown yet; their
             footprints also come off the observed figure.
+        node_resources: Exact native memory topology; absent topology is shared
+            conservatively. Native work reserves its full future phase budget.
 
     Returns:
         Usable live system RAM keyed by node, for every node in ``node_memory``.
@@ -370,12 +499,26 @@ def reserve_instance_system_ram(
     node_vram = node_vram or {}
     committed: dict[NodeId, int] = {}
     pending: dict[NodeId, int] = {}
+    invalid_nodes: set[NodeId] = set()
     for instance_id, instance in current_instances.items():
         if isinstance(instance, LlamaRpcInstance):
+            if any(shard.model_card.music is not None and shard.model_card.music.native is not None for shard in instance.shard_assignments.runner_to_shard.values()):
+                invalid_nodes.update(instance.shard_assignments.node_to_runner)
             continue
         assignments = instance.shard_assignments
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = assignments.runner_to_shard[runner_id]
+            try:
+                native = _native_reservation_budget(instance, node_id, node_resources)
+            except ValueError:
+                invalid_nodes.add(node_id)
+                continue
+            if native is not None:
+                committed[node_id] = committed.get(node_id, 0) + native.host_peak_bytes
+                # No loading/idle heuristic proves exclusive reflected pages.
+                # Future workspace remains unallocated while the model is idle.
+                pending[node_id] = pending.get(node_id, 0) + native.host_peak_bytes
+                continue
             # The same ownership rule as reserve_instance_vram: a shard that
             # offloads, or an unstamped one on a discrete-VRAM host, lives in
             # VRAM and is charged there, never here as well.
@@ -418,6 +561,9 @@ def reserve_instance_system_ram(
                 pending[node_id] = pending.get(node_id, 0) + footprint.in_bytes
     usable: dict[NodeId, Memory] = {}
     for node_id, usage in node_memory.items():
+        if node_id in invalid_nodes:
+            usable[node_id] = Memory()
+            continue
         charged = committed.get(node_id, 0)
         if charged <= 0:
             usable[node_id] = usage.ram_available
@@ -436,6 +582,7 @@ def reserve_system_ram_usage(
     unified_memory_gpu_nodes: AbstractSet[NodeId] = frozenset(),
     carve_first_nodes: AbstractSet[NodeId] = frozenset(),
     unreflected: AbstractSet[InstanceId] = frozenset(),
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
 ) -> dict[NodeId, MemoryUsage]:
     """``node_memory`` with each ``ram_available`` net of committed placements.
 
@@ -450,6 +597,7 @@ def reserve_system_ram_usage(
         unified_memory_gpu_nodes=unified_memory_gpu_nodes,
         carve_first_nodes=carve_first_nodes,
         unreflected=unreflected,
+        node_resources=node_resources,
     )
     return {
         node_id: (
@@ -846,24 +994,34 @@ def filter_cycles_by_memory(
                 + estimate_music_workspace(model_card, resolved_backend=backend)
                 + fixed_memory_by_node.get(node_id, Memory())
             )
-            native_single_host = backend == "mlx_video-metal" and len(cycle.node_ids) == 1
+            native_single_host = len(cycle.node_ids) == 1 and (
+                backend == "mlx_video-metal" or model_card.separation is not None
+            )
             if native_single_host:
-                # Video stages are not resident layer shards. Use the same
-                # staged reservation the worker and request supervisor enforce.
+                # Native video and separation workloads are not proportional
+                # layer shards. Admission must use the same complete workload
+                # reservation as the worker, rather than the small weight file.
                 required_with_overhead = estimate_shard_footprint(
                     model_card, 1.0, context_budget,
                     resolved_backend=backend,
                     memory_settings=policy,
                 ) + fixed_memory_by_node.get(node_id, Memory())
-            node_vram_usable = node_vram.get(node_id)
-            available = _node_usable_memory(node_memory[node_id], node_vram_usable)
+            native_cpu = model_card.separation is not None and backend == "demucs-cpu"
+            node_vram_usable = None if native_cpu else node_vram.get(node_id)
+            available = (
+                node_memory[node_id].ram_available
+                if native_cpu
+                else _node_usable_memory(node_memory[node_id], node_vram_usable)
+            )
             if required_with_overhead > available:
                 pool = (
                     "usable GPU VRAM"
                     if node_vram_usable is not None
+                    else "available system RAM"
+                    if native_cpu
                     else f"min of available and {GPU_WORKING_SET_FRACTION:.0%} of RAM"
                 )
-                weight_description = "staged video reservation" if native_single_host else f"{share.in_gb:.1f}GB weights"
+                weight_description = "complete native workload reservation" if native_single_host else f"{share.in_gb:.1f}GB weights"
                 overloaded.append(
                     f"node {node_id} needs ~{required_with_overhead.in_gb:.1f}GB "
                     f"({weight_description} + {kv_share.in_gb:.1f}GB "
@@ -1046,6 +1204,54 @@ def _allocate_and_validate_layers(
             )
 
     return layer_allocations
+
+
+def get_single_host_native_music_shard_assignments(
+    model_card: ModelCard, node_id: NodeId
+) -> ShardAssignments:
+    """Represent one complete native music workload after three-pool admission.
+
+    The selected native device, component math and full phase policy have
+    already passed admission. Proportional text-layer allocation against an
+    unrelated generic GPU pool must not reinterpret that decision.
+    """
+    if model_card.music is None or model_card.music.native is None:
+        raise ValueError("single-host native music assignments require native artifacts")
+    runner_id = RunnerId()
+    return ShardAssignments(
+        model_id=model_card.model_id,
+        node_to_runner={node_id: runner_id},
+        runner_to_shard={runner_id: PipelineShardMetadata(
+            model_card=model_card, device_rank=0, world_size=1,
+            start_layer=0, end_layer=model_card.n_layers, n_layers=model_card.n_layers,
+        )},
+    )
+
+
+def get_single_host_separation_shard_assignments(
+    model_card: ModelCard, node_id: NodeId
+) -> ShardAssignments:
+    """Represent one already admitted complete native separation workload.
+
+    Args:
+        model_card: Exact separation card admitted against its full workload.
+        node_id: Selected single host with verified native runtime resources.
+
+    Returns:
+        A complete rank-zero assignment, without allocating proportional text
+        layers against unrelated VRAM or loading any native model.
+    """
+    if model_card.separation is None:
+        raise ValueError("single-host separation assignments require a separation card")
+    runner_id = RunnerId()
+    return ShardAssignments(
+        model_id=model_card.model_id,
+        node_to_runner={node_id: runner_id},
+        runner_to_shard={runner_id: PipelineShardMetadata(
+            model_card=model_card, device_rank=0, world_size=1,
+            start_layer=0, end_layer=model_card.n_layers, n_layers=model_card.n_layers,
+        )},
+    )
 
 
 def get_single_host_video_shard_assignments(

@@ -3,6 +3,7 @@
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -668,12 +669,17 @@ def test_vllm_interpreter_falls_back_to_the_console_script_shebang(
     """A user or pipx install has no sibling python; pip's shebang names it."""
     from skulk.doctor.checks import _vllm_interpreter
 
-    interpreter = tmp_path / "real-python"
-    _ = interpreter.write_text("")
     script = tmp_path / "bin" / "vllm"
     script.parent.mkdir(parents=True)
-    _ = script.write_text(f"#!{interpreter}\nprint('x')\n")
-    assert _vllm_interpreter(str(script)) == interpreter
+    # A raw Unix shebang cannot name an interpreter path containing spaces.
+    # Keep that tiny fixture valid even when pytest's own base directory has them.
+    with TemporaryDirectory(
+        prefix="skulk-doctor-interpreter-", dir="/tmp"
+    ) as root:
+        interpreter = Path(root) / "real-python"
+        _ = interpreter.write_text("")
+        _ = script.write_text(f"#!{interpreter}\nprint('x')\n")
+        assert _vllm_interpreter(str(script)) == interpreter
 
 
 def test_vllm_interpreter_prefers_the_adjacent_venv_python(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -50,19 +51,39 @@ def test_installed_package_is_not_ready_until_selected(tmp_path: Path) -> None:
     )
 
 
-def test_missing_cuda_libraries_have_actionable_probe_diagnostic(tmp_path: Path) -> None:
+def test_missing_cuda_libraries_have_actionable_probe_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A missing CUDA loader library keeps the engine unavailable with a fix hint."""
     binary = tmp_path / "audiocpp_server"
-    binary.write_text(
-        "#!/bin/sh\n"
-        "echo 'error while loading shared libraries: libcublas.so.12: "
-        "cannot open shared object file' >&2\n"
-        "exit 127\n"
-    )
-    binary.chmod(0o755)
+    observed: list[tuple[list[str], int]] = []
+
+    def failed_loader(
+        arguments: list[str], *, capture_output: bool, text: bool, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        """Return an actual loader-failure shape at the subprocess effect boundary."""
+        assert capture_output and text
+        observed.append((arguments, timeout))
+        return subprocess.CompletedProcess(
+            arguments,
+            127,
+            stdout="",
+            stderr=(
+                "error while loading shared libraries: libcublas.so.12: "
+                "cannot open shared object file\n"
+            ),
+        )
+
+    # Exercise loader-diagnostic parsing independently of starting a temporary
+    # shell. Other cases below retain actual executable/version/device probes.
+    monkeypatch.setattr("skulk.facts.probe.subprocess.run", failed_loader)
     probe = probe_audio_cpp(str(binary))
     assert probe.outcome == "failed"
     assert "install the host CUDA 12 runtime, cuBLAS, and NCCL" in (probe.detail or "")
+    assert observed == [
+        ([str(binary), "--version"], 20),
+        ([str(binary), "--list-devices"], 30),
+    ]
 
 
 def test_non_cuda_loader_failure_keeps_its_original_diagnostic(tmp_path: Path) -> None:
@@ -138,18 +159,21 @@ def test_cuda_binary_needs_a_real_cuda_device_and_has_its_own_build(
     """A CUDA package cannot borrow CPU readiness or another executable hash."""
     cpu = _fake_server(
         tmp_path / "cpu/bin/audiocpp_server",
-        backends="cpu", devices="CPU:0 Arm CPU",
+        backends="cpu",
+        devices="CPU:0 Arm CPU",
     )
     cuda = _fake_server(
         tmp_path / "cuda/bin/audiocpp_server",
-        backends="cpu,cuda", devices="CUDA:0 NVIDIA GB10\nCPU:0 Arm CPU",
+        backends="cpu,cuda",
+        devices="CUDA:0 NVIDIA GB10\nCPU:0 Arm CPU",
     )
     facts = gather_node_facts(
         env={
             "SKULK_AUDIO_CPP_BIN": str(cpu),
             "SKULK_AUDIO_CPP_CUDA_BIN": str(cuda),
         },
-        platform="linux", drm_root=tmp_path,
+        platform="linux",
+        drm_root=tmp_path,
     )
     backends = derive_node_backends(facts).backends
     assert {"audio_cpp-cpu", "audio_cpp-cuda"} <= backends
@@ -160,11 +184,14 @@ def test_cuda_binary_needs_a_real_cuda_device_and_has_its_own_build(
     assert inventory["audio_cpp-cuda"] != inventory["audio_cpp-cpu"]
 
     no_device = _fake_server(
-        cuda, backends="cpu,cuda", devices="CPU:0 Arm CPU",
+        cuda,
+        backends="cpu,cuda",
+        devices="CPU:0 Arm CPU",
     )
     missing = gather_node_facts(
         env={"SKULK_AUDIO_CPP_CUDA_BIN": str(no_device)},
-        platform="linux", drm_root=tmp_path,
+        platform="linux",
+        drm_root=tmp_path,
     )
     assert "audio_cpp-cuda" not in derive_node_backends(missing).backends
     assert any(
@@ -187,7 +214,9 @@ def test_missing_model_specs_prevent_ready_advertisement(tmp_path: Path) -> None
     assert "audio_cpp" not in derive_node_backends(facts).backends
 
 
-def test_audio_cpp_inventory_rehashes_and_ignores_declared_build(tmp_path: Path) -> None:
+def test_audio_cpp_inventory_rehashes_and_ignores_declared_build(
+    tmp_path: Path,
+) -> None:
     """A model support claim cannot match a stale or operator-invented digest."""
     binary = _fake_server(tmp_path / "bin" / "audiocpp_server")
     facts = gather_node_facts(
@@ -253,6 +282,7 @@ def test_verified_wheel_may_report_upstream_short_revision(
     import skulk.provisioning.audio_cpp as audio_cpp
 
     binary = _fake_server(tmp_path / "bin" / "audiocpp_server", revision="4d88768")
+
     def verified_wheel(_path: Path) -> bool:
         return True
 

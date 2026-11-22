@@ -1,0 +1,14 @@
+{
+  "include": ["skulk_ace_step", "verify_runtime.py", "runtime_checks/check_geometry.py", "runtime_checks/check_probe.py", "runtime_checks/check_encoding.py", "runtime_checks/check_decoding.py", "runtime_checks/check_rocm_allocator.py"],
+  "typeCheckingMode": "strict",
+  "failOnWarnings": true,
+  "reportAny": "error",
+  "reportUnknownVariableType": "error",
+  "reportUnknownParameterType": "error",
+  "reportMissingParameterType": "error",
+  "reportMissingTypeStubs": "error",
+  "reportInvalidCast": "error",
+  "reportUnnecessaryCast": "error",
+  "reportUnnecessaryTypeIgnoreComment": "error",
+  "pythonVersion": "3.12"
+}

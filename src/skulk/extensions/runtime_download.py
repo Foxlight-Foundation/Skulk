@@ -31,6 +31,10 @@ from skulk.extensions.runtime_artifacts import (
     canonical_json,
 )
 from skulk.extensions.runtime_attachment import ProfileIdentifier
+from skulk.extensions.runtime_catalog import (
+    NativeCatalogBinding,
+    native_runtime_binding,
+)
 from skulk.extensions.runtime_files import (
     acquire_runtime_lock,
     private_directory,
@@ -256,6 +260,10 @@ class ReleaseReview(BaseModel):
     """Verified immutable release identity and permissions available before installation."""
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    native: NativeCatalogBinding | None = Field(
+        default=None,
+        description="Authenticated native declaration, ABI and processing facts for consent; null for legacy releases.",
+    )
     runtime_digest: Digest = Field(description="Digest of all signed runtime claims.")
     source_revision: int = Field(ge=1, description="Reviewed owner source revision.")
     publisher: str = Field(description="Trusted publisher identity.")
@@ -786,6 +794,7 @@ class RuntimeDownloads:
     def _review(runtime: VerifiedRuntime, source: ReleaseSource) -> ReleaseReview:
         release = runtime.claims.release
         return ReleaseReview(
+            native=native_runtime_binding(runtime),
             runtime_digest=runtime.digest,
             source_revision=source.revision,
             publisher=release.publisher,

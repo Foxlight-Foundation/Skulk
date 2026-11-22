@@ -1,0 +1,533 @@
+{
+  "effective_model_code": [
+    {
+      "destination": "configuration_acestep_v15.py",
+      "source": "acestep/models/base/configuration_acestep_v15.py"
+    },
+    {
+      "destination": "modeling_acestep_v15_base.py",
+      "source": "acestep/models/base/modeling_acestep_v15_base.py"
+    },
+    {
+      "destination": "apg_guidance.py",
+      "source": "acestep/models/base/apg_guidance.py"
+    }
+  ],
+  "files": [
+    {
+      "path": "acestep/__init__.py",
+      "sha256": "4ff1234e810a6577d9036402df388eafb0fdf92f77329a5269f65d57289f162b",
+      "size_bytes": 24
+    },
+    {
+      "path": "acestep/audio_utils.py",
+      "sha256": "6d93be392e91d74b44913d8b2130da2b64224d67383326bca9ae3489990d5abf",
+      "size_bytes": 22462
+    },
+    {
+      "path": "acestep/constants.py",
+      "sha256": "7b8d4ce49649c819d1b3be87a434be2d90768308768d4620639328f906209b22",
+      "size_bytes": 8333
+    },
+    {
+      "path": "acestep/core/__init__.py",
+      "sha256": "c5e27c25d766766f891bbd17d0178c03942d70bdd54de67acbdc03ade42f3bab",
+      "size_bytes": 89
+    },
+    {
+      "path": "acestep/core/generation/__init__.py",
+      "sha256": "5b6e480dca8d31337d666760ff14d0d727c080db93166bc946e49d5a6dfdcd78",
+      "size_bytes": 93
+    },
+    {
+      "path": "acestep/core/generation/handler/__init__.py",
+      "sha256": "20c328c2acec74ec530e7b351dae99f17661cdcc726223e228c7f5176a3b5155",
+      "size_bytes": 2858
+    },
+    {
+      "path": "acestep/core/generation/handler/audio_codes.py",
+      "sha256": "7dec268778c6c6d493aafc8253ae1374bff43459bbd62fb3c16fcd47fefb747a",
+      "size_bytes": 4456
+    },
+    {
+      "path": "acestep/core/generation/handler/batch_prep.py",
+      "sha256": "0bf0f6f40e7a74dfee5cbe1d3c9cbb6ab5359371341dd38da408f17769b735e3",
+      "size_bytes": 4266
+    },
+    {
+      "path": "acestep/core/generation/handler/conditioning_batch.py",
+      "sha256": "5bc46879830c5e35a48e7ef4a18ca41b4c3f30f7887928b31cea3cf259e82958",
+      "size_bytes": 6868
+    },
+    {
+      "path": "acestep/core/generation/handler/conditioning_embed.py",
+      "sha256": "45e80702219496edcef5712fa8403583c61f0df128833b9657d0d129d035a3f2",
+      "size_bytes": 6741
+    },
+    {
+      "path": "acestep/core/generation/handler/conditioning_masks.py",
+      "sha256": "5d9c1fdb249931794af76db83166347be0e8a081f958338c9a7963131e87a365",
+      "size_bytes": 4738
+    },
+    {
+      "path": "acestep/core/generation/handler/conditioning_target.py",
+      "sha256": "472b302837800f54972b5b5a3d6374b7855ee3eac9e05762757fcb41d5455068",
+      "size_bytes": 8663
+    },
+    {
+      "path": "acestep/core/generation/handler/conditioning_text.py",
+      "sha256": "0313ef5fc5ade1baa5a806f3748e5c853961768d057045e040fcb28a33a153b6",
+      "size_bytes": 9177
+    },
+    {
+      "path": "acestep/core/generation/handler/diffusion.py",
+      "sha256": "8864cfd8195c4ab0b90cfe3c6d216f7efdc3a88e174f63d1a5d1e853b3e355d9",
+      "size_bytes": 8717
+    },
+    {
+      "path": "acestep/core/generation/handler/generate_music.py",
+      "sha256": "0da6727cb5dc834697b6ff5774af79ace977b259205755e526bf1841f1ad913d",
+      "size_bytes": 23020
+    },
+    {
+      "path": "acestep/core/generation/handler/generate_music_decode.py",
+      "sha256": "5ebe4dfd65635a687a5692d37ab377ab959170e764fbedf54d6e35711cc40416",
+      "size_bytes": 10402
+    },
+    {
+      "path": "acestep/core/generation/handler/generate_music_execute.py",
+      "sha256": "625d7e477c88dc795913a1cbb1ba8d3d3dfa512831460fb26f780dc8cb5b0b79",
+      "size_bytes": 7628
+    },
+    {
+      "path": "acestep/core/generation/handler/generate_music_payload.py",
+      "sha256": "5d3a6b4a646547d59bbdab204684c4918ee86a767dda4af2579e7b8dd8bce910",
+      "size_bytes": 4835
+    },
+    {
+      "path": "acestep/core/generation/handler/generate_music_request.py",
+      "sha256": "281e481be2a0a1ab0b5dbc3cf471aef8611096305fc46cee5bcc22eaeb297c8c",
+      "size_bytes": 13102
+    },
+    {
+      "path": "acestep/core/generation/handler/init_service.py",
+      "sha256": "8154b3e8398b5565e3b6e27af95e8063ffd74663d6bd235e845622206d0e559f",
+      "size_bytes": 919
+    },
+    {
+      "path": "acestep/core/generation/handler/init_service_catalog.py",
+      "sha256": "48d41952ec25da854bfcb2ccdf9fa0cbf285c1f5e50cb34b9e978d6e634620d2",
+      "size_bytes": 2933
+    },
+    {
+      "path": "acestep/core/generation/handler/init_service_downloads.py",
+      "sha256": "02a95f2293dc0cd82ff5046816503668f8339157ba0b18715e061f3142999f8f",
+      "size_bytes": 3184
+    },
+    {
+      "path": "acestep/core/generation/handler/init_service_loader.py",
+      "sha256": "22b41692bcb73fead4c831d16eaef3dda56cc995577f2353d763445dae7362e1",
+      "size_bytes": 9463
+    },
+    {
+      "path": "acestep/core/generation/handler/init_service_loader_components.py",
+      "sha256": "621fc7d24ee847835de2eb66f35451120cb92310cf5e112e4edbdf955535d6de",
+      "size_bytes": 4227
+    },
+    {
+      "path": "acestep/core/generation/handler/init_service_memory_basic.py",
+      "sha256": "f717db29be3e9e86890cddaec4155dd470c52f0643f3fb56d1fcf6da6bc91f42",
+      "size_bytes": 9513
+    },
+    {
+      "path": "acestep/core/generation/handler/init_service_memory_transfer.py",
+      "sha256": "9291b08d9ea3622e7c8be5d64b567c976221696fe2e8e4980b10b15ad86ab37a",
+      "size_bytes": 6370
+    },
+    {
+      "path": "acestep/core/generation/handler/init_service_offload_context.py",
+      "sha256": "9e5dac9c938e2ec8ef37b9040117182abc70740e518df4d4be5c4b1b004b8ca2",
+      "size_bytes": 3486
+    },
+    {
+      "path": "acestep/core/generation/handler/init_service_orchestrator.py",
+      "sha256": "df1e3ac43db9018793adae343760b43c56e7e81648cfcd057730162352c49d72",
+      "size_bytes": 8568
+    },
+    {
+      "path": "acestep/core/generation/handler/init_service_setup.py",
+      "sha256": "24d98ab1407e742de095d2fe9caf55180e74714f83cdd9670a9bf8d2fa1529b3",
+      "size_bytes": 7339
+    },
+    {
+      "path": "acestep/core/generation/handler/io_audio.py",
+      "sha256": "98798d2678e6e46fd437508864245f032eedf736249af3183b3dcc856642e449",
+      "size_bytes": 6810
+    },
+    {
+      "path": "acestep/core/generation/handler/lora/__init__.py",
+      "sha256": "ef9097b2f3a8bb161a77fabaf12437a52a27638a87407ef3b4a1c7d4afcdef43",
+      "size_bytes": 46
+    },
+    {
+      "path": "acestep/core/generation/handler/lora/adapter_discovery.py",
+      "sha256": "a6d3398814091c5a9a7f7af7651e0f56233c2facef94f2f22a3dc80662eb35e6",
+      "size_bytes": 256
+    },
+    {
+      "path": "acestep/core/generation/handler/lora/controls.py",
+      "sha256": "328c4a50b2f9d6fd1745fad69951fe7902d777737c34b273618ff14ff8208c54",
+      "size_bytes": 9791
+    },
+    {
+      "path": "acestep/core/generation/handler/lora/lifecycle.py",
+      "sha256": "653d77beac88006f2d2f2f74621d72872623b805cf4fd9d4f64356ca47b80462",
+      "size_bytes": 21772
+    },
+    {
+      "path": "acestep/core/generation/handler/lora/registry_builder.py",
+      "sha256": "91792c4636d5c1bb2bc04a206d8324aaa37ac8129b852320309d3d53b0ca2610",
+      "size_bytes": 971
+    },
+    {
+      "path": "acestep/core/generation/handler/lora/registry_state.py",
+      "sha256": "bd2ef6995e8c13cec710d6e05e76e36f3ba1cf08b49d628b788f6e8cb8a32061",
+      "size_bytes": 2366
+    },
+    {
+      "path": "acestep/core/generation/handler/lora/scale_apply.py",
+      "sha256": "beedb94abd6d689a10367c471889787c99a3eaa5dde81bd67e203a4fdd4c1f72",
+      "size_bytes": 794
+    },
+    {
+      "path": "acestep/core/generation/handler/lora_manager.py",
+      "sha256": "c1d185409abc3e9882d52d018e0ab8ba9b9ec2fcf0f44c9831c120c0d18d0b0b",
+      "size_bytes": 1387
+    },
+    {
+      "path": "acestep/core/generation/handler/lyric_alignment_common.py",
+      "sha256": "ec35e392a2354696e9def4f98db27c415f09763e839609dd368532971ec0eb08",
+      "size_bytes": 5371
+    },
+    {
+      "path": "acestep/core/generation/handler/lyric_score.py",
+      "sha256": "92ccffbe079482b9e0e7a7fc6304a408fa7d996a7f9e88c7b3f819ee5d463510",
+      "size_bytes": 8002
+    },
+    {
+      "path": "acestep/core/generation/handler/lyric_timestamp.py",
+      "sha256": "f8b54ba0d0668eae45988c4682cc2ae59aa923b1f6464d215165ac9b3b36e20c",
+      "size_bytes": 6592
+    },
+    {
+      "path": "acestep/core/generation/handler/memory_utils.py",
+      "sha256": "48e61bc8890206ab3f2ce85e7feeb3153c87f5b33d6cff2c56b5c5890367f5c1",
+      "size_bytes": 8146
+    },
+    {
+      "path": "acestep/core/generation/handler/metadata_utils.py",
+      "sha256": "b8485fe9c3a8ffdf0ee0147df68366770abfe6b68e6cd286dd4722d9379cdc5b",
+      "size_bytes": 3062
+    },
+    {
+      "path": "acestep/core/generation/handler/mlx_dit_init.py",
+      "sha256": "e3051df98c80671583107f6ccc87a5e2c9f58a0425aad53df77f5f1ec3c4377d",
+      "size_bytes": 1686
+    },
+    {
+      "path": "acestep/core/generation/handler/mlx_vae_decode_native.py",
+      "sha256": "60795c3cabe0f883c468e6a864e7d2937178d7df305c7b0507971377490d3166",
+      "size_bytes": 4571
+    },
+    {
+      "path": "acestep/core/generation/handler/mlx_vae_encode_native.py",
+      "sha256": "7ca77b0ee3a03468cad94651b354b279f8d1af81ab14c77c8d85f276732d2724",
+      "size_bytes": 5149
+    },
+    {
+      "path": "acestep/core/generation/handler/mlx_vae_init.py",
+      "sha256": "732ae73b34832edb610f37aba8a7db9bda0b7f332c1c4c11ee16bd923589a456",
+      "size_bytes": 3922
+    },
+    {
+      "path": "acestep/core/generation/handler/padding_utils.py",
+      "sha256": "16de06cdc360c23dfbec563e36da64a8f5711e409204f800fae86b78f129e0c4",
+      "size_bytes": 8425
+    },
+    {
+      "path": "acestep/core/generation/handler/progress.py",
+      "sha256": "f60a7b7282d5e9c65ff189f83006038adee9dd673a337d18991c0de59c2313fe",
+      "size_bytes": 8083
+    },
+    {
+      "path": "acestep/core/generation/handler/prompt_utils.py",
+      "sha256": "242835ae29cc1bfcc40aadf1c46d8156230349d6e2f05436b2c85b3491484fae",
+      "size_bytes": 6826
+    },
+    {
+      "path": "acestep/core/generation/handler/repaint_waveform_splice.py",
+      "sha256": "b6143c4ae796f77d1b43a9c9e3ceb6c49ede73c5d474be9e4b78c9122a21141a",
+      "size_bytes": 3898
+    },
+    {
+      "path": "acestep/core/generation/handler/service_generate.py",
+      "sha256": "b44f85dca2320ed11ed26d3395108e0fdc9be82bf9435c5b75fb88910926874c",
+      "size_bytes": 8362
+    },
+    {
+      "path": "acestep/core/generation/handler/service_generate_execute.py",
+      "sha256": "508fd70b669600ca8626c703d4213eda2c6ef46fcaee4fd9d662cb4843d83bdc",
+      "size_bytes": 14558
+    },
+    {
+      "path": "acestep/core/generation/handler/service_generate_flow_edit.py",
+      "sha256": "252a0e845002e3163f5a128d9e11502ec70a619992ef2706de5fde0073260b8a",
+      "size_bytes": 9206
+    },
+    {
+      "path": "acestep/core/generation/handler/service_generate_flow_edit_source.py",
+      "sha256": "21815b0896245fc4a178f100a397e32f043b62b47e0a51f68823dc8c129bf140",
+      "size_bytes": 3218
+    },
+    {
+      "path": "acestep/core/generation/handler/service_generate_outputs.py",
+      "sha256": "bc165a5b95ab8fa5b9645d90a2291a57ffa2f4f93f76d9d46131e000daba424f",
+      "size_bytes": 1263
+    },
+    {
+      "path": "acestep/core/generation/handler/service_generate_request.py",
+      "sha256": "dde325040f63e3a6a2e5dfa406dd2886d82f6418e63195b61d081c367545daca",
+      "size_bytes": 5246
+    },
+    {
+      "path": "acestep/core/generation/handler/task_utils.py",
+      "sha256": "a5c90c6af54d1eb207cbf79db39535e115361542cb37735ed4359287bd257a66",
+      "size_bytes": 5568
+    },
+    {
+      "path": "acestep/core/generation/handler/training_preset.py",
+      "sha256": "c6f3059b69ba1d3b5092c4154df0be10ce6e14645b670c7b40c850ba858dfa4a",
+      "size_bytes": 1703
+    },
+    {
+      "path": "acestep/core/generation/handler/vae_decode.py",
+      "sha256": "199538c4762dfd0da9ff0895793c640ed715208774f14aed106514be9ce121f4",
+      "size_bytes": 5178
+    },
+    {
+      "path": "acestep/core/generation/handler/vae_decode_chunks.py",
+      "sha256": "8b0a38acb7619a7672968756cc01562f0681f628633f9b9fc21b3fe5c5fec80d",
+      "size_bytes": 7805
+    },
+    {
+      "path": "acestep/core/generation/handler/vae_encode.py",
+      "sha256": "c91896380556bddd0bd2f581db6d3c9e0cb7798e4ccb27508fdb01b7873300f7",
+      "size_bytes": 3140
+    },
+    {
+      "path": "acestep/core/generation/handler/vae_encode_chunks.py",
+      "sha256": "4bb260c3585209e34e7f04b6395e04558610c3dc08f0d30bf9d3ed969346ac1d",
+      "size_bytes": 4415
+    },
+    {
+      "path": "acestep/core/lora/__init__.py",
+      "sha256": "b24583cb94d90f466fc5499d1269d658e914831fc2c229ef32ab1763b112ccb8",
+      "size_bytes": 330
+    },
+    {
+      "path": "acestep/core/lora/introspection.py",
+      "sha256": "26e5156e02099ef2d2fac79e84d126ca62293c19d0a1f96f87c16df28d0664b8",
+      "size_bytes": 4760
+    },
+    {
+      "path": "acestep/core/lora/registry.py",
+      "sha256": "046f092ef8d193525da3bd9b7cf5f3cc227c7e8d321a7866fe25ced7e5b94604",
+      "size_bytes": 3876
+    },
+    {
+      "path": "acestep/core/lora/scaling.py",
+      "sha256": "140bee27c67511434c64a50af90dc2c9144ab3a365818b2e2e55d5dcf5084f33",
+      "size_bytes": 6606
+    },
+    {
+      "path": "acestep/core/lora/service.py",
+      "sha256": "706e881e895026b24239df3cc04245446cca83363eafe9029f151f9274df4470",
+      "size_bytes": 5548
+    },
+    {
+      "path": "acestep/core/scoring/__init__.py",
+      "sha256": "0a07e1e91c4e4c4b3240262ceb8372c29bcc8a9513d8ae814864e0b9eacc98b5",
+      "size_bytes": 550
+    },
+    {
+      "path": "acestep/core/scoring/_dtw.py",
+      "sha256": "2d2252e7108f296cd26722c7b622e1c1a1ed47c71459a8ff873164c4c1ada962",
+      "size_bytes": 2699
+    },
+    {
+      "path": "acestep/core/scoring/dit_alignment.py",
+      "sha256": "b5dcf958c9fb756c34f2f4dc29a9a2df5b782582e41d23cf98223aff3cfcfb84",
+      "size_bytes": 15091
+    },
+    {
+      "path": "acestep/core/scoring/dit_score.py",
+      "sha256": "73700ff976549339dad3d6c500f8cbe9a8cce08d1979bbb85e3e3ed53e0605a1",
+      "size_bytes": 12100
+    },
+    {
+      "path": "acestep/core/scoring/lm_score.py",
+      "sha256": "399b47d7269da2c8dee41d3316a67094f5b0dc2ec464b88ed52c6fce8f9d589e",
+      "size_bytes": 22018
+    },
+    {
+      "path": "acestep/debug_utils.py",
+      "sha256": "727a9340089dd60fd7c058330fad08fdba7964e21160e04b47d91d3e02a2a8a5",
+      "size_bytes": 7134
+    },
+    {
+      "path": "acestep/gpu_config.py",
+      "sha256": "01987e28eef138fa27191adcfb1ee46ff2bf96540eafca8887d5243599bf549a",
+      "size_bytes": 62678
+    },
+    {
+      "path": "acestep/handler.py",
+      "sha256": "0a215d92aff3a85ea50be8cfa88e819175a0b8a4254f8024893c157a4dec6875",
+      "size_bytes": 5589
+    },
+    {
+      "path": "acestep/inference.py",
+      "sha256": "f43827def02a1122e2de483961b04f16544e4da9108eed9e42fd529175c15df5",
+      "size_bytes": 71074
+    },
+    {
+      "path": "acestep/model_downloader.py",
+      "sha256": "34fcd1914620c11ad487070f47966803d48a290b7b05b42259cf9fd437c032d5",
+      "size_bytes": 34773
+    },
+    {
+      "path": "acestep/models/__init__.py",
+      "sha256": "748eec9214b9351add46ded4b2a16b6fce25101611cbca5015dd902b5f21e2dc",
+      "size_bytes": 149
+    },
+    {
+      "path": "acestep/models/base/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "acestep/models/base/apg_guidance.py",
+      "sha256": "33985a589f3af4f3daff071b71cae68da1bf971070da7c27223acbea9f5f2ae7",
+      "size_bytes": 602
+    },
+    {
+      "path": "acestep/models/base/configuration_acestep_v15.py",
+      "sha256": "5f15aa79fe793bba3c00b6992dd193a269954950603d5031ecd7703b0fa69da1",
+      "size_bytes": 212
+    },
+    {
+      "path": "acestep/models/base/modeling_acestep_v15_base.py",
+      "sha256": "f3edaa0f86ce174c0c6703a8d80442673783ba96515a0fa84126a9b605b0919d",
+      "size_bytes": 108564
+    },
+    {
+      "path": "acestep/models/common/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "acestep/models/common/apg_guidance.py",
+      "sha256": "89ecdc4686e174225d6e6d304939d75892297dc3c19fbb11e04345dc3d4685db",
+      "size_bytes": 8340
+    },
+    {
+      "path": "acestep/models/common/configuration_acestep_v15.py",
+      "sha256": "0d66f38eba6a3d1665c9449a1a52724d68354477bc88dcf02389640e3602a0c7",
+      "size_bytes": 13225
+    },
+    {
+      "path": "acestep/models/common/dcw_correction.py",
+      "sha256": "96f7a3073919f0fc5d1ce5459e359fd03f107f623f43d5f9b0720a84c1f3db9b",
+      "size_bytes": 5320
+    },
+    {
+      "path": "acestep/models/common/dcw_loader.py",
+      "sha256": "34cb5c60ed7cb46439ddeea620d6cec6947f04f0530a129f5579348aa4900308",
+      "size_bytes": 3530
+    },
+    {
+      "path": "acestep/models/common/dcw_primitives.py",
+      "sha256": "b87aeecd1f6e5d5282f60dd3de71781d3acd671e632cf7ef8253be757e043b5e",
+      "size_bytes": 4488
+    },
+    {
+      "path": "acestep/models/common/flow_edit.py",
+      "sha256": "00cc4c1e04826b46223d52f247b0288a3c1d6bf3d9490a5a313340b1b6bb52b2",
+      "size_bytes": 9161
+    },
+    {
+      "path": "acestep/models/common/flow_edit_helpers.py",
+      "sha256": "9c92c982d63fe8a0e2503521070a8b44e8843c5647cc4243642a584db02ddd54",
+      "size_bytes": 6224
+    },
+    {
+      "path": "acestep/models/common/flow_edit_pipeline.py",
+      "sha256": "3b4a9a829eca67233ab9e5c7d469d2ff889b4b3837efef8e5e118f4bd2485c8c",
+      "size_bytes": 7530
+    },
+    {
+      "path": "acestep/models/mlx/__init__.py",
+      "sha256": "aea67f5a1029b0ac649a02b9ce83de560ad5f258b446b15155c28519cb4f3582",
+      "size_bytes": 839
+    },
+    {
+      "path": "acestep/models/mlx/dcw_correction_mlx.py",
+      "sha256": "289be08bdc5b64a597f615913fd9616e578612f8059bc4e8aa44dd0abea037f2",
+      "size_bytes": 7848
+    },
+    {
+      "path": "acestep/models/mlx/dit_convert.py",
+      "sha256": "d481ab46d29e5168d2cd2b4d9ca60342e2714b118a4fc9fcdfe2c3fcd1c8c26f",
+      "size_bytes": 2875
+    },
+    {
+      "path": "acestep/models/mlx/dit_generate.py",
+      "sha256": "6fd77dfdb42e581fef9c5842120ce41f628a9602d280be1ef1b54e7aa9aea23d",
+      "size_bytes": 22060
+    },
+    {
+      "path": "acestep/models/mlx/dit_model.py",
+      "sha256": "289e9d22d1f214f3fe25fbe55993445dc648bfbfe3df270b486f0491661aed73",
+      "size_bytes": 24814
+    },
+    {
+      "path": "acestep/models/mlx/vae_convert.py",
+      "sha256": "e8f0dc89dbc9c68b2fecd28db6e0ff9954985bcef5575765e27fe431e82b29ea",
+      "size_bytes": 5448
+    },
+    {
+      "path": "acestep/models/mlx/vae_model.py",
+      "sha256": "6e9142be51fb66b38b2e101a205a6ce707f1d00de9f161fb540fd259d6e073f4",
+      "size_bytes": 12496
+    },
+    {
+      "path": "acestep/training/__init__.py",
+      "sha256": "60b34ac2c69d423e78a7d11b08c0201242177d5d8bc202ccde0d7565ee7e5619",
+      "size_bytes": 2420
+    },
+    {
+      "path": "acestep/training/configs.py",
+      "sha256": "12d6ffde1615165b2863e016c5748bd3ab9a6750acae5650b5e20967bdf7f594",
+      "size_bytes": 5693
+    }
+  ],
+  "overrides": [
+    {
+      "path": "acestep/training/__init__.py",
+      "reason": "Avoid eager training/dataset initializer side effects; inference uses explicit support submodules only",
+      "sha256": "5973d9922d7e5960c5d6c69ca4ade7eb546b0c1153e7664901368b98f2aacda5",
+      "source": "patches/inference-training-namespace.py"
+    }
+  ],
+  "repository": "https://github.com/ace-step/ACE-Step-1.5.git",
+  "revision": "ca1e85fe9430179831e6bc6be790c332190a3866"
+}

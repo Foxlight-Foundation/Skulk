@@ -98,6 +98,46 @@ async def test_service_cancellation_reaps_owned_process(
     RuntimeLock(selector.root, "service.lock").close()
 
 
+@pytest.mark.parametrize("stop_before_release", [False, True])
+async def test_start_waits_for_metadata_fence_without_failed_lifetime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_before_release: bool,
+) -> None:
+    """Brief discovery ownership cannot spend the owner's restart crash budget."""
+    selector = await installed(tmp_path, monkeypatch)
+    inspection = RuntimeLock(selector.installer.installer)
+    stopped = asyncio.Event()
+    service = RuntimeService(selector.root)
+    task = asyncio.create_task(service.serve(stopped))
+    try:
+        async with asyncio.timeout(2):
+            while not (selector.root / "service-status.json").exists():
+                await asyncio.sleep(0.001)
+        await asyncio.sleep(0.05)
+        assert not task.done(), "discovery contention became a failed owner lifetime"
+        assert service.process is None
+        assert status(selector.root).state == "verifying"
+        if stop_before_release:
+            stopped.set()
+        inspection.close()
+        if stop_before_release:
+            async with asyncio.timeout(5):
+                assert await task
+            assert service.process is None
+        else:
+            await running(service)
+    finally:
+        inspection.close()
+        stopped.set()
+        async with asyncio.timeout(5):
+            await task
+    assert status(selector.root).state == "stopped"
+    assert status(selector.root).error_code is None
+    RuntimeLock(selector.root, "service.lock").close()
+    RuntimeLock(selector.root, "supervisor.lock").close()
+
+
 async def test_service_refuses_tampered_runtime_and_disabled_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

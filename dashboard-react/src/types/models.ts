@@ -136,6 +136,8 @@ export interface ModelInfo {
       callable_version: '0.1.0';
       proof_header: 'Skulk-Continuation-Proof';
       receipt_path: '/v1/chat/continuation/receipt';
+      /** Explicit native transport selector, independent of the application proof target. */
+      native_model?: string;
       target: import('../store/chatContinuation').ContinuationTarget;
     };
   } | null;

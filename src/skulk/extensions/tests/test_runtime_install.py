@@ -45,6 +45,8 @@ def artifacts(
     duplicate_launcher: bool = False,
     platform: str = "macos-arm64",
     runtime_protocol: int = 2,
+    application_roots: tuple[str, ...] | None = None,
+    unrelated_wheel: bool = False,
     release_protocol: int = 1,
     bundle_id: str = "example.plugin",
     manifest_extra: dict[str, JsonValue] | None = None,
@@ -78,7 +80,7 @@ def artifacts(
             archive.writestr(name, content)
     wheel = buffer.getvalue()
     extra: bytes | None = None
-    if duplicate_launcher:
+    if duplicate_launcher or unrelated_wheel:
         # A second signed wheel claiming the same launcher: metadata order,
         # not the signature, would decide which owner starts.
         dup = io.BytesIO()
@@ -89,9 +91,11 @@ def artifacts(
             + "METADATA": "Metadata-Version: 2.1\nName: example-dup\nVersion: 1.0\n",
             dup_prefix
             + "WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
-            dup_prefix
-            + "entry_points.txt": "[skulk.capability_runtime]\nowner = example_dup:main\n",
         }
+        if duplicate_launcher:
+            dup_files[dup_prefix + "entry_points.txt"] = (
+                "[skulk.capability_runtime]\nowner = example_dup:main\n"
+            )
         dup_files[dup_prefix + "RECORD"] = (
             "".join(f"{name},,\n" for name in dup_files) + dup_prefix + "RECORD,,\n"
         )
@@ -173,6 +177,10 @@ def artifacts(
         },
         "wheels": wheel_claims,
     }
+    if runtime_protocol == 3 or application_roots is not None:
+        payload["application_roots"] = list(
+            ("example-dep",) if application_roots is None else application_roots
+        )
     signed = canonical_json(
         {"runtime": payload, "signature": key.sign(canonical_json(payload)).hex()}
     )
@@ -216,7 +224,73 @@ def test_a_skulk_update_keeps_an_installed_release_running(tmp_path: Path) -> No
     updated = replace(host, skulk_version="1.9.4", skulk_build_sha256="f" * 64)
     assert verify_runtime(metadata, trust, updated, now=now).digest
     with pytest.raises(ValueError):
-        verify_runtime(metadata, trust, replace(updated, skulk_version="2.0.0"), now=now)
+        verify_runtime(
+            metadata, trust, replace(updated, skulk_version="2.0.0"), now=now
+        )
+
+
+@pytest.mark.parametrize(
+    "roots",
+    [
+        (),
+        ("missing",),
+        ("example-dep", "example-dep"),
+        ("Bad_Name",),
+        ("example-dep[extra]",),
+        tuple(f"root-{index}" for index in range(9)),
+    ],
+)
+def test_v3_requires_bounded_unique_present_application_roots(
+    tmp_path: Path, roots: tuple[str, ...]
+) -> None:
+    """Signed metadata cannot omit roots or grant unbounded dependency authority."""
+    metadata, trust, host = artifacts(
+        tmp_path, runtime_protocol=3, application_roots=roots
+    )
+    with pytest.raises(ValueError):
+        verify_runtime(metadata, trust, host, now=int(time.time()))
+
+
+def test_v2_keeps_original_wire_shape(tmp_path: Path) -> None:
+    """Legacy records remain valid and cannot acquire unsigned new-version claims."""
+    metadata, trust, host = artifacts(tmp_path, application_roots=("example-dep",))
+    with pytest.raises(ValueError, match="v2"):
+        verify_runtime(metadata, trust, host, now=int(time.time()))
+    original, trust, host = artifacts(tmp_path / "legacy")
+    runtime = verify_runtime(original, trust, host, now=int(time.time()))
+    claims = TypeAdapter(dict[str, JsonValue]).validate_python(
+        runtime.claims.model_dump(mode="json"), strict=True
+    )
+    assert claims["application_roots"] == []
+    assert b"application_roots" not in runtime.payload
+
+
+@pytest.mark.parametrize("protocol", [2, 3])
+def test_v3_refuses_unreachable_packages_without_changing_v2(
+    tmp_path: Path, protocol: int
+) -> None:
+    """V3's graph is exact while legacy admission continues to read existing bytes."""
+    metadata, trust, host = artifacts(
+        tmp_path, runtime_protocol=protocol, unrelated_wheel=True
+    )
+    runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
+    if protocol == 3:
+        with pytest.raises(ValueError, match="undeclared"):
+            verified_artifacts(runtime, tmp_path)
+    else:
+        assert len(verified_artifacts(runtime, tmp_path)) == 3
+
+
+def test_v3_root_tampering_is_refused_before_claim_interpretation(
+    tmp_path: Path,
+) -> None:
+    """A malformed changed claim is first a bad signature, never an unauthenticated hint."""
+    metadata, trust, host = artifacts(tmp_path, runtime_protocol=3)
+    metadata = metadata.replace(
+        b'"application_roots":["example-dep"]', b'"application_roots":["missing"]'
+    )
+    with pytest.raises(ValueError, match="signature"):
+        verify_runtime(metadata, trust, host, now=int(time.time()))
 
 
 @pytest.mark.parametrize(
@@ -306,12 +380,13 @@ def test_platform_family_is_derived_and_legacy_names_still_match() -> None:
     assert not platform_matches("macos-arm64", "macos-x86_64")
 
 
+@pytest.mark.parametrize("runtime_protocol", [2, 3])
 async def test_offline_stage_and_reconnect_leave_host_unchanged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runtime_protocol: int
 ) -> None:
     """Install an exact wheel in a fresh environment, then reuse only cached bytes."""
     source = tmp_path / "source"
-    metadata, trust, host = artifacts(source)
+    metadata, trust, host = artifacts(source, runtime_protocol=runtime_protocol)
     monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
     root = tmp_path / "installation"
     installer = RuntimeInstaller(root)
@@ -464,13 +539,13 @@ async def test_cancelled_request_retains_installer_ownership(
     assert installer.operation("3" * 32).state == "staged"
 
 
-def test_the_protocol_window_is_current_and_previous_and_refuses_beyond_by_name(
+def test_the_explicit_migration_window_refuses_beyond_by_name(
     tmp_path: Path,
 ) -> None:
-    """Every accepted protocol installs; one beyond is refused naming the window.
+    """Keep legacy signing valid and refuse authenticated future versions by name.
 
-    Both windows hold one member today; the moment a second exists this runs
-    both rows, so compatibility code is never left untested.
+    Native runtimes 3/4/5 have independent signed fixtures. The migration window
+    retains old signed closures; envelope pairs are never a Cartesian product.
     """
     from skulk.extensions.runtime_artifacts import (
         ACCEPTED_RELEASE_PROTOCOLS,
@@ -478,17 +553,10 @@ def test_the_protocol_window_is_current_and_previous_and_refuses_beyond_by_name(
         ProtocolUnsupportedError,
     )
 
-    assert 1 <= len(ACCEPTED_RELEASE_PROTOCOLS) <= 2
-    assert 1 <= len(ACCEPTED_RUNTIME_PROTOCOLS) <= 2
-    for runtime_protocol in ACCEPTED_RUNTIME_PROTOCOLS:
-        for release_protocol in ACCEPTED_RELEASE_PROTOCOLS:
-            directory = tmp_path / f"{runtime_protocol}-{release_protocol}"
-            metadata, trust, host = artifacts(
-                directory,
-                runtime_protocol=runtime_protocol,
-                release_protocol=release_protocol,
-            )
-            assert verify_runtime(metadata, trust, host, now=int(time.time()))
+    assert ACCEPTED_RELEASE_PROTOCOLS == (1, 2, 3)
+    assert ACCEPTED_RUNTIME_PROTOCOLS == (2, 3, 4, 5)
+    metadata, trust, host = artifacts(tmp_path / "legacy")
+    assert verify_runtime(metadata, trust, host, now=int(time.time()))
     beyond = tmp_path / "beyond"
     metadata, trust, host = artifacts(
         beyond, runtime_protocol=max(ACCEPTED_RUNTIME_PROTOCOLS) + 1
@@ -528,3 +596,92 @@ def test_a_protocol_refusal_is_named_only_after_the_signature_verifies(
     document["signature"] = "0" * len(str(document["signature"]))
     with pytest.raises(ValueError, match="runtime signature refused"):
         verify_runtime(json.dumps(document).encode(), trust, host, now=int(time.time()))
+
+
+def test_v3_admits_independent_multilevel_application_and_launcher_graphs(
+    tmp_path: Path,
+) -> None:
+    """Normal transitive packages must be admitted, while a signed orphan is not."""
+    key = Ed25519PrivateKey.generate()
+    metadata, trust, host = artifacts(
+        tmp_path,
+        dependency="app-middle>=1",
+        owner_entrypoint=False,
+        signing_key=key,
+        runtime_protocol=3,
+        application_roots=("example-dep",),
+    )
+    objects = TypeAdapter(dict[str, JsonValue])
+    document = objects.validate_json(metadata)
+    runtime = objects.validate_python(document["runtime"], strict=True)
+    release = objects.validate_python(runtime["release"], strict=True)
+    wheels = TypeAdapter(list[JsonValue]).validate_python(
+        runtime["wheels"], strict=True
+    )
+    inventory: dict[str, JsonValue] = {"example-dep": "1.0"}
+
+    def add_wheel(
+        name: str, dependency: str | None = None, *, owner: bool = False
+    ) -> None:
+        module = name.replace("-", "_")
+        prefix = f"{module}-1.0.dist-info/"
+        files = {
+            f"{module}/__init__.py": "def main():\n    pass\n",
+            prefix + "METADATA": (
+                f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n"
+                + (f"Requires-Dist: {dependency}\n" if dependency else "")
+            ),
+            prefix + "WHEEL": (
+                "Wheel-Version: 1.0\nGenerator: test\n"
+                "Root-Is-Purelib: true\nTag: py3-none-any\n"
+            ),
+        }
+        if owner:
+            files[prefix + "entry_points.txt"] = (
+                f"[skulk.capability_runtime]\nowner = {module}:main\n"
+                f"manage = {module}:main\n"
+            )
+        files[prefix + "RECORD"] = (
+            "".join(f"{path},,\n" for path in files) + prefix + "RECORD,,\n"
+        )
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for path, content in files.items():
+                archive.writestr(path, content)
+        raw = buffer.getvalue()
+        filename = f"{module}-1.0-py3-none-any.whl"
+        write_private(tmp_path / filename, raw)
+        wheels.append(
+            {
+                "filename": filename,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "size": len(raw),
+            }
+        )
+        inventory[name] = "1.0"
+
+    def signed_graph() -> bytes:
+        release["dependency_lock_sha256"] = hashlib.sha256(
+            canonical_json(dict(sorted(inventory.items())))
+        ).hexdigest()
+        runtime["release"] = release
+        runtime["wheels"] = wheels
+        return json.dumps(
+            {
+                "runtime": runtime,
+                "signature": key.sign(canonical_json(runtime)).hex(),
+            }
+        ).encode()
+
+    add_wheel("app-middle", "app-leaf>=1")
+    add_wheel("app-leaf")
+    add_wheel("runtime-owner", "owner-leaf>=1", owner=True)
+    add_wheel("owner-leaf")
+    verified = verify_runtime(signed_graph(), trust, host, now=int(time.time()))
+    assert len(verified_artifacts(verified, tmp_path)) == 6
+    # Signing the orphan and updating the lock digest is insufficient: it must
+    # still be reachable from the application or owner dependency graph.
+    add_wheel("unreachable-extra")
+    orphaned = verify_runtime(signed_graph(), trust, host, now=int(time.time()))
+    with pytest.raises(ValueError, match="undeclared dependency"):
+        verified_artifacts(orphaned, tmp_path)

@@ -70,7 +70,9 @@ async def test_pending_copy_recovers_after_input_and_client_loss_then_kit_restor
                 resume_expires=int(time.time()) + 3600,
             )
         )
-        assert (await settled(owner, granted.job_id)).state == "succeeded"
+        assert (
+            await settled(owner, granted.job_id, timeout_seconds=120)
+        ).state == "succeeded"
         assert owner.journal.setting("mirror-approved-resume") is not None
         before = ledger.read()
         # Only the owned byte worker is denied sockets. Parent ASGI/event-loop
@@ -107,7 +109,7 @@ raise SystemExit(preservation_worker.main())
             submitted = MirrorJob.model_validate_json(response.text)
             assert submitted.kind == "recover" and submitted.kit is None
         # Closing the submitting client cannot cancel an accepted host job.
-        recovered = await settled(owner, submitted.job_id)
+        recovered = await settled(owner, submitted.job_id, timeout_seconds=120)
         assert recovered.state == "succeeded", recovered
         assert recovered.bytes_hashed > 0 and recovered.bytes_received == 0
         assert recovered.bytes_copied == 0 and recovered.activity is None
@@ -147,7 +149,7 @@ raise SystemExit(preservation_worker.main())
                 manifest_id=identity,
             )
         )
-        prepared = await settled(current, kit_job.job_id)
+        prepared = await settled(current, kit_job.job_id, timeout_seconds=120)
         assert prepared.state == "succeeded" and prepared.kit is not None
         transport = httpx.ASGITransport(app=app(current), client=("127.0.0.1", 1000))
         async with httpx.AsyncClient(
@@ -214,7 +216,7 @@ async def test_bad_pending_generation_refuses_without_fetch_or_mutation(
                 manifest_id=identity,
             )
         )
-        result = await settled(owner, job.job_id)
+        result = await settled(owner, job.job_id, timeout_seconds=120)
         assert result.state == "failed" and result.error_code is not None
         assert result.bytes_received == 0 and result.activity is None
         assert (ledger.path / "mirror.json").read_bytes() == before
@@ -240,7 +242,7 @@ async def test_active_controller_and_stale_policy_cannot_be_recovered(
                 seconds=60,
             )
         )
-        await ready(owner, running.job_id)
+        await ready(owner, running.job_id, timeout_seconds=120)
         decision = MirrorRequest(
             owner_id="library",
             operation_id="busy",
@@ -255,7 +257,7 @@ async def test_active_controller_and_stale_policy_cannot_be_recovered(
         wrong = await owner.mirrors.start(
             decision.model_copy(update={"operation_id": "stale", "policy_id": "f" * 64})
         )
-        refused = await settled(owner, wrong.job_id)
+        refused = await settled(owner, wrong.job_id, timeout_seconds=120)
         assert (
             refused.state == "failed" and refused.error_code == "mirror_policy_changed"
         )
@@ -303,7 +305,9 @@ raise SystemExit(preservation_worker.main())
     )
     try:
         submitted = await owner.mirrors.start(decision)
-        async with asyncio.timeout(30):
+        # This ends at actual verifier entry, after cold interpreter imports;
+        # cancellation and ownership assertions below retain their own scope.
+        async with asyncio.timeout(120):
             while not marker.exists():
                 observed = owner.mirrors.job(submitted.job_id)
                 assert observed.state in {"queued", "running"}, observed
@@ -322,7 +326,11 @@ raise SystemExit(preservation_worker.main())
         assert (await current.mirrors.start(decision)).job_id == submitted.job_id
         assert (await current.mirrors.page()).controller_job_id is None
         explicit = decision.model_copy(update={"operation_id": "explicit-new-check"})
-        result = await settled(current, (await current.mirrors.start(explicit)).job_id)
+        result = await settled(
+            current,
+            (await current.mirrors.start(explicit)).job_id,
+            timeout_seconds=120,
+        )
         assert result.state == "succeeded", result
     finally:
         await current.close()

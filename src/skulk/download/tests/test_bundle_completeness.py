@@ -28,6 +28,7 @@ from skulk.store.installed_cards import (
     write_installed_card,
     write_installed_card_with_fallback,
 )
+from skulk.store.model_store import StoreModelEntry, StoreRegistryIndex
 
 REVISION = "a" * 40
 FILES = {
@@ -238,6 +239,155 @@ def test_resolver_finds_a_staged_bundle(tmp_path: Path, monkeypatch: pytest.Monk
     assert resolve_model_in_path(ModelId(card.model_id), REVISION) == artifact
     assert build_model_path(ModelId(card.model_id), REVISION) == artifact
     assert resolve_model_in_path(ModelId(card.model_id), "b" * 40) is None
+
+
+def _indexed_bundle(store: Path, card: ModelCard) -> Path:
+    """Publish real installed metadata at the Store's bundle-qualified location."""
+    artifact = _install(store, card)
+    bundle = card.artifact_bundle
+    assert bundle is not None
+    canonical = artifact.with_name(
+        f"{card.model_id.normalize()}--revision-{REVISION}"
+        f"--bundle-{bundle.bundle_id.removeprefix('bundle_')[:16]}"
+    )
+    artifact.rename(canonical)
+    entry = StoreModelEntry(
+        model_id=str(card.model_id),
+        store_path=canonical.name,
+        source_revision=REVISION,
+        source_repository=str(card.artifact_repository),
+        files=[item.path for item in bundle.files],
+        downloaded_at="2026-11-06T00:00:00+00:00",
+        total_bytes=bundle.download_size,
+    )
+    (store / "registry.json").write_text(
+        StoreRegistryIndex(entries={str(card.model_id): entry}).model_dump_json()
+    )
+    return canonical
+
+
+@pytest.mark.parametrize("bundle_root", [None, "payload/loader"])
+@pytest.mark.parametrize("signed_card", [False, True])
+def test_card_resolver_loads_store_direct_bundle_without_a_staged_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bundle_root: str | None,
+    signed_card: bool,
+) -> None:
+    """Staging-disabled downloads remain loadable by the exact requested card."""
+    card = _card(bundle_root)
+    if signed_card:
+        card = card.model_copy(
+            update={
+                "registry_card_id": "card_" + "a" * 52,
+                "registry_snapshot_id": "snapshot_1_current",
+                "registry_provenance": "agent",
+            }
+        )
+    store = tmp_path / "store"
+    canonical = _indexed_bundle(store, card)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (store,))
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path / "unused")
+    assert not (store / card.model_id.normalize()).exists()
+    assert resolve_model_in_path(
+        card.model_id, REVISION, expected_card=card, artifact_root=bundle_root,
+        include_store_index=True,
+    ) == canonical
+    assert build_model_path(
+        card.model_id, REVISION, bundle_root, expected_card=card
+    ) == (canonical / bundle_root if bundle_root else canonical)
+
+
+@pytest.mark.parametrize("bundle_root", [None, "payload/loader"])
+@pytest.mark.parametrize("staged", [False, True])
+def test_download_shortcut_requires_a_cardless_loadable_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bundle_root: str | None,
+    staged: bool,
+) -> None:
+    """A canonical-only cache must still enter the configured staging transaction."""
+    card = _card(bundle_root).model_copy(
+        update={
+            "registry_card_id": "card_" + "a" * 52,
+            "registry_snapshot_id": "snapshot_1_current",
+            "registry_provenance": "agent",
+        }
+    )
+    store = tmp_path / "store"
+    canonical = _indexed_bundle(store, card)
+    staging = tmp_path / "staging"
+    if staged:
+        _install(staging, card)
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (staging, store))
+    monkeypatch.setattr(download_utils, "SKULK_MODELS_DIR", tmp_path / "unused")
+    assert build_model_path(
+        card.model_id, REVISION, bundle_root, expected_card=card
+    ) == (
+        (staging / card.model_id.normalize() if staged else canonical)
+        / (bundle_root or "")
+    )
+    found = download_utils.installed_artifact_in_path(card)
+    if staged:
+        assert found is not None
+        assert found == staging / card.model_id.normalize()
+        assert build_model_path(card.model_id, REVISION, bundle_root) == (
+            found / (bundle_root or "")
+        )
+    else:
+        assert found is None
+        with pytest.raises(FileNotFoundError):
+            build_model_path(card.model_id, REVISION, bundle_root)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ["outside", "missing", "card", "signed_card", "revision", "tombstone", "bad_tombstone", "index"],
+)
+def test_store_index_cannot_admit_an_unverified_or_deleted_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    """An index hint cannot replace artifact, identity, containment or deletion checks."""
+    card = _card()
+    store = tmp_path / "store"
+    canonical = _indexed_bundle(store, card)
+    index_path = store / "registry.json"
+    index = StoreRegistryIndex.model_validate_json(index_path.read_bytes())
+    entry = index.entries[str(card.model_id)]
+    if damage == "outside":
+        outside = tmp_path / "outside"
+        canonical.rename(outside)
+        index_path.write_text(
+            index.model_copy(
+                update={"entries": {str(card.model_id): entry.model_copy(update={"store_path": "../outside"})}}
+            ).model_dump_json()
+        )
+    elif damage == "missing":
+        (canonical / "vae/audio_vae.safetensors").unlink()
+    elif damage == "card":
+        card = card.model_copy(update={"family": "different-policy"})
+    elif damage == "signed_card":
+        card = card.model_copy(update={"registry_card_id": "card_" + "b" * 52})
+    elif damage == "revision":
+        index_path.write_text(
+            index.model_copy(
+                update={"entries": {str(card.model_id): entry.model_copy(update={"source_revision": "b" * 40})}}
+            ).model_dump_json()
+        )
+    elif damage in {"tombstone", "bad_tombstone"}:
+        tombstone = store / ".skulk/reconciliation-tombstones.json"
+        tombstone.parent.mkdir()
+        tombstone.write_text(
+            "{}" if damage == "bad_tombstone" else json.dumps(
+                {"schema_version": 1, "deleted_aliases": {str(card.model_id): "now"}}
+            )
+        )
+    else:
+        index_path.write_text("{}")
+    monkeypatch.setattr(constants, "SKULK_MODELS_PATH", (store,))
+    assert resolve_model_in_path(
+        card.model_id, REVISION, expected_card=card, include_store_index=True
+    ) is None
 
 
 def test_bundle_entry_pointing_outside_the_artifact_is_not_complete(tmp_path: Path) -> None:

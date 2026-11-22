@@ -37,7 +37,13 @@ from skulk.api.main import API
 from skulk.api.preservation import create_preservation_router
 from skulk.api.tests.test_mirrors_api import ready, settled
 from skulk.store import mirror_kits
-from skulk.store.mirror_contracts import MirrorJob, MirrorRequest, MirrorReview
+from skulk.store.mirror_contracts import (
+    MirrorJob,
+    MirrorPage,
+    MirrorRequest,
+    MirrorReview,
+    MirrorSelection,
+)
 from skulk.store.mirror_kits import KitSeal
 from skulk.store.mirror_process import MirrorProcess
 from skulk.store.preservation_host import PreservationHost
@@ -46,47 +52,77 @@ from skulk.store.tests.test_mirror_worker import archive, configuration
 from skulk.store.tests.test_preservation_sharing import empty_host, import_copy
 
 
+async def available_page(owner: PreservationHost) -> MirrorPage:
+    """Wait for actual local metadata; a 250 ms probe may return unavailable."""
+    async with asyncio.timeout(5):
+        while not (page := await owner.mirrors.page()).available:
+            await asyncio.sleep(0.025)
+    return page
+
+
+async def available_selection(
+    owner: PreservationHost, identity: str
+) -> MirrorSelection:
+    """Observe an available exact selection without changing production deadlines."""
+    async with asyncio.timeout(5):
+        while not (selection := await owner.mirrors.selection(identity)).available:
+            await asyncio.sleep(0.025)
+    return selection
+
+
 async def retained(tmp_path: Path) -> tuple[PreservationHost, str, TrustProfile, bytes]:
-    """Retain a genuine signed closure, then destroy input and original copy records."""
+    """Prepare a real signed closure and transfer its owner only after success.
+
+    Cold worker imports and verified archive work use a separate finite fixture
+    allowance. Failed setup drains its real owner before propagating the error.
+    """
     owner = empty_host(tmp_path)
-    configured = await owner.mirrors.start(
-        MirrorRequest(
-            owner_id="library",
-            operation_id="configure",
-            kind="configure",
-            configuration=configuration(),
+    try:
+        configured = await owner.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="configure",
+                kind="configure",
+                configuration=configuration(),
+            )
         )
-    )
-    assert (await settled(owner, configured.job_id)).state == "succeeded"
-    source, identity, trust = archive(tmp_path)
-    wrapper = (source / manifest_path(identity)).read_bytes()
-    kit = tmp_path / "input.foxkit"
-    export_kit(source, identity, trust, kit)
-    copy = await import_copy(owner, kit.read_bytes())
-    selected = await owner.mirrors.page()
-    job = await owner.mirrors.start(
-        MirrorRequest(
-            owner_id="library",
-            operation_id="retain",
-            kind="retain",
-            policy_id=selected.policy_id,
-            copy_id=copy.copy_id,
-            manifest_id=identity,
-            confirm_redistribution=True,
+        assert (
+            await settled(owner, configured.job_id, timeout_seconds=120)
+        ).state == "succeeded"
+        source, identity, trust = archive(tmp_path)
+        wrapper = (source / manifest_path(identity)).read_bytes()
+        kit = tmp_path / "input.foxkit"
+        export_kit(source, identity, trust, kit)
+        copy = await import_copy(owner, kit.read_bytes(), timeout_seconds=120)
+        selected = await available_page(owner)
+        job = await owner.mirrors.start(
+            MirrorRequest(
+                owner_id="library",
+                operation_id="retain",
+                kind="retain",
+                policy_id=selected.policy_id,
+                copy_id=copy.copy_id,
+                manifest_id=identity,
+                confirm_redistribution=True,
+            )
         )
-    )
-    assert (await settled(owner, job.job_id)).state == "succeeded"
-    location = owner.journal.setting("location:" + copy.location_id)
-    assert isinstance(location, dict) and isinstance(location["path"], str)
-    shutil.rmtree(Path(location["path"]))
-    with closing(
-        sqlite3.connect(owner.root / "journal.sqlite3", isolation_level=None)
-    ) as connection:
-        _ = connection.execute("DELETE FROM copies WHERE id=?", (copy.copy_id,))
-    for path in (source, tmp_path / "model", tmp_path / "tokenizer"):
-        shutil.rmtree(path)
-    kit.unlink()
-    return owner, identity, trust, wrapper
+        assert (
+            await settled(owner, job.job_id, timeout_seconds=120)
+        ).state == "succeeded"
+        location = owner.journal.setting("location:" + copy.location_id)
+        assert isinstance(location, dict) and isinstance(location["path"], str)
+        shutil.rmtree(Path(location["path"]))
+        with closing(
+            sqlite3.connect(owner.root / "journal.sqlite3", isolation_level=None)
+        ) as connection:
+            _ = connection.execute("DELETE FROM copies WHERE id=?", (copy.copy_id,))
+        for path in (source, tmp_path / "model", tmp_path / "tokenizer"):
+            shutil.rmtree(path)
+        kit.unlink()
+        return owner, identity, trust, wrapper
+    except BaseException:
+        await owner.close()
+        raise
 
 
 def app(owner: PreservationHost) -> FastAPI:
@@ -126,7 +162,7 @@ async def test_prepared_kit_survives_input_records_client_and_core_then_explicit
                 "tokenizer",
             }
             assert review.capture_key_ids == tuple(key.key_id for key in trust.keys)
-            page = await owner.mirrors.page()
+            page = await available_page(owner)
             assert page.models[0].name == "Synthetic complete closure"
             run = await owner.mirrors.start(
                 MirrorRequest(
@@ -160,7 +196,7 @@ async def test_prepared_kit_survives_input_records_client_and_core_then_explicit
         assert owner.mirrors.job(running.job_id).state != "succeeded"
         await owner.close()
         current = PreservationHost(owner.store, owner.root)
-        assert (await current.mirrors.page()).controller_job_id is None
+        assert (await available_page(current)).controller_job_id is None
         restored_job = current.mirrors.job(submitted.job_id)
         assert restored_job.state == "succeeded" and restored_job.kit == prepared.kit
         transport = httpx.ASGITransport(app=app(current), client=("127.0.0.1", 1000))
@@ -284,18 +320,18 @@ async def test_exact_lookup_off_page_removed_unknown_and_storage_loss(
             return state.model_copy(update={"models": models})
 
         ledger.update(fill)
-        assert (await owner.mirrors.page()).next_offset == 20
-        removed = await owner.mirrors.selection(identities[-1])
+        assert (await available_page(owner)).next_offset == 20
+        removed = await available_selection(owner, identities[-1])
         assert (
             removed.available
             and removed.model is not None
             and removed.model.state == "removed"
         )
-        kept = await owner.mirrors.selection(identities[25])
+        kept = await available_selection(owner, identities[25])
         assert (
             kept.available and kept.model is not None and kept.model.state == "retained"
         )
-        unknown = await owner.mirrors.selection("f" * 64)
+        unknown = await available_selection(owner, "f" * 64)
         assert unknown.available and unknown.model is None
         (ledger.path / "mirror.json").write_text("corrupt owner state")
         unavailable = await owner.mirrors.selection("f" * 64)
@@ -336,7 +372,7 @@ async def test_stop_during_sealing_keeps_controller_and_model_and_allows_explici
     owner, identity, trust, _wrapper = await retained(tmp_path)
     marker = tmp_path / "sealing-started"
     try:
-        page = await owner.mirrors.page()
+        page = await available_page(owner)
         run = await owner.mirrors.start(
             MirrorRequest(
                 owner_id="library",
@@ -405,7 +441,7 @@ async def test_close_stops_later_controller_before_earlier_preparation_drain_fai
     reopened: PreservationHost | None = None
     original_stop = MirrorProcess.stop
     try:
-        page = await owner.mirrors.page()
+        page = await available_page(owner)
         owner.mirrors.command = stalled_seal_command(marker)
         preparation = await owner.mirrors.start(
             MirrorRequest(
@@ -477,7 +513,7 @@ async def test_close_stops_later_controller_before_earlier_preparation_drain_fai
         assert verify_store(owner.root / "managed-mirror/store", identity, trust)
         reopened = PreservationHost(owner.store, owner.root)
         assert reopened.mirrors.job(preparation.job_id).state == "interrupted"
-        assert (await reopened.mirrors.page()).controller_job_id is None
+        assert (await available_page(reopened)).controller_job_id is None
         assert (
             owner.root / "mirror-kits" / preparation.job_id / "bundle.foxkit"
         ).is_file()
@@ -498,7 +534,7 @@ async def test_core_close_cancels_download_and_releases_descriptor_lease(
     entered = asyncio.Event()
     download: asyncio.Task[httpx.Response] | None = None
     try:
-        page = await owner.mirrors.page()
+        page = await available_page(owner)
         created = await owner.mirrors.start(
             MirrorRequest(
                 owner_id="library",

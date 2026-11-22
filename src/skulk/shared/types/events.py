@@ -14,6 +14,7 @@ from skulk.shared.types.common import (
     SessionId,
     SystemId,
 )
+from skulk.shared.types.native_music import NativeMusicDevice
 from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.restart_recovery import PlacementIntent
 from skulk.shared.types.state import State
@@ -111,6 +112,114 @@ class AudioCppPreparationCompleted(BaseEvent):
 
         if self.success and self.resources is None:
             raise ValueError("Successful audio.cpp preparation requires resources")
+        return self
+
+
+@final
+class DemucsPreparationRequested(BaseEvent):
+    """Ordered exact-package preparation request; no installable lane is ready yet."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    request_id: CommandId = Field(description="Correlated preparation request.")
+    target_node: NodeId = Field(description="Selected live worker.")
+    owner_node: NodeId = Field(description="Accepting API node.")
+    package_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="Fixed whole-package digest.",
+    )
+    device: Literal["cpu", "mps"] = Field(description="Explicit native compute lane.")
+    expires_at: float = Field(
+        description="Absolute Unix deadline including queued work."
+    )
+
+
+@final
+class DemucsPreparationCompleted(BaseEvent):
+    """Ordered verified-library snapshot; loaded-model readiness remains separate."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    request_id: CommandId = Field(description="Correlated preparation request.")
+    target_node: NodeId = Field(description="Worker that verified this package/device.")
+    owner_node: NodeId = Field(description="Accepting API node.")
+    success: bool = Field(
+        description="Whether exact package/device verification succeeded."
+    )
+    error: str | None = Field(
+        default=None, max_length=1024, description="Bounded preparation failure."
+    )
+    resources: NodeResources | None = Field(
+        default=None, description="Fresh worker-owned resource snapshot on success."
+    )
+
+    @model_validator(mode="after")
+    def require_verified_resources(self) -> "DemucsPreparationCompleted":
+        """Require a resource snapshot exactly when verification succeeded."""
+        if self.success and self.resources is None:
+            raise ValueError(
+                "successful native preparation requires verified resources"
+            )
+        if not self.success and self.resources is not None:
+            raise ValueError(
+                "failed native preparation cannot publish resource evidence"
+            )
+        return self
+
+
+@final
+class AceStepPreparationRequested(BaseEvent):
+    """Order an exact native music library request without advertising readiness."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    request_id: CommandId = Field(description="Correlated preparation command.")
+    target_node: NodeId = Field(description="Selected live worker.")
+    owner_node: NodeId = Field(description="Accepting API node.")
+    package_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$", description="Fixed complete package digest."
+    )
+    device: NativeMusicDevice = Field(description="Explicit native compute lane.")
+    expires_at: float = Field(
+        gt=0, allow_inf_nan=False,
+        description="Absolute Unix deadline covering queue, verification and execution."
+    )
+
+
+@final
+class AceStepPreparationCompleted(BaseEvent):
+    """Publish one ordered verified library snapshot, separate from model loading."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    request_id: CommandId = Field(description="Correlated preparation command.")
+    target_node: NodeId = Field(description="Worker owning the library observation.")
+    owner_node: NodeId = Field(description="Accepting API node.")
+    package_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$", description="Requested complete package digest."
+    )
+    device: NativeMusicDevice = Field(description="Requested explicit compute lane.")
+    success: bool = Field(description="Exact package/device verification succeeded.")
+    error: str | None = Field(
+        default=None, min_length=1, max_length=1024,
+        description="Bounded diagnostic on failed preparation only."
+    )
+    resources: NodeResources | None = Field(
+        default=None, description="Fresh worker-owned verified snapshot on success only."
+    )
+
+    @model_validator(mode="after")
+    def require_verification_outcome(self) -> "AceStepPreparationCompleted":
+        """Bind successful evidence and unsuccessful diagnostics without ambiguity."""
+        if self.success:
+            if self.resources is None or self.error is not None:
+                raise ValueError("native music verification needs resources and no error")
+            backend = "ace_step-metal" if self.device == "mps" else f"ace_step-{self.device}"
+            probe = self.resources.native_music_probes.get(backend)
+            if probe is None or probe.device != self.device:
+                raise ValueError("native music success needs its executed library lane")
+        elif self.resources is not None or self.error is None:
+            raise ValueError("native music failure needs a diagnostic without resources")
         return self
 
 
@@ -352,6 +461,10 @@ Event = (
     | TaskFailed
     | AudioCppPreparationRequested
     | AudioCppPreparationCompleted
+    | DemucsPreparationRequested
+    | DemucsPreparationCompleted
+    | AceStepPreparationRequested
+    | AceStepPreparationCompleted
     | TaskDeleted
     | TaskAcknowledged
     | InstanceCreated
@@ -383,6 +496,10 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     TestEvent,
     AudioCppPreparationRequested,
     AudioCppPreparationCompleted,
+    DemucsPreparationRequested,
+    DemucsPreparationCompleted,
+    AceStepPreparationRequested,
+    AceStepPreparationCompleted,
     TaskCreated,
     TaskStatusUpdated,
     TaskFailed,
