@@ -774,10 +774,20 @@ def _cycle_backend_preference_score(
     candidates, so every cycle here is runnable; this only orders them. Nodes
     without a resources entry yet (gossip warming up) are not counted against a
     preference, matching the optimistic eligibility default elsewhere.
+
+    A built-in engine is advertised under its bare name as well as its
+    compute tags, so a preference for the bare name matches by membership. An
+    engine package is advertised only under its compute tags, so a preference
+    for a package's bare name matches a node that holds any lane of it.
     """
     for index, tag in enumerate(backend_preference):
+        names_package = package_engine_of(tag) == tag
         if all(
-            tag in node_resources[node_id].backends
+            tag in (backends := node_resources[node_id].backends)
+            or (
+                names_package
+                and any(package_engine_of(held) == tag for held in backends)
+            )
             for node_id in cycle
             if node_id in node_resources
         ):

@@ -158,10 +158,23 @@ def test_a_package_node_does_not_draw_a_model_from_a_built_in_node() -> None:
     assert _chosen_node(_sized_card(), built_in_memory_gb=16) == BUILT_IN_NODE
 
 
-def test_a_card_preference_for_the_package_chooses_its_node() -> None:
+@pytest.mark.parametrize("preferred", [PACKAGE_TAG, "tensorfold"])
+def test_a_card_preference_for_the_package_chooses_its_node(preferred: str) -> None:
+    """By lane or by engine name, and against a built-in node with more free memory."""
     assert (
-        _chosen_node(_sized_card((PACKAGE_TAG,)), built_in_memory_gb=16)
+        _chosen_node(
+            _sized_card((preferred,)), built_in_memory_gb=64, package_memory_gb=16
+        )
         == PACKAGE_NODE
+    )
+
+
+def test_a_card_preference_for_a_built_in_engine_is_ranked_as_before() -> None:
+    assert (
+        _chosen_node(
+            _sized_card(("llama_cpp-vulkan",)), built_in_memory_gb=16
+        )
+        == BUILT_IN_NODE
     )
 
 
