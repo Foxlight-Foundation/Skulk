@@ -111,3 +111,28 @@ def test_no_module_imports_a_posix_only_module_unconditionally() -> None:
                 offenders.append(f"{source.relative_to(package_root)}: {name}")
 
     assert offenders == []
+
+
+def test_no_module_uses_the_tuf_client_that_needs_a_symbolic_link() -> None:
+    """python-tuf's own client cannot keep its trusted root on Windows.
+
+    It points ``root.json`` at the current root with a symbolic link, which an
+    ordinary Windows account may not create, so the signed model catalog and
+    the capability store would both be unreadable there. The model-preservation
+    package's ``TufUpdater`` writes a copy on Windows and is the same client
+    everywhere else; that is the one to import.
+    """
+    package_root = Path(skulk.__file__).parent
+    offenders: list[str] = []
+    for source in sorted(package_root.rglob("*.py")):
+        if "tests" in source.parts:
+            continue
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.ImportFrom)
+                and (node.module or "").startswith("tuf.ngclient")
+                and any(alias.name == "Updater" for alias in node.names)
+            ):
+                offenders.append(str(source.relative_to(package_root)))
+
+    assert offenders == []
