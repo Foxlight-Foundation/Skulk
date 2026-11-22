@@ -799,8 +799,9 @@ def resolve_node_backend(
     Intersects the card's ``compatible_backends`` (hard filter) with the node's
     advertised ``node_backends``, orders the result by ``backend_preference``
     (preferred tags first, then the rest deterministically), and returns the top
-    tag (e.g. ``"llama_cpp-vulkan"``). Returns ``None`` when the node advertises
-    none of the model's compatible backends. This is the single point that turns
+    tag (e.g. ``"llama_cpp-vulkan"``). With no preference that applies, a
+    built-in engine is chosen ahead of an installed engine package. Returns
+    ``None`` when the node advertises none of the model's compatible backends. This is the single point that turns
     the backend-tag vocabulary into a concrete choice; both the master (to stamp
     ``resolved_backend`` on a shard at placement, #330) and the worker (to pick a
     runner) go through it so the two cannot disagree.
@@ -834,10 +835,21 @@ def resolve_node_backend(
     # without an explicit llama_server preference would otherwise resolve
     # ``llama_server-cpu`` over ``llama_server-vulkan`` and run ``-ngl 0`` on a
     # GPU-admitted node. Platform default, not card policy.
+    #
+    # An installed engine package ranks after every built-in engine here, CPU
+    # ones included. Nothing has chosen it: a package is used when a
+    # preference names it or when it is the only compatible engine the node
+    # has, so installing one never moves a model that was already served by a
+    # built-in engine. Without a package tag the order is what it always was.
     ordered += [
         tag
         for tag in sorted(
-            intersection, key=lambda tag: (tag.endswith(f"{_TAG_SEPARATOR}cpu"), tag)
+            intersection,
+            key=lambda tag: (
+                package_engine_of(tag) is not None,
+                tag.endswith(f"{_TAG_SEPARATOR}cpu"),
+                tag,
+            ),
         )
         if tag not in ordered
     ]

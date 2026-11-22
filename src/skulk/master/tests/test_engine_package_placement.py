@@ -101,3 +101,69 @@ def test_a_package_is_not_offered_to_a_card_that_is_not_text_generation() -> Non
                 engine_builds={PACKAGE_TAG: PACKAGE_BUILD},
             ),
         )
+
+
+BUILT_IN_NODE = NodeId("node-built-in")
+PACKAGE_NODE = NodeId("node-package")
+
+
+def _chosen_node(
+    card: ModelCard, *, built_in_memory_gb: float, package_memory_gb: float = 64
+) -> NodeId:
+    """Place on a cluster of one built-in node and one package-only node."""
+    topology = Topology()
+    topology.add_node(BUILT_IN_NODE)
+    topology.add_node(PACKAGE_NODE)
+    placements = place_instance(
+        place_instance_command(card),
+        topology,
+        {},
+        {
+            BUILT_IN_NODE: create_node_memory(Memory.from_gb(built_in_memory_gb).in_bytes),
+            PACKAGE_NODE: create_node_memory(Memory.from_gb(package_memory_gb).in_bytes),
+        },
+        {BUILT_IN_NODE: create_node_network(), PACKAGE_NODE: create_node_network()},
+        node_resources={
+            BUILT_IN_NODE: NodeResources(
+                backends=frozenset({"llama_cpp", "llama_cpp-vulkan"})
+            ),
+            PACKAGE_NODE: NodeResources(
+                backends=frozenset({PACKAGE_TAG}),
+                engine_builds={PACKAGE_TAG: PACKAGE_BUILD},
+            ),
+        },
+    )
+    instance = next(iter(placements.values()))
+    return next(iter(instance.shard_assignments.node_to_runner))
+
+
+def _sized_card(preference: tuple[str, ...] = ()) -> ModelCard:
+    return ModelCard(
+        model_id=ModelId("test/text"),
+        source_revision="a" * 40,
+        storage_size=Memory.from_gb(4),
+        n_layers=1,
+        hidden_size=32,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        placement=PlacementCardConfig(
+            compatible_backends=frozenset({"llama_cpp", "tensorfold"}),
+            backend_preference=preference,
+        ),
+    )
+
+
+def test_a_package_node_does_not_draw_a_model_from_a_built_in_node() -> None:
+    """More free memory on the package node is not a choice of its engine."""
+    assert _chosen_node(_sized_card(), built_in_memory_gb=16) == BUILT_IN_NODE
+
+
+def test_a_card_preference_for_the_package_chooses_its_node() -> None:
+    assert (
+        _chosen_node(_sized_card((PACKAGE_TAG,)), built_in_memory_gb=16)
+        == PACKAGE_NODE
+    )
+
+
+def test_a_package_node_is_used_when_no_built_in_node_can_take_the_model() -> None:
+    assert _chosen_node(_sized_card(), built_in_memory_gb=1) == PACKAGE_NODE

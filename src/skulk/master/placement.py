@@ -785,6 +785,39 @@ def _cycle_backend_preference_score(
     return 0
 
 
+def _cycle_built_in_engine_score(
+    cycle: Cycle,
+    card: ModelCard,
+    node_resources: Mapping[NodeId, NodeResources],
+) -> int:
+    """Prefer a cycle that does not fall back to an installed engine package.
+
+    With no preference that applies, a node serves a model on a built-in
+    engine when it has a compatible one. A node whose only compatible engine
+    is an installed package resolves to that package, and nobody chose it.
+    Such a cycle scores ``0`` and every other cycle ``1``, so a model goes to
+    a package-only node when no node with a built-in engine can take it, and
+    installing a package never draws a model away from one that can. A
+    package the card's own preference names was chosen by the card's author
+    and scores ``1``. A cluster with no package scores every cycle ``1``, which
+    leaves the ranking as it was.
+    """
+    preference = card.placement.backend_preference
+    for node_id in cycle:
+        resources = node_resources.get(node_id)
+        if resources is None:
+            continue
+        resolved = resolve_node_backend(
+            _card_platform_backends(card, resources), preference, resources.backends
+        )
+        if resolved is None or package_engine_of(resolved) is None:
+            continue
+        if resolved in preference or package_engine_of(resolved) in preference:
+            continue
+        return 0
+    return 1
+
+
 def _card_platform_backends(
     card: ModelCard,
     node_resources: NodeResources | None = None,
@@ -1720,14 +1753,19 @@ def place_instance(
     # compatible_backends has already hard-filtered, so this only ranks). This
     # dominates the download/memory tie-breakers because serving a model on its
     # faster backend is the whole point of the preference; among cycles with the
-    # same preference rank, download locality, then an engine that is already
-    # installed (rather than installed on demand), then free memory decide.
+    # same preference rank, a built-in engine ahead of an installed engine
+    # package nobody chose, then download locality, then an engine that is
+    # already installed (rather than installed on demand), then free memory
+    # decide.
     backend_preference = command.model_card.placement.backend_preference
     selected_cycle = max(
         candidate_cycles,
         key=lambda cycle: (
             _cycle_backend_preference_score(
                 cycle, resolved_node_resources, backend_preference
+            ),
+            _cycle_built_in_engine_score(
+                cycle, command.model_card, resolved_node_resources
             ),
             _cycle_download_score(
                 cycle, command.model_card.model_id, resolved_download_status

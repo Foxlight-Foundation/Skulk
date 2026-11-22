@@ -486,6 +486,82 @@ def test_a_known_or_unstamped_backend_is_not_refused(tag: str | None) -> None:
     assert unknown_engine_refusal(tag) is None
 
 
+def _order_before_packages(
+    compatible: frozenset[str], preference: tuple[str, ...], node: frozenset[str]
+) -> str | None:
+    """The choice made before engine packages existed, for sets without one."""
+    usable = expand_engine_backends(compatible) & node
+    usable = frozenset(
+        tag
+        for tag in usable
+        if "-" in tag or not any(other.startswith(f"{tag}-") for other in usable)
+    )
+    if not usable:
+        return None
+    by_spelling = sorted(usable, key=lambda tag: (tag.endswith("-cpu"), tag))
+    for wanted in preference:
+        for tag in by_spelling:
+            if tag == wanted or ("-" not in wanted and tag.startswith(f"{wanted}-")):
+                return tag
+    return by_spelling[0]
+
+
+@pytest.mark.parametrize(
+    ("node", "expected"),
+    [
+        # Spelling alone would pick the package ahead of vLLM.
+        (frozenset({"vllm-cuda", "tensorfold-cuda"}), "vllm-cuda"),
+        (frozenset({"llama_server-vulkan", "tensorfold-rocm"}), "llama_server-vulkan"),
+        # A built-in CPU engine is what served the model before the package came.
+        (frozenset({"llama_cpp-cpu", "tensorfold-rocm"}), "llama_cpp-cpu"),
+        # The only compatible engine the node has is still used.
+        (frozenset({"tensorfold-rocm"}), "tensorfold-rocm"),
+        (frozenset({"tensorfold-cpu", "tensorfold-rocm"}), "tensorfold-rocm"),
+    ],
+)
+def test_with_no_preference_a_built_in_engine_is_chosen_before_a_package(
+    node: frozenset[str], expected: str
+) -> None:
+    compatible = frozenset({"vllm", "llama_server", "llama_cpp", "tensorfold"})
+
+    assert resolve_node_backend(compatible, (), node) == expected
+
+
+@pytest.mark.parametrize("preference", [("tensorfold-rocm",), ("tensorfold",)])
+def test_a_preference_that_names_a_package_chooses_it(
+    preference: tuple[str, ...],
+) -> None:
+    compatible = frozenset({"llama_server", "tensorfold"})
+    node = frozenset({"llama_server-vulkan", "tensorfold-rocm"})
+
+    assert resolve_node_backend(compatible, preference, node) == "tensorfold-rocm"
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        frozenset({"mlx", "mlx-metal"}),
+        frozenset({"llama_cpp", "llama_cpp-cpu", "llama_cpp-vulkan", "llama_cpp-rocm"}),
+        frozenset({"llama_server", "llama_server-cpu", "llama_server-cuda", "vllm", "vllm-cuda"}),
+        frozenset({"llama_cpp-cpu", "llama_server-vulkan"}),
+        frozenset({"vllm-rocm", "llama_server-rocm", "llama_cpp-vulkan"}),
+        frozenset[str](),
+    ],
+)
+@pytest.mark.parametrize(
+    "preference",
+    [(), ("llama_server-vulkan", "llama_cpp-rocm"), ("vllm",), ("llama_cpp",)],
+)
+def test_without_a_package_the_choice_is_what_it_was(
+    node: frozenset[str], preference: tuple[str, ...]
+) -> None:
+    compatible = frozenset({"mlx", "llama_cpp", "llama_server", "vllm"})
+
+    assert resolve_node_backend(compatible, preference, node) == _order_before_packages(
+        compatible, preference, node
+    )
+
+
 def test_the_packages_switch_is_off_unless_set_to_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
