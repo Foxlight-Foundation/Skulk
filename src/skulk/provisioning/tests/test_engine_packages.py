@@ -200,7 +200,8 @@ _SCHEMA_VIOLATIONS: list[tuple[ClaimPath, JsonValue]] = [
     (("adapter", "python_requires"), None),
     (("adapter", "kind"), "native"),
     (("control_protocol", "minimum"), 3),
-    (("external_requirements", 0, "index_url"), "http://example.invalid/"),
+    (("external_requirements", 0, "url"), "http://example.invalid/file.whl"),
+    (("archive", "filename"), "engine.rar"),
     # A package carries an engine and an adapter. Weights stay in the model
     # store, so the schema has no place to put them.
     (("weights",), {"filename": "model.safetensors", "sha256": "f" * 64}),

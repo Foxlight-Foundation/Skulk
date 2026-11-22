@@ -60,7 +60,7 @@ def engine_claims() -> Claims:
                 "filename": "rocm_sdk_core-10.0.0-py3-none-linux_x86_64.whl",
                 "size": 900_000_000,
                 "sha256": REQUIREMENT_SHA256,
-                "index_url": "https://example.invalid/rocm/whl/",
+                "url": "https://example.invalid/rocm/rocm_sdk_core-10.0.0-py3-none-linux_x86_64.whl",
             }
         ],
         "conservative_overhead_bytes": 2 * 1024**3,

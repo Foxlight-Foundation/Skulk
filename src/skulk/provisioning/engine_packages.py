@@ -100,6 +100,12 @@ EnginePackageRefusal = Literal[
     "protocol_unsupported",
     "adapter_python_unsupported",
     "archive_corrupt",
+    "source_unavailable",
+    "insufficient_space",
+    "install_cancelled",
+    "generation_missing",
+    "generation_active",
+    "installation_damaged",
 ]
 """Why a package was refused. Each code names one check, so an operator and a
 test can tell a bad signature from a package that simply does not fit this
@@ -152,6 +158,19 @@ RelativePath = Annotated[
 FileName = Annotated[
     str, Field(max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 ]
+
+ENGINE_ARCHIVE_SUFFIXES: Final = (".tar.gz", ".tgz", ".tar.xz", ".tar", ".zip")
+"""Archive formats the installer unpacks. The file name states the format."""
+
+
+def _archive_name(value: str) -> str:
+    """Require an archive file name whose suffix names a supported format."""
+    if not value.endswith(ENGINE_ARCHIVE_SUFFIXES):
+        raise ValueError("archive must be a tar, tar.gz, tar.xz or zip file")
+    return value
+
+
+ArchiveFileName = Annotated[FileName, AfterValidator(_archive_name)]
 VersionRange = Annotated[
     str, Field(min_length=1, max_length=128), AfterValidator(_specifier)
 ]
@@ -165,7 +184,9 @@ class _Contract(BaseModel):
 class EngineArchive(_Contract):
     """The engine build itself: one archive, pinned by size and digest."""
 
-    filename: FileName = Field(description="Archive file name on the package host.")
+    filename: ArchiveFileName = Field(
+        description="Archive file name on the package host; its suffix names the format."
+    )
     size: int = Field(
         ge=1, le=MAX_ENGINE_ARCHIVE_BYTES, description="Exact archive size in bytes."
     )
@@ -216,7 +237,7 @@ class EngineExternalRequirement(_Contract):
     """A file the package needs but does not carry, pinned by digest.
 
     It lets a package depend on a library distribution its publisher may not
-    redistribute. The node obtains exactly these bytes from the named index,
+    redistribute. The node obtains exactly these bytes from the named address,
     or from a file on an air-gapped cluster.
     """
 
@@ -225,10 +246,13 @@ class EngineExternalRequirement(_Contract):
     filename: FileName = Field(description="Exact file name of the distribution.")
     size: int = Field(ge=1, le=MAX_ENGINE_ARCHIVE_BYTES, description="Exact size.")
     sha256: Digest = Field(description="SHA-256 of the distribution bytes.")
-    index_url: str = Field(
-        max_length=255,
-        pattern=r"^https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~/-]*)?$",
-        description="HTTPS index the publisher of that distribution serves it from.",
+    url: str = Field(
+        max_length=512,
+        pattern=r"^https://[A-Za-z0-9.-]+/[A-Za-z0-9._~/+%-]+$",
+        description=(
+            "Exact HTTPS address of the file at its own publisher. The signed "
+            "digest, not the address, decides whether the bytes are accepted."
+        ),
     )
 
 
@@ -593,3 +617,35 @@ def verify_engine_file(path: Path, *, size: int, sha256: str) -> None:
         raise _refuse(
             "archive_corrupt", f"{path.name} does not match its signed digest"
         )
+
+
+def installed_engine_claims(document: bytes) -> tuple[EnginePackageClaims, str]:
+    """Read the claims and build identity from a manifest an installation kept.
+
+    This checks neither the signature nor the validity window. It is only for
+    the document a completed installation retained beside its files, which
+    was verified when it was installed: an installed engine keeps working
+    after its trust document or its manifest expires. Never use it to decide
+    whether to install.
+
+    Args:
+        document: The signed manifest exactly as it was retained.
+
+    Returns:
+        The claims and the SHA-256 of their canonical form.
+
+    Raises:
+        EnginePackageRefusedError: ``installation_damaged`` when the retained
+            document no longer parses as a manifest.
+    """
+    if len(document) > MAX_ENGINE_MANIFEST_BYTES:
+        raise _refuse("installation_damaged", "the retained manifest is too large")
+    try:
+        signed = _SignedEnginePackage.model_validate_json(document)
+        payload = canonical_json(signed.engine)
+        claims = EnginePackageClaims.model_validate_json(payload)
+    except ValidationError:
+        raise _refuse(
+            "installation_damaged", "the retained manifest is not readable"
+        ) from None
+    return claims, hashlib.sha256(payload).hexdigest()
