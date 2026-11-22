@@ -48,6 +48,9 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Literal, Protocol, cast, final
 
+from skulk.utils._windows_account import process_account as _process_account
+from skulk.utils._windows_account import this_account as _this_account
+
 # What ``asyncio`` itself accepts for a stream server: a coroutine function or
 # a plain function that starts its own task.
 type ClientConnected = Callable[
@@ -75,8 +78,6 @@ _PIPE_REJECT_REMOTE_CLIENTS = 0x00000008
 _PIPE_UNLIMITED_INSTANCES = 255
 _PIPE_BUFFER_BYTES = 65536
 
-_TOKEN_QUERY = 0x0008
-_TOKEN_USER = 1
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _SDDL_REVISION_1 = 1
 
@@ -100,8 +101,6 @@ class _SecurityAttributes(ctypes.Structure):
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 
-_kernel32.GetCurrentProcess.restype = wt.HANDLE
-_kernel32.GetCurrentProcess.argtypes = ()
 _kernel32.OpenProcess.restype = wt.HANDLE
 _kernel32.OpenProcess.argtypes = (wt.DWORD, wt.BOOL, wt.DWORD)
 _kernel32.CloseHandle.restype = wt.BOOL
@@ -133,18 +132,6 @@ _kernel32.WaitNamedPipeW.restype = wt.BOOL
 _kernel32.WaitNamedPipeW.argtypes = (wt.LPCWSTR, wt.DWORD)
 _kernel32.GetNamedPipeServerProcessId.restype = wt.BOOL
 _kernel32.GetNamedPipeServerProcessId.argtypes = (wt.HANDLE, ctypes.POINTER(wt.ULONG))
-_advapi32.OpenProcessToken.restype = wt.BOOL
-_advapi32.OpenProcessToken.argtypes = (wt.HANDLE, wt.DWORD, ctypes.POINTER(wt.HANDLE))
-_advapi32.GetTokenInformation.restype = wt.BOOL
-_advapi32.GetTokenInformation.argtypes = (
-    wt.HANDLE,
-    ctypes.c_int,
-    wt.LPVOID,
-    wt.DWORD,
-    ctypes.POINTER(wt.DWORD),
-)
-_advapi32.ConvertSidToStringSidW.restype = wt.BOOL
-_advapi32.ConvertSidToStringSidW.argtypes = (wt.LPVOID, ctypes.POINTER(wt.LPWSTR))
 _advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wt.BOOL
 _advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
     wt.LPCWSTR,
@@ -157,7 +144,6 @@ _INVALID_HANDLE = wt.HANDLE(-1).value
 
 # ctypes calls return untyped values. These views give each foreign function
 # the result type its ``restype`` above produces.
-_get_current_process: Callable[..., int] = _kernel32.GetCurrentProcess
 _open_process: Callable[..., int | None] = _kernel32.OpenProcess
 _close_handle: Callable[..., int] = _kernel32.CloseHandle
 _local_free: Callable[..., object] = _kernel32.LocalFree
@@ -165,9 +151,6 @@ _create_named_pipe: Callable[..., int | None] = _kernel32.CreateNamedPipeW
 _create_file: Callable[..., int | None] = _kernel32.CreateFileW
 _wait_named_pipe: Callable[..., int] = _kernel32.WaitNamedPipeW
 _get_server_process_id: Callable[..., int] = _kernel32.GetNamedPipeServerProcessId
-_open_process_token: Callable[..., int] = _advapi32.OpenProcessToken
-_get_token_information: Callable[..., int] = _advapi32.GetTokenInformation
-_sid_to_text: Callable[..., int] = _advapi32.ConvertSidToStringSidW
 _text_to_descriptor: Callable[..., int] = (
     _advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
 )
@@ -206,46 +189,6 @@ def _proactor_loop() -> _ProactorLoop:
 def _last_error(action: str) -> OSError:
     """The calling thread's last Windows error as the matching ``OSError``."""
     return ctypes.WinError(ctypes.get_last_error(), action)
-
-
-def _process_account(process: int) -> str:
-    """The security identifier of the account a process runs as, as a string."""
-    token = wt.HANDLE()
-    if not _open_process_token(process, _TOKEN_QUERY, ctypes.byref(token)):
-        raise _last_error("OpenProcessToken")
-    try:
-        size = wt.DWORD()
-        _get_token_information(token, _TOKEN_USER, None, 0, ctypes.byref(size))
-        buffer = ctypes.create_string_buffer(size.value)
-        if not _get_token_information(
-            token, _TOKEN_USER, buffer, size, ctypes.byref(size)
-        ):
-            raise _last_error("GetTokenInformation")
-        # TOKEN_USER begins with a pointer to the account's identifier.
-        identifier = ctypes.c_void_p.from_buffer(buffer).value
-        text = wt.LPWSTR()
-        if not _sid_to_text(identifier, ctypes.byref(text)):
-            raise _last_error("ConvertSidToStringSid")
-        try:
-            value = text.value
-        finally:
-            _local_free(text)
-        if not value:
-            raise OSError("account identifier is empty")
-        return value
-    finally:
-        _close_handle(token)
-
-
-_account: str | None = None
-
-
-def _this_account() -> str:
-    """This process's account identifier; it cannot change while it runs."""
-    global _account
-    if _account is None:
-        _account = _process_account(_get_current_process())
-    return _account
 
 
 def _server_account(handle: int) -> str:

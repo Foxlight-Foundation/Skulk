@@ -245,6 +245,17 @@ has no half-close. There is one transport per platform and no fallback. The
 `Windows management node` CI job installs from the lock on Windows, imports
 `skulk.main` and runs the Windows tests; add a test file to that job when it
 has something only Windows can check.
+Owner-only runtime state (`utils/runtime_files.py`: `private_directory`,
+`read_private`, `write_private`, `remove_private`, `RuntimeLock`) has a Windows
+side in `utils/_runtime_files_windows.py`, built on the model-preservation
+`safefs` seam: owner-only there means owned by the account with a protected
+access list naming the account and SYSTEM only, so such state must be created
+through these functions; a file or folder made by other means inside a private
+folder is refused. `has_root_authority()` is the one test for "runs as root":
+the effective root user on POSIX, the SYSTEM account or a process running as
+administrator on Windows (`utils/_windows_account.py`). With these the plugin
+manager starts and answers on Windows; owner processes and the native kernel
+do not run there yet.
 
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`, dark = the operator design system's Den palette); components never branch on the theme name. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field (scene crown + shooting stars, mesh retired); default builds ship a CSS-only night gradient with the mesh.

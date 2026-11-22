@@ -19,6 +19,7 @@ else:
     # Owner-only directories, files and the lock have their own Windows
     # implementation; each function below hands over to it first.
     from skulk.utils import _runtime_files_windows as _windows
+    from skulk.utils import _windows_account
 
 
 @functools.cache
@@ -38,6 +39,18 @@ def private_group(group_id: int, user_id: int) -> bool:
         and group.gr_name == account.pw_name
         and not group.gr_mem
     )
+
+
+def has_root_authority() -> bool:
+    """Whether this process could change the machine for every account.
+
+    Code that runs installed plugins refuses to start with that authority, so
+    a plugin never inherits it. On POSIX it is the effective root user. On
+    Windows it is the SYSTEM account or a process running as administrator.
+    """
+    if sys.platform == "win32":
+        return _windows_account.this_process_has_machine_authority()
+    return os.geteuid() == 0
 
 
 def writable_only_by(info: os.stat_result, user_id: int) -> bool:

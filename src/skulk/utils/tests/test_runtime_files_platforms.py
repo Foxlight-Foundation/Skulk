@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -181,7 +182,16 @@ def test_a_lock_is_released_when_its_process_dies(root: Path) -> None:
     finally:
         holder.kill()
         holder.wait()
-    RuntimeLock(root, "manager.lock").close()
+    # The operating system drops the lock as it tears the process down, which
+    # on Windows can finish a moment after the process is reported gone.
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            RuntimeLock(root, "manager.lock").close()
+            break
+        except BlockingIOError:
+            assert time.monotonic() < deadline, "the dead holder's lock was kept"
+            time.sleep(0.05)
 
 
 async def test_waiting_for_a_lock_gives_up_after_the_bound(root: Path) -> None:

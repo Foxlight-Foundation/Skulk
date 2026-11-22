@@ -99,6 +99,7 @@ from skulk.utils.local_transport import (
     endpoint_is_private,
     serve,
 )
+from skulk.utils.runtime_files import has_root_authority
 
 PluginIdentifier = Annotated[
     str, Field(pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$")
@@ -807,7 +808,7 @@ class RuntimeManager:
         self, root: Path, request_stop: Callable[[], None] | None = None
     ) -> None:
         """Read only the fixed local host binding and prepare owner-only storage."""
-        if os.geteuid() == 0:
+        if has_root_authority():
             raise ValueError("plugin manager must run without root")
         private_directory(root)
         self.root = root.resolve()

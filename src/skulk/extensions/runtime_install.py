@@ -43,6 +43,7 @@ from skulk.extensions.runtime_integrity import (
     seal_runtime,
     verify_or_adopt_installed_runtime,
 )
+from skulk.utils.runtime_files import has_root_authority
 
 _INVENTORY = """import importlib.metadata,json,re
 def name(d): return re.sub(r"[-_.]+", "-", d.metadata["Name"].lower())
@@ -234,7 +235,7 @@ class RuntimeInstaller:
 
     def __init__(self, root: Path) -> None:
         """Select stable nonroot service storage and initialize a protected journal."""
-        if os.geteuid() == 0:
+        if has_root_authority():
             raise ValueError("runtime installer must run without root authority")
         private_directory(root)
         self.root = root.resolve()
