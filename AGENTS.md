@@ -237,8 +237,14 @@ hosting, signed installs and an unattended service on Windows are not built yet.
 Local streams between the node, the plugin manager and plugin owners go through
 `utils/local_transport.py` (endpoint directory, privacy check, `connect`,
 `serve`, `discard`); it is the only module that opens or binds a local socket
-or names an endpoint directory (`utils/tests/test_local_transport.py` enforces
-this), and today it has a POSIX implementation only.
+or pipe or names an endpoint directory (`utils/tests/test_local_transport.py`
+enforces this). POSIX uses a Unix socket. Windows uses a named pipe
+(`utils/_local_transport_windows.py`) owned by and open to the account and
+SYSTEM only; the client refuses a pipe served by another account, and a pipe
+has no half-close. There is one transport per platform and no fallback. The
+`Windows management node` CI job installs from the lock on Windows, imports
+`skulk.main` and runs the Windows tests; add a test file to that job when it
+has something only Windows can check.
 
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`, dark = the operator design system's Den palette); components never branch on the theme name. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field (scene crown + shooting stars, mesh retired); default builds ship a CSS-only night gradient with the mesh.
