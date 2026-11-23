@@ -2244,12 +2244,14 @@ class Master:
             ),
             unreflected=self._unreflected_placements(placements),
             node_resources=resources,
+            package_needs=self.state.engine_package_needs,
         )
         vram = usable_vram_by_node(
             self._telemetry_view.node_system,
             resources,
             node_memory=memory,
             current_instances=placements,
+            package_needs=self.state.engine_package_needs,
         )
         return memory, vram
 
@@ -5287,6 +5289,7 @@ class Master:
             ),
             unreflected=self._unreflected_placements(remaining),
             node_resources=self._telemetry_view.node_resources,
+            package_needs=self.state.engine_package_needs,
         )
         vram = dict(
             usable_vram_by_node(
@@ -5312,6 +5315,7 @@ class Master:
             remaining,
             unified_memory_gpu_nodes=unified_nodes,
             node_resources=self._telemetry_view.node_resources,
+            package_needs=self.state.engine_package_needs,
         )
 
     def _reset_steward_upgrade(self) -> None:

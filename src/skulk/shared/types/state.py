@@ -109,6 +109,16 @@ class State(CamelCaseModel):
         return value
 
     runners: Mapping[RunnerId, RunnerStatus] = {}
+    engine_package_needs: Mapping[RunnerId, int] = Field(
+        default={},
+        description=(
+            "Bytes an engine package said a placed load takes, by runner. "
+            "Memory accounting reserves the larger of this and its own "
+            "estimate for that runner. Present only for runners served by an "
+            "engine package whose engine gave a figure; removed with the "
+            "placement."
+        ),
+    )
     downloads: Mapping[NodeId, Sequence[DownloadProgress]] = Field(
         default={},
         description=(

@@ -250,6 +250,30 @@ class RunnerStatusUpdated(BaseEvent):
     runner_status: RunnerStatus
 
 
+class EnginePackageNeedStated(BaseEvent):
+    """An engine package said what one placed load takes on its node.
+
+    The worker asks the package's adapter just before it dispatches the load
+    and sends this once its own live memory check has passed. The master
+    reserves the larger of this figure and its own estimate for that runner,
+    so a later placement on the node is not admitted against memory the
+    engine is about to take.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    runner_id: RunnerId = Field(
+        description="The runner of the placement the engine was asked about."
+    )
+    need_bytes: int = Field(
+        ge=0,
+        description=(
+            "Bytes the engine said this load takes, in the memory pool the "
+            "runner's backend is admitted against."
+        ),
+    )
+
+
 class NodeTimeoutEvidence(FrozenModel):
     """Signal ages captured when the master decides to prune a node."""
 
@@ -487,6 +511,7 @@ Event = (
     | InstanceFailureRecorded
     | InstanceDeleted
     | RunnerStatusUpdated
+    | EnginePackageNeedStated
     | NodeTimedOut
     | NodeGatheredInfo
     | NodeDownloadProgress
@@ -526,6 +551,7 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     InstanceFailureRecorded,
     InstanceDeleted,
     RunnerStatusUpdated,
+    EnginePackageNeedStated,
     NodeTimedOut,
     TopologyEdgeCreated,
     TopologyEdgeDeleted,

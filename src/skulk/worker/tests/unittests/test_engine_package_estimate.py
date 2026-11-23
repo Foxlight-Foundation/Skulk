@@ -26,7 +26,12 @@ from skulk.shared.models.engine_memory_settings import engine_package_memory_set
 from skulk.shared.models.tests.test_engine_memory_settings import memory_card
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import ModelId, NodeId
-from skulk.shared.types.events import Event, IndexedEvent, TaskStatusUpdated
+from skulk.shared.types.events import (
+    EnginePackageNeedStated,
+    Event,
+    IndexedEvent,
+    TaskStatusUpdated,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
@@ -189,6 +194,15 @@ def _failed(events: Receiver[Event]) -> bool:
     return TaskStatus.Failed in _task_statuses(events)
 
 
+def _stated(events: list[Event]) -> list[tuple[RunnerId, int]]:
+    """Every figure the worker sent to the master, in order."""
+    return [
+        (event.runner_id, event.need_bytes)
+        for event in events
+        if isinstance(event, EnginePackageNeedStated)
+    ]
+
+
 async def test_a_load_the_engine_says_fits_is_dispatched(
     tmp_path: Path, asked: _Asked
 ) -> None:
@@ -293,3 +307,70 @@ async def test_a_placement_removed_while_the_engine_was_asked_is_not_loaded(
     assert runner.started == []
     # The task was created before dispatch, so it is closed, not left open.
     assert _task_statuses(events) == [TaskStatus.Cancelled]
+
+
+async def test_the_master_is_told_the_engines_figure_once_the_load_goes_ahead(
+    tmp_path: Path, asked: _Asked
+) -> None:
+    """The master reserved on its own estimate; the engine's figure corrects it."""
+    need = Memory.from_gb(30).in_bytes
+    asked.answer = EngineNeed(pool="gpu", bytes=need)
+    worker, runner, events = _worker(tmp_path)
+    task = LoadModel(instance_id=_INSTANCE)
+
+    await worker._start_runner_task(task)
+
+    assert runner.started == [task]
+    assert _stated(events.collect()) == [(_RUNNER, need)]
+
+
+async def test_a_figure_the_master_already_holds_is_not_sent_again(
+    tmp_path: Path, asked: _Asked
+) -> None:
+    """A reload of the same placement must not grow the event log."""
+    need = Memory.from_gb(30).in_bytes
+    asked.answer = EngineNeed(pool="gpu", bytes=need)
+    worker, runner, events = _worker(tmp_path)
+    worker.state = worker.state.model_copy(
+        update={"engine_package_needs": {_RUNNER: need}}
+    )
+    task = LoadModel(instance_id=_INSTANCE)
+
+    await worker._start_runner_task(task)
+
+    assert runner.started == [task]
+    assert _stated(events.collect()) == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        None,
+        EngineNeed(pool="host", bytes=Memory.from_gb(30).in_bytes),
+        EngineNeed(pool="gpu", bytes=Memory.from_gb(80).in_bytes),
+    ],
+    ids=["unknown", "other-pool", "refused"],
+)
+async def test_nothing_is_sent_without_a_figure_for_a_load_that_goes_ahead(
+    tmp_path: Path, asked: _Asked, answer: EngineNeed | None
+) -> None:
+    """No figure, a figure for another pool, or a refused load reserve nothing new."""
+    asked.answer = answer
+    worker, _, events = _worker(tmp_path)
+
+    await worker._start_runner_task(LoadModel(instance_id=_INSTANCE))
+
+    assert _stated(events.collect()) == []
+
+
+async def test_a_built_in_engines_load_sends_no_figure(
+    tmp_path: Path, asked: _Asked
+) -> None:
+    asked.answer = EngineNeed(pool="gpu", bytes=Memory.from_gb(30).in_bytes)
+    worker, runner, events = _worker(tmp_path, backend="llama_server-rocm")
+    task = LoadModel(instance_id=_INSTANCE)
+
+    await worker._start_runner_task(task)
+
+    assert runner.started == [task]
+    assert _stated(events.collect()) == []

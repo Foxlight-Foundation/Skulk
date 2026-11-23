@@ -4,6 +4,7 @@ from datetime import datetime
 
 from loguru import logger
 
+from skulk.shared.backends import package_engine_of
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import (
     AceStepPreparationCompleted,
@@ -15,6 +16,7 @@ from skulk.shared.types.events import (
     CustomModelCardDeleted,
     DemucsPreparationCompleted,
     DemucsPreparationRequested,
+    EnginePackageNeedStated,
     Event,
     IndexedEvent,
     InputChunkReceived,
@@ -124,6 +126,8 @@ def event_apply(event: Event, state: State) -> State:
             return apply_node_gathered_info(event, state)
         case RunnerStatusUpdated():
             return apply_runner_status_updated(event, state)
+        case EnginePackageNeedStated():
+            return apply_engine_package_need_stated(event, state)
         case TaskCreated():
             return apply_task_created(event, state)
         case TaskDeleted():
@@ -420,6 +424,12 @@ def apply_instance_deleted(event: InstanceDeleted, state: State) -> State:
                 for rid, rs in state.runners.items()
                 if rid not in doomed_runner_ids
             }
+            if not doomed_runner_ids.isdisjoint(state.engine_package_needs):
+                update["engine_package_needs"] = {
+                    rid: need
+                    for rid, need in state.engine_package_needs.items()
+                    if rid not in doomed_runner_ids
+                }
     return state.model_copy(update=update)
 
 
@@ -449,6 +459,39 @@ def apply_runner_status_updated(event: RunnerStatusUpdated, state: State) -> Sta
         event.runner_id: event.runner_status,
     }
     return state.model_copy(update={"runners": new_runners})
+
+
+def apply_engine_package_need_stated(
+    event: EnginePackageNeedStated, state: State
+) -> State:
+    """Record what an engine package said one placed load takes.
+
+    The figure is kept only for a runner that belongs to a current placement
+    and is served by an engine package. A figure that arrives after its
+    placement was removed, or names a built-in engine's runner, is dropped,
+    so memory accounting for built-in engines can never be changed this way.
+    A later figure for the same runner replaces the earlier one.
+    """
+    shard = next(
+        (
+            instance.shard_assignments.runner_to_shard[event.runner_id]
+            for instance in state.instances.values()
+            if event.runner_id in instance.shard_assignments.runner_to_shard
+        ),
+        None,
+    )
+    if shard is None or package_engine_of(shard.resolved_backend or "") is None:
+        return state
+    if state.engine_package_needs.get(event.runner_id) == event.need_bytes:
+        return state
+    return state.model_copy(
+        update={
+            "engine_package_needs": {
+                **state.engine_package_needs,
+                event.runner_id: event.need_bytes,
+            }
+        }
+    )
 
 
 def apply_model_engine_order_changed(
@@ -488,6 +531,11 @@ def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
     runners = {
         runner_id: runner_status
         for runner_id, runner_status in state.runners.items()
+        if runner_id not in affected_runner_ids
+    }
+    engine_package_needs = {
+        runner_id: need
+        for runner_id, need in state.engine_package_needs.items()
         if runner_id not in affected_runner_ids
     }
     tasks = {
@@ -532,6 +580,7 @@ def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
         update={
             "instances": instances,
             "runners": runners,
+            "engine_package_needs": engine_package_needs,
             "tasks": tasks,
             "downloads": downloads,
             "topology": topology,

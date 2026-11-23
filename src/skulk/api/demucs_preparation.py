@@ -104,6 +104,7 @@ class DemucsMountPreparer:
             resources,
             node_memory=self.telemetry.node_memory,
             current_instances=snapshot.instances,
+            package_needs=snapshot.engine_package_needs,
         )
         memory = reserve_system_ram_usage(
             self.telemetry.node_memory,
@@ -115,6 +116,7 @@ class DemucsMountPreparer:
                 node_memory=self.telemetry.node_memory,
             ),
             node_resources=resources,
+            package_needs=snapshot.engine_package_needs,
         ).get(node)
         if memory is None:
             return 0

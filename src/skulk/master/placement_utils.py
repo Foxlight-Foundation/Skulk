@@ -7,7 +7,7 @@ from typing import Final, final
 from loguru import logger
 from pydantic import Field
 
-from skulk.shared.backends import memory_settings_key
+from skulk.shared.backends import memory_settings_key, package_engine_of
 from skulk.shared.models.engine_memory_settings import EngineMemorySettings
 from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.memory_estimate import (
@@ -128,7 +128,9 @@ def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
     The ``comfy`` video and audio.cpp music engines hold their model weights
     on the selected GPU in the same way. Metal stays on Apple unified memory
     (``llama_server-metal`` included); this predicate gates only AMD/NVIDIA
-    discrete-VRAM observations.
+    discrete-VRAM observations. An engine package's GPU lane counts too: its
+    loads are admitted against VRAM (``backend_offloads_to_vram``), so a node
+    whose only GPU engine is a package must appear in the VRAM map.
     """
     return any(
         tag in _AUDIO_CPP_DISCRETE_LANES
@@ -136,6 +138,7 @@ def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
             tag.startswith(_GPU_OFFLOAD_ENGINE_PREFIXES)
             and not tag.endswith(("-cpu", "-metal"))
         )
+        or (package_engine_of(tag) is not None and backend_offloads_to_vram(tag))
         for tag in backends
     )
 
@@ -145,6 +148,8 @@ def usable_vram_by_node(
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     node_memory: Mapping[NodeId, MemoryUsage] | None = None,
     current_instances: Mapping[InstanceId, Instance] | None = None,
+    *,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> dict[NodeId, Memory]:
     """Per-node usable GPU memory for placement, keyed by node.
 
@@ -239,7 +244,26 @@ def usable_vram_by_node(
             node_system, node_resources, node_memory
         ),
         node_resources=node_resources,
+        package_needs=package_needs,
     )
+
+
+def _charged_bytes(
+    footprint: Memory,
+    runner_id: RunnerId,
+    package_needs: Mapping[RunnerId, int] | None,
+) -> int:
+    """What one shard reserves: its estimate, or its engine's own larger figure.
+
+    ``package_needs`` holds what an engine package said a placed load takes
+    (``State.engine_package_needs``). It can only raise a reservation. A
+    runner with no entry, which is every runner of a built-in engine, is
+    charged its estimate exactly as before.
+    """
+    stated = package_needs.get(runner_id) if package_needs is not None else None
+    if stated is None:
+        return footprint.in_bytes
+    return max(footprint.in_bytes, stated)
 
 
 def _native_reservation_budget(
@@ -338,6 +362,7 @@ def reserve_instance_vram(
     *,
     unified_memory_gpu_nodes: frozenset[NodeId] = frozenset(),
     node_resources: Mapping[NodeId, NodeResources] | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> dict[NodeId, Memory]:
     """Cap observed discrete VRAM by the capacity committed to concrete shards.
 
@@ -349,6 +374,8 @@ def reserve_instance_vram(
             combined-pool admission instead of treating the VRAM carve as a cap.
         node_resources: Actual selected-device native probes. Native ownership
             cannot borrow a larger accelerator or an additive UMA carve pool.
+        package_needs: What an engine package said a placed load takes, by
+            runner; a larger figure replaces that shard's estimate.
 
     Returns:
         A fresh memory map bounded by both observations and uncommitted physical
@@ -403,7 +430,9 @@ def reserve_instance_vram(
                     else PLACEMENT_KV_CONTEXT_BUDGET_TOKENS
                 ),
             )
-            committed[node_id] = committed.get(node_id, 0) + footprint.in_bytes
+            committed[node_id] = committed.get(node_id, 0) + _charged_bytes(
+                footprint, runner_id, package_needs
+            )
     usable = dict(node_vram)
     for node_id, observed in node_vram.items():
         profile = node_system.get(node_id)
@@ -451,6 +480,7 @@ def reserve_instance_system_ram(
     carve_first_nodes: AbstractSet[NodeId] = frozenset(),
     unreflected: AbstractSet[InstanceId] = frozenset(),
     node_resources: Mapping[NodeId, NodeResources] | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> dict[NodeId, Memory]:
     """Live system RAM per node, net of placements telemetry may not show yet.
 
@@ -494,6 +524,8 @@ def reserve_instance_system_ram(
             footprints also come off the observed figure.
         node_resources: Exact native memory topology; absent topology is shared
             conservatively. Native work reserves its full future phase budget.
+        package_needs: What an engine package said a placed load takes, by
+            runner; a larger figure replaces that shard's estimate.
 
     Returns:
         Usable live system RAM keyed by node, for every node in ``node_memory``.
@@ -558,9 +590,10 @@ def reserve_instance_system_ram(
                     shard, instance.context_token_limit
                 ),
             )
-            committed[node_id] = committed.get(node_id, 0) + footprint.in_bytes
+            charged_bytes = _charged_bytes(footprint, runner_id, package_needs)
+            committed[node_id] = committed.get(node_id, 0) + charged_bytes
             if instance_id in unreflected:
-                pending[node_id] = pending.get(node_id, 0) + footprint.in_bytes
+                pending[node_id] = pending.get(node_id, 0) + charged_bytes
     usable: dict[NodeId, Memory] = {}
     for node_id, usage in node_memory.items():
         if node_id in invalid_nodes:
@@ -585,6 +618,7 @@ def reserve_system_ram_usage(
     carve_first_nodes: AbstractSet[NodeId] = frozenset(),
     unreflected: AbstractSet[InstanceId] = frozenset(),
     node_resources: Mapping[NodeId, NodeResources] | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> dict[NodeId, MemoryUsage]:
     """``node_memory`` with each ``ram_available`` net of committed placements.
 
@@ -600,6 +634,7 @@ def reserve_system_ram_usage(
         carve_first_nodes=carve_first_nodes,
         unreflected=unreflected,
         node_resources=node_resources,
+        package_needs=package_needs,
     )
     return {
         node_id: (

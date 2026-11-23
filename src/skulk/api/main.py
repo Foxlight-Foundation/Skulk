@@ -4134,6 +4134,7 @@ class API:
             node_memory=self._telemetry_view.node_memory,
             current_instances=self.state.instances,
             node_resources=self._telemetry_view.node_resources,
+            package_needs=self.state.engine_package_needs,
         )
         node_ram = reserve_system_ram_usage(
             self._telemetry_view.node_memory,
@@ -4145,6 +4146,7 @@ class API:
                 node_memory=self._telemetry_view.node_memory,
             ),
             node_resources=self._telemetry_view.node_resources,
+            package_needs=self.state.engine_package_needs,
         )
 
         def supports_with_capacity(node_id: NodeId, backends: frozenset[str]) -> bool:
@@ -4445,6 +4447,7 @@ class API:
                         placement_resources,
                         node_memory=self._telemetry_view.node_memory,
                         current_instances=self.state.instances,
+                        package_needs=self.state.engine_package_needs,
                     ),
                     unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
@@ -4659,6 +4662,7 @@ class API:
                     self._telemetry_view.node_resources,
                     node_memory=self._telemetry_view.node_memory,
                     current_instances=self.state.instances,
+                    package_needs=self.state.engine_package_needs,
                 ),
                 unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                     self._telemetry_view.node_system,
@@ -4840,6 +4844,7 @@ class API:
             self._telemetry_view.node_resources,
             node_memory=self._telemetry_view.node_memory,
             current_instances=self.state.instances,
+            package_needs=self.state.engine_package_needs,
         )
         placement_unified_memory_gpu_nodes = unified_memory_gpu_node_ids(
             self._telemetry_view.node_system,
@@ -11041,6 +11046,7 @@ class API:
             runners=self.state.runners,
             excluded_nodes=set(excluded_node_ids or ()),
             model_engine_orders=self.state.model_engine_orders,
+            package_needs=self.state.engine_package_needs,
         )
 
     async def get_model_requirements(

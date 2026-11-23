@@ -143,6 +143,7 @@ from skulk.shared.types.events import (
     CustomModelCardDeleted,
     DemucsPreparationCompleted,
     DemucsPreparationRequested,
+    EnginePackageNeedStated,
     Event,
     IndexedEvent,
     ModelTrustApprovalChanged,
@@ -5654,6 +5655,21 @@ class Worker:
                             task.instance_id, fit_error
                         )
                     return
+                if (
+                    engine_need is not None
+                    and self.state.engine_package_needs.get(runner_id)
+                    != engine_need.in_bytes
+                ):
+                    # The load is going ahead. The master reserved this
+                    # placement on its own estimate; tell it what the engine
+                    # said, so a later placement on this node is not admitted
+                    # against memory this load is about to take. Sent once
+                    # per figure, so a reload does not grow the event log.
+                    await self.event_sender.send(
+                        EnginePackageNeedStated(
+                            runner_id=runner_id, need_bytes=engine_need.in_bytes
+                        )
+                    )
             logger.info(
                 "Dispatching worker task "
                 f"({_summarize_worker_task(task)}, "

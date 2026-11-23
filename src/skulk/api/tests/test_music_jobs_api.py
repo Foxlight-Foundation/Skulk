@@ -104,7 +104,9 @@ async def test_mount_preflight_accepts_ready_music_without_qualification(
     )
     api: Any = object.__new__(API)
     api.node_id = NodeId("api-node")
-    api.state = SimpleNamespace(topology=topology, instances={})
+    api.state = SimpleNamespace(
+        topology=topology, instances={}, engine_package_needs={}
+    )
     api._telemetry_view = SimpleNamespace(
         node_resources=resources,
         node_memory={node: memory for node in resources},
@@ -173,7 +175,9 @@ async def test_strix_vulkan_claim_prepares_gpu_variant_before_placement(
     )
     api: Any = object.__new__(API)
     api.node_id = NodeId("api-node")
-    api.state = SimpleNamespace(topology=topology, instances={})
+    api.state = SimpleNamespace(
+        topology=topology, instances={}, engine_package_needs={}
+    )
     api._telemetry_view = SimpleNamespace(
         node_resources={node: initial},
         node_memory={node: memory},
@@ -252,7 +256,9 @@ async def test_cuda_claim_prepares_exact_host_gpu_variant(
     )
     api: Any = object.__new__(API)
     api.node_id = NodeId("api-node")
-    api.state = SimpleNamespace(topology=topology, instances={})
+    api.state = SimpleNamespace(
+        topology=topology, instances={}, engine_package_needs={}
+    )
     api._telemetry_view = SimpleNamespace(
         node_resources={node: initial},
         node_memory={node: memory},
@@ -424,7 +430,9 @@ async def test_dedicated_cuda_wheel_checks_compiled_sm_without_qualification(
     )
     api: Any = object.__new__(API)
     api.node_id = NodeId("api-node")
-    api.state = SimpleNamespace(topology=topology, instances={})
+    api.state = SimpleNamespace(
+        topology=topology, instances={}, engine_package_needs={}
+    )
     api._telemetry_view = SimpleNamespace(
         node_resources={node: resources},
         node_memory={node: memory},
@@ -483,7 +491,9 @@ async def test_strix_vulkan_preparation_failure_uses_signed_cpu_fallback(
     )
     api: Any = object.__new__(API)
     api.node_id = NodeId("api-node")
-    api.state = SimpleNamespace(topology=topology, instances={})
+    api.state = SimpleNamespace(
+        topology=topology, instances={}, engine_package_needs={}
+    )
     api._telemetry_view = SimpleNamespace(
         node_resources={node: resources},
         node_memory={node: memory},
@@ -546,7 +556,9 @@ async def test_mount_preflight_rejects_weights_only_system_memory_fit(
         swap_total=0, swap_available=0,
     )
     api: Any = object.__new__(API)
-    api.state = SimpleNamespace(topology=topology, instances={})
+    api.state = SimpleNamespace(
+        topology=topology, instances={}, engine_package_needs={}
+    )
     api._telemetry_view = SimpleNamespace(
         node_resources={node: NodeResources(
             backends=frozenset({"audio_cpp", lane}),
@@ -592,7 +604,9 @@ async def test_mount_preflight_uses_ordered_preparation_resources(
     )
     api: Any = object.__new__(API)
     api.node_id = NodeId("api-node")
-    api.state = SimpleNamespace(topology=topology, instances={})
+    api.state = SimpleNamespace(
+        topology=topology, instances={}, engine_package_needs={}
+    )
     api._telemetry_view = SimpleNamespace(
         node_resources={node: stale},
         node_memory={node: memory},
@@ -635,7 +649,7 @@ async def test_music_place_dry_run_uses_ordered_preparation_resources(
     api: Any = object.__new__(API)
     api.state = SimpleNamespace(
         topology=Topology(), instances={}, node_network={}, downloads={},
-        model_engine_orders={},
+        model_engine_orders={}, engine_package_needs={},
     )
 
     def empty_downloads(_downloads: object) -> dict[str, object]:
@@ -709,7 +723,9 @@ async def test_mount_preflight_uses_vram_for_gpu_music(
     )
     api: Any = object.__new__(API)
     api.node_id = NodeId("api-node")
-    api.state = SimpleNamespace(topology=topology, instances={})
+    api.state = SimpleNamespace(
+        topology=topology, instances={}, engine_package_needs={}
+    )
     api._telemetry_view = SimpleNamespace(
         node_resources={node: resources},
         node_memory={node: memory},
