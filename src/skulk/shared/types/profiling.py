@@ -26,6 +26,10 @@ from skulk.shared.models.llama_server_settings import (
     LlamaServerSettings,
     resolve_llama_server_settings,
 )
+from skulk.shared.types.engine_packages import (
+    MAX_NODE_ENGINE_PACKAGES,
+    NodeEnginePackage,
+)
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.native_music import NativeMusicLibraryProbe
 from skulk.shared.types.node_facts import CapabilityConflict
@@ -340,6 +344,11 @@ def _native_music_probes_are_empty(value: object) -> bool:
     return isinstance(value, dict) and not value
 
 
+def _no_engine_packages(value: object) -> bool:
+    """Keep a node with no engine package on the telemetry wire it had before."""
+    return isinstance(value, tuple) and not value
+
+
 class NodeResources(CamelCaseModel):
     """Inference capability, policy, and transport facts a node advertises.
 
@@ -413,6 +422,17 @@ class NodeResources(CamelCaseModel):
     or conflicted (silent CPU serving, degraded GPU detection, an unusable
     engine binary override), with its remediation. Cluster health maps these
     one-to-one onto ``nodeHealth`` reasons so the dashboard shows them."""
+    engine_packages: tuple[NodeEnginePackage, ...] = Field(
+        default=(),
+        max_length=MAX_NODE_ENGINE_PACKAGES,
+        exclude_if=_no_engine_packages,
+        description=(
+            "One entry per engine package lane this node holds or may "
+            "install, for the cluster's engines report (GET /v1/engines). "
+            "Placement does not read it: it admits and stamps from backends, "
+            "engine_builds and installable_engine_builds."
+        ),
+    )
 
     @field_validator("native_music_probes", mode="before")
     @classmethod
@@ -598,6 +618,7 @@ class NodeResources(CamelCaseModel):
             data_transport=data_transport,
             zenoh_connected_peers=zenoh_connected_peers,
             capability_conflicts=derivation.conflicts,
+            engine_packages=facts.engine_packages,
         )
 
 

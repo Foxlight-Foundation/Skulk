@@ -176,6 +176,7 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 - `GET /instance/{instance_id}`
 - `DELETE /instance/{instance_id}`
 - `GET /state`
+- `GET /v1/engines`
 - `GET /events`
 - `POST /download/start`
 - `DELETE /download/{node_id}/{model_id}`
@@ -2799,6 +2800,52 @@ curl -X DELETE --get http://localhost:52415/models/engine-order \
 Clears the model's order, so its card's default decides again. Clearing a
 model that has no order succeeds. The response is the model's entry with a
 null `engineOrder`. An unconfirmed change returns 503, as for the PUT.
+
+### Engine packages across the cluster
+
+**GET** `/v1/engines`
+
+Lists every engine package a node holds or may install, grouped by engine ID.
+An engine package adds an engine that is not built into Skulk; built-in
+engines are not listed here and appear in each node's resources in `/state`.
+
+The route is read-only. It is assembled from what each node last advertised
+about itself, so it reads no disk, starts nothing and installs nothing. A node
+that stops reporting drops out of the list.
+
+```bash
+curl http://localhost:52415/v1/engines
+```
+
+| Field | Meaning |
+|---|---|
+| `packagesEnabled` | Whether engine packages are turned on for the node that answered. A node on which they are turned off reports none. |
+| `engines[].engineId` | The `publisher.engine` identity, such as `foxlight.tensorfold`. |
+| `engines[].name` | The engine's name in backend tags and engine orders, such as `tensorfold`. |
+| `engines[].nodes[]` | One entry per node and lane, sorted by node then lane. Each has `nodeId` and `package`. |
+
+Each `package` describes one lane (one engine on one accelerator class) on one
+node:
+
+| Field | Meaning |
+|---|---|
+| `lane` | `metal`, `cuda`, `rocm`, `vulkan` or `cpu`. |
+| `backendTag` | The backend tag placements are stamped with, such as `tensorfold-rocm`. |
+| `status` | `active`: the node holds a usable build and new launches use it. `unusable`: the node holds a build it cannot offer; `problem` says why. `offered`: the node holds none and may install this build the first time a model placed there needs it. |
+| `build` | Manifest digest of the active or offered build. This is the build identity stamped on a placement. Null when the node cannot tell which build is active. |
+| `engineVersion`, `generation` | Version of the engine inside the build, and the package generation. |
+| `publisher` | Trust ID of the publisher that signed the active build. Null for an offered or unusable build. |
+| `channel` | `stable` or `candidate` for an offered build. Null for a held build. |
+| `installedBuilds` | Manifest digests of every build of the lane on the node's disk, at most 16. |
+| `rollbackBuild` | The build a rollback would return to, or null when none is kept. |
+| `problem` | For an unusable build, a short refusal code such as `installation_damaged` or `skulk_version_unsupported`. |
+| `downloadBytes` | For an offered build, the bytes an install downloads. |
+| `overheadBytes` | Memory the build declares beyond a model's weight bytes, which admission counts for a launch. |
+
+An `active` status says the node holds an intact build that this Skulk version
+can run. It does not promise that a given model loads on it; only a launch
+answers that. With no engine package anywhere in the cluster, `engines` is
+empty.
 
 ### Read model capacity requirements
 

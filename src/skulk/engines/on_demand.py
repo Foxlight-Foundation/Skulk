@@ -67,6 +67,7 @@ from skulk.provisioning.engine_packages import (
 from skulk.provisioning.engine_trust import engine_trust_client, load_engine_trust
 from skulk.provisioning.llama_server import AUTOPROVISION_OPT_OUT_ENV
 from skulk.shared.backends import engine_packages_disabled
+from skulk.shared.types.engine_packages import NodeEnginePackage
 from skulk.shared.types.node_facts import NodeFacts
 from skulk.shared.version import get_skulk_version
 from skulk.store.config import (
@@ -263,6 +264,27 @@ def engine_package_offers(
         if tag not in facts.engine_package_builds
         and not (packaged and entry.adapter_python_requires is not None)
     }
+
+
+def offered_engine_package_reports(
+    offers: Mapping[str, EngineIndexEntry],
+) -> tuple[NodeEnginePackage, ...]:
+    """Each offered build as the cluster's engines report shows it, by tag."""
+    return tuple(
+        NodeEnginePackage(
+            engine_id=entry.engine_id,
+            lane=entry.lane,
+            backend_tag=tag,
+            status="offered",
+            build=entry.manifest_digest,
+            engine_version=entry.engine_version,
+            generation=entry.generation,
+            channel=entry.channel,
+            download_bytes=entry.download_bytes,
+            overhead_bytes=entry.conservative_overhead_bytes,
+        )
+        for tag, entry in sorted(offers.items())
+    )
 
 
 def installable_engine_package_builds(

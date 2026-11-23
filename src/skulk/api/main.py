@@ -110,6 +110,7 @@ from skulk.api.diagnostics_compatibility import (
     compare_diagnostics_builds,
     parse_peer_node_diagnostics,
 )
+from skulk.api.engines import EnginesResponse, engines_view
 from skulk.api.field_telemetry import (
     FieldTelemetryCollector,
     hardware_class,
@@ -435,6 +436,7 @@ from skulk.shared.backends import (
     audio_cpp_cuda_hardware_matches,
     engine_install_notice,
     engine_of,
+    engine_packages_disabled,
     expand_engine_backends,
     package_engine_of,
 )
@@ -2899,6 +2901,23 @@ class API:
                 "in time."
             ),
         )(self.clear_model_engine_order)
+        self.app.get(
+            "/v1/engines",
+            tags=["Engines"],
+            summary="List engine packages across the cluster",
+            description=(
+                "Return every engine package a node holds or may install, "
+                "grouped by engine ID, from what each node last advertised. "
+                "For each node and lane: whether the build is active, held but "
+                "unusable (with a short reason), or offered for install on "
+                "first use; the build's manifest digest, engine version, "
+                "package generation and publisher; the builds on the node's "
+                "disk and the one a rollback would return to. Read-only: it "
+                "starts nothing, installs nothing and changes no state. Built-in "
+                "engines are not listed here; they appear in each node's "
+                "resources in /state."
+            ),
+        )(self.list_engines)
         self.app.get(
             "/models/requirements",
             tags=["Models"],
@@ -16862,6 +16881,18 @@ class API:
             card_engine_order=(
                 list(card.placement.backend_preference) if card is not None else []
             ),
+        )
+
+    async def list_engines(self) -> EnginesResponse:
+        """Return every engine package the cluster's nodes hold or may install.
+
+        Returns:
+            One entry per engine ID, assembled from the node resources each
+            node last advertised. Nothing is read from disk or started.
+        """
+        return engines_view(
+            self._telemetry_view.node_resources,
+            packages_enabled=not engine_packages_disabled(),
         )
 
     async def list_model_engine_orders(self) -> ModelEngineOrdersResponse:

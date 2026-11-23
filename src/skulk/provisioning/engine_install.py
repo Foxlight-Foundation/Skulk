@@ -698,6 +698,21 @@ def _write_pointer(lane_directory: Path, pointer: _Pointer) -> None:
     _write_atomic(lane_directory / _POINTER_NAME, pointer.model_dump_json().encode())
 
 
+def rollback_engine_generation(
+    engine_id: str, lane: EngineLane, *, root: Path = ENGINE_PACKAGES_DIR
+) -> str | None:
+    """The digest a rollback would return to, or ``None`` when none is kept.
+
+    Read-only, for reports. An unreadable record reads as ``None`` here; the
+    lane's active generation reports that damage itself.
+    """
+    try:
+        pointer = _read_pointer(_lane_directory(root, engine_id, lane))
+    except EnginePackageRefusedError:
+        return None
+    return None if pointer is None else pointer.previous
+
+
 def active_engine(
     engine_id: str, lane: EngineLane, *, root: Path = ENGINE_PACKAGES_DIR
 ) -> InstalledEngine | None:

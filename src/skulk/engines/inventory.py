@@ -27,6 +27,8 @@ from skulk.provisioning.engine_install import (
     ENGINE_PACKAGES_DIR,
     InstalledEngine,
     active_engine,
+    installed_engine_generations,
+    rollback_engine_generation,
     verify_installed_engine,
 )
 from skulk.provisioning.engine_packages import (
@@ -39,6 +41,11 @@ from skulk.provisioning.engine_packages import (
     skulk_version_supported,
 )
 from skulk.shared.backends import engine_packages_disabled, package_engine_of
+from skulk.shared.types.engine_packages import (
+    MAX_NODE_ENGINE_PACKAGES,
+    MAX_REPORTED_ENGINE_BUILDS,
+    NodeEnginePackage,
+)
 from skulk.shared.version import get_skulk_version
 
 UnusableReason = EnginePackageRefusal | Literal["backend_tag_ambiguous"]
@@ -236,11 +243,66 @@ class EnginePackageReport:
             weight bytes, from its signed manifest.
         problems: One short line per lane whose active generation cannot be
             offered (engine ID, lane and the refusal code; no path).
+        packages: One entry per lane that has an active generation, usable
+            or not, for the cluster's engines report.
     """
 
     builds: dict[str, str]
     overhead_bytes: dict[str, int]
     problems: tuple[str, ...]
+    packages: tuple[NodeEnginePackage, ...] = ()
+
+
+def _lane_builds(
+    engine_id: str, lane: EngineLane, root: Path
+) -> tuple[tuple[str, ...], str | None]:
+    """The builds of one lane on disk and the one a rollback returns to."""
+    try:
+        builds = installed_engine_generations(engine_id, lane, root=root)
+        rollback = rollback_engine_generation(engine_id, lane, root=root)
+    except OSError:
+        return (), None
+    return builds[:MAX_REPORTED_ENGINE_BUILDS], rollback
+
+
+def _held_packages(
+    inventory: EnginePackageInventory, root: Path
+) -> tuple[NodeEnginePackage, ...]:
+    """Every lane with an active generation, as the engines report shows it."""
+    held: list[NodeEnginePackage] = []
+    for tag, installed in inventory.active.items():
+        claims = installed.claims
+        builds, rollback = _lane_builds(claims.engine_id, claims.lane, root)
+        held.append(
+            NodeEnginePackage(
+                engine_id=claims.engine_id,
+                lane=claims.lane,
+                backend_tag=tag,
+                status="active",
+                build=installed.digest,
+                engine_version=claims.engine_version,
+                generation=claims.generation,
+                publisher=claims.publisher,
+                installed_builds=builds,
+                rollback_build=rollback,
+                overhead_bytes=claims.conservative_overhead_bytes,
+            )
+        )
+    for entry in inventory.unusable:
+        builds, rollback = _lane_builds(entry.engine_id, entry.lane, root)
+        held.append(
+            NodeEnginePackage(
+                engine_id=entry.engine_id,
+                lane=entry.lane,
+                backend_tag=f"{entry.engine_id.split('.', 1)[1]}-{entry.lane}",
+                status="unusable",
+                installed_builds=builds,
+                rollback_build=rollback,
+                problem=entry.reason,
+            )
+        )
+    held.sort(key=lambda package: (package.engine_id, package.lane))
+    return tuple(held[:MAX_NODE_ENGINE_PACKAGES])
 
 
 def node_engine_package_report(
@@ -270,6 +332,7 @@ def node_engine_package_report(
         dict(sorted(inventory.builds.items())),
         dict(sorted(inventory.overhead_bytes.items())),
         problems,
+        _held_packages(inventory, root),
     )
 
 

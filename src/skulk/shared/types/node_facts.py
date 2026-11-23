@@ -28,6 +28,10 @@ from typing import Final, Literal, final
 
 from pydantic import ConfigDict, Field
 
+from skulk.shared.types.engine_packages import (
+    MAX_NODE_ENGINE_PACKAGES,
+    NodeEnginePackage,
+)
 from skulk.utils.pydantic_ext import CamelCaseModel
 
 GpuVendor = Literal["nvidia", "amd", "apple", "intel"]
@@ -342,6 +346,12 @@ class NodeFacts(CamelCaseModel):
     engine_package_problems: tuple[str, ...] = Field(
         default=(),
         description="One short line per installed engine package lane whose active generation cannot be offered: engine ID, lane and the refusal code.",
+    )
+
+    engine_packages: tuple[NodeEnginePackage, ...] = Field(
+        default=(),
+        max_length=MAX_NODE_ENGINE_PACKAGES,
+        description="One entry per engine package lane this node holds or may install, for the cluster's engines report. Empty when there is none or engine packages are turned off.",
     )
 
     audio_cpp_binary: EngineBinaryFact = Field(

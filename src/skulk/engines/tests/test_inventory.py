@@ -239,6 +239,37 @@ def test_the_node_report_names_builds_and_problems_without_paths(
     assert node_engine_package_report(root=packages) == nothing
 
 
+def test_the_node_report_lists_each_held_lane_for_the_engines_report(
+    tmp_path: Path,
+) -> None:
+    """Active and unusable lanes are both listed, with their builds and no path."""
+    packages = tmp_path / "packages"
+    first = install_test_package(tmp_path, packages, generation=1)
+    second = install_test_package(tmp_path, packages, generation=2)
+    damaged = install_test_package(tmp_path, packages, lane="cuda")
+    damaged.adapter.unlink()
+
+    cuda, rocm = node_engine_package_report(root=packages).packages
+
+    assert rocm.status == "active"
+    assert rocm.engine_id == "foxlight.tensorfold"
+    assert rocm.backend_tag == "tensorfold-rocm"
+    assert rocm.build == second.digest
+    assert rocm.generation == 2
+    assert rocm.engine_version == second.claims.engine_version
+    assert rocm.publisher == second.claims.publisher
+    assert set(rocm.installed_builds) == {first.digest, second.digest}
+    assert rocm.rollback_build == first.digest
+    assert rocm.overhead_bytes == second.claims.conservative_overhead_bytes
+    assert rocm.problem is None
+    assert cuda.status == "unusable"
+    assert cuda.backend_tag == "tensorfold-cuda"
+    assert cuda.problem == "installation_damaged"
+    assert cuda.build is None
+    assert cuda.installed_builds == (damaged.digest,)
+    assert str(tmp_path) not in rocm.model_dump_json() + cuda.model_dump_json()
+
+
 def test_an_unreadable_packages_folder_offers_nothing_and_does_not_raise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

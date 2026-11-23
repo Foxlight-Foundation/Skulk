@@ -20,6 +20,7 @@ from skulk.engines.on_demand import (
     engine_package_offers,
     followed_channels,
     install_engine_package_on_demand,
+    offered_engine_package_reports,
     on_demand_gates_pass,
     published_engine_package,
     refresh_engine_package_list,
@@ -272,6 +273,36 @@ def test_a_fitting_published_package_is_offered_from_the_kept_list(
     assert store.offers(strix) == {TAG: store.digest}
     # Reading the offers uses the kept list only.
     assert store.seen == []
+
+
+def test_an_offered_build_is_reported_with_what_installing_it_means(
+    store: _Store, strix: NodeFacts
+) -> None:
+    """The engines report says which build, from which channel, and how big."""
+    store.refresh()
+    offers = engine_package_offers(
+        strix,
+        offline=False,
+        environ={},
+        channels=frozenset({"stable"}),
+        trust_client=store.trust,
+        index_client=store.index,
+        platform_name=PLATFORM,
+    )
+
+    (report,) = offered_engine_package_reports(offers)
+
+    entry = offers[TAG]
+    assert report.status == "offered"
+    assert report.backend_tag == TAG
+    assert report.engine_id == entry.engine_id
+    assert report.lane == entry.lane
+    assert report.build == store.digest
+    assert report.generation == 1
+    assert report.channel == "stable"
+    assert report.download_bytes == entry.download_bytes
+    assert report.overhead_bytes == entry.conservative_overhead_bytes
+    assert report.installed_builds == () and report.publisher is None
 
 
 def test_a_node_the_package_does_not_fit_is_offered_nothing(store: _Store) -> None:
