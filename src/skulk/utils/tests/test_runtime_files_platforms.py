@@ -13,8 +13,11 @@ import skulk.extensions
 from skulk.utils.runtime_files import (
     RuntimeLock,
     acquire_runtime_lock,
+    create_file,
+    examine,
     is_private_directory,
     open_private,
+    open_unfollowed,
     private_directory,
     read_private,
     remove_private,
@@ -51,7 +54,6 @@ _DIRECT_FILE_CUSTODY = frozenset(
 _NOT_YET_PORTED = frozenset(
     {
         "local_setup.py",
-        "runtime_integrity.py",
         "service_bootstrap.py",
         "service_registration.py",
         "service_setup.py",
@@ -367,6 +369,151 @@ def test_a_directory_syncs_and_a_missing_one_does_not(root: Path) -> None:
     sync_directory(root)
     with pytest.raises(OSError):
         sync_directory(root / "absent")
+
+
+def _grant_everyone(path: Path, access: str) -> None:
+    """Add an entry for every account to a Windows access list."""
+    subprocess.run(
+        ["icacls", str(path), "/grant", f"*S-1-1-0:({access})"],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_examining_tells_a_file_from_a_directory(root: Path) -> None:
+    write_private(root / "state.json", b"four")
+    file = examine(root / "state.json")
+    assert (file.kind, file.owned, file.exclusive) == ("file", True, True)
+    assert file.info.st_size == 4
+    directory = examine(root)
+    assert (directory.kind, directory.owned, directory.exclusive) == (
+        "directory",
+        True,
+        True,
+    )
+    with pytest.raises(FileNotFoundError):
+        examine(root / "absent")
+
+
+def test_examining_a_link_reports_the_link_not_its_target(
+    tmp_path: Path, root: Path
+) -> None:
+    write_private(root / "state.json", b"{}")
+    link = tmp_path / "link.json"
+    _link_or_skip(link, root / "state.json", directory=False)
+    assert examine(link).kind == "link"
+    dangling = tmp_path / "dangling"
+    _link_or_skip(dangling, root / "absent", directory=False)
+    assert examine(dangling).kind == "link"
+
+
+@windows_only
+def test_a_junction_is_a_link_though_windows_calls_it_a_folder(
+    tmp_path: Path, root: Path
+) -> None:
+    """Making one needs no privilege, so it is the link an ordinary account can plant."""
+    assert sys.platform == "win32"
+    import _winapi
+
+    junction = tmp_path / "junction"
+    _winapi.CreateJunction(str(root), str(junction))
+    assert examine(junction).kind == "link"
+    assert not junction.is_symlink()
+
+
+def test_an_open_file_is_examined_as_the_same_file(root: Path) -> None:
+    write_private(root / "state.json", b"{}")
+    by_path = examine(root / "state.json")
+    descriptor = open_unfollowed(root / "state.json")
+    try:
+        opened = examine(descriptor)
+    finally:
+        os.close(descriptor)
+    assert (opened.kind, opened.owned, opened.exclusive) == ("file", True, True)
+    assert (opened.info.st_ino, opened.info.st_dev) == (
+        by_path.info.st_ino,
+        by_path.info.st_dev,
+    )
+
+
+def test_a_file_made_by_other_means_in_a_private_directory_is_exclusive(
+    root: Path,
+) -> None:
+    """What an installer's child programs create there is still this account's alone."""
+    path = root / "installed.py"
+    path.write_bytes(b"VALUE = 7\n")
+    (root / "package").mkdir()
+    assert examine(path).exclusive
+    assert examine(root / "package").exclusive
+
+
+@posix_only
+def test_group_or_other_write_is_not_exclusive(root: Path) -> None:
+    path = root / "installed.py"
+    path.write_bytes(b"VALUE = 7\n")
+    for mode, exclusive in ((0o644, True), (0o664, False), (0o646, False)):
+        path.chmod(mode)
+        assert examine(path).exclusive is exclusive
+
+
+@windows_only
+@pytest.mark.parametrize("access", ["W", "R"])
+def test_a_grant_to_another_account_is_not_exclusive(root: Path, access: str) -> None:
+    """Any grant counts, read included: the rule is that nobody else is named."""
+    path = root / "installed.py"
+    path.write_bytes(b"VALUE = 7\n")
+    (root / "package").mkdir()
+    _grant_everyone(path, access)
+    _grant_everyone(root / "package", access)
+    assert not examine(path).exclusive
+    assert not examine(root / "package").exclusive
+    assert examine(path).owned
+
+
+def test_opening_unfollowed_reads_a_file_and_refuses_a_link(
+    tmp_path: Path, root: Path
+) -> None:
+    write_private(root / "state.json", b"kept")
+    with os.fdopen(open_unfollowed(root / "state.json"), "rb") as source:
+        assert source.read() == b"kept"
+    with pytest.raises(FileNotFoundError):
+        open_unfollowed(root / "absent.json")
+    link = tmp_path / "link.json"
+    _link_or_skip(link, root / "state.json", directory=False)
+    with pytest.raises(OSError):
+        open_unfollowed(link)
+
+
+def test_a_created_file_is_new_and_refuses_what_is_already_there(root: Path) -> None:
+    path = root / "pyvenv.cfg"
+    with os.fdopen(create_file(path, 0o644), "wb") as target:
+        target.write(b"home = somewhere\n")
+    assert path.read_bytes() == b"home = somewhere\n"
+    assert examine(path).exclusive
+    with pytest.raises(FileExistsError):
+        create_file(path, 0o644)
+
+
+@posix_only
+def test_a_created_file_has_exactly_the_mode_asked_for(root: Path) -> None:
+    """Whatever the umask: a sealed mode is recorded, so it must be reproduced."""
+    previous = os.umask(0o077)
+    try:
+        os.close(create_file(root / "wide", 0o644))
+        os.umask(0o000)
+        os.close(create_file(root / "narrow", 0o600))
+    finally:
+        os.umask(previous)
+    assert (root / "wide").stat().st_mode & 0o777 == 0o644
+    assert (root / "narrow").stat().st_mode & 0o777 == 0o600
+
+
+def test_creating_refuses_a_link_in_its_place(tmp_path: Path, root: Path) -> None:
+    link = root / "pyvenv.cfg"
+    _link_or_skip(link, tmp_path / "elsewhere", directory=False)
+    with pytest.raises(OSError):
+        create_file(link, 0o644)
+    assert not (tmp_path / "elsewhere").exists()
 
 
 def test_only_the_seam_asks_who_owns_a_file_or_opens_one_link_safely() -> None:

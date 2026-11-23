@@ -8,7 +8,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import IO, cast
 
 import psutil
 import pytest
@@ -377,7 +376,7 @@ def test_a_tree_never_writes_once_another_process_holds_the_lock(root: Path) -> 
     child = grandchild = 0
     try:
         assert owner.stdout is not None and owner.stdin is not None
-        reported = cast(IO[bytes], owner.stdout).readline()
+        reported = owner.stdout.readline()
         child, grandchild = (int(value) for value in reported.split())
         _wait_until_both_write(root)
         with pytest.raises(BlockingIOError):
