@@ -2439,8 +2439,8 @@ class PlaceInstanceParams(BaseModel):
             "preferred first, such as `llama_server-vulkan`. They are consulted "
             "ahead of the model's person-set engine order and the card's "
             "default, and set no standing order. A launch that cannot run on "
-            "any listed engine is refused with 409 rather than started on "
-            "another one."
+            "any listed engine starts on the next engine in line, and the "
+            "response's `engine_pick` says so."
         ),
     )
 
@@ -2507,6 +2507,28 @@ class PlacementEngineInstall(BaseModel):
         ge=0, description="Approximate download the install adds on each node."
     )
     detail: str = Field(description="Operator-readable notice about the install.")
+
+
+class PlacementEnginePick(BaseModel):
+    """How a launch that named its engines was planned."""
+
+    asked: list[str] = Field(
+        description="The engines the launch asked for, most preferred first."
+    )
+    engines: list[str] = Field(
+        description=(
+            "Backend tags the launch is planned on, from this node's dry run. "
+            "Empty when the plan does not name its engine yet."
+        )
+    )
+    used: bool | None = Field(
+        description=(
+            "True when every part of the launch is planned on an engine that "
+            "was asked for. False when none of those engines can run the model "
+            "here right now and the launch starts on the next engine in line "
+            "instead. Null when the plan does not name its engine yet."
+        )
+    )
 
 
 class PlacementPreview(BaseModel):
@@ -2653,6 +2675,15 @@ class CreateInstanceResponse(BaseModel):
             "(the video engine) on a node, so loading takes longer than usual. "
             "The same notice a placement preview carries; computed from this "
             "node's dry run of the placement."
+        ),
+    )
+    engine_pick: PlacementEnginePick | None = Field(
+        default=None,
+        description=(
+            "Set when the launch named its engines (`engine_order`): the "
+            "engines it is planned on and whether one of those asked for is "
+            "used. The instance's shards in `/state` carry the engine it "
+            "actually started on."
         ),
     )
 

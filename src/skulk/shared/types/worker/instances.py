@@ -217,7 +217,7 @@ class BaseInstance(TaggedModel):
             "An engine order given for this launch only: backend tags, most "
             "preferred first. Placement consulted it ahead of the person's "
             "order for the model and the card's default. Repair re-placements "
-            "carry it so a trial launch stays on the engine it was started on. "
+            "carry it so a repair ranks engines the way the launch did. "
             "Empty for an ordinary launch and for instances from older logs."
         ),
     )

@@ -284,6 +284,7 @@ from skulk.api.types import (
     OpenUrlToolResponse,
     PlaceInstanceParams,
     PlacementEngineInstall,
+    PlacementEnginePick,
     PlacementPreview,
     PlacementPreviewResponse,
     PurgeStagingRequest,
@@ -4476,44 +4477,46 @@ class API:
                 ) from exc
 
         instance_id = InstanceId(str(command.command_id))
-        if payload.engine_order is not None:
-            # A launch that names its engines is a trial of them. Starting it
-            # on some other engine would answer a question nobody asked.
-            trial = planned.get(instance_id)
-            chosen = sorted(
-                {
-                    shard.resolved_backend
-                    for shard in (
-                        trial.shard_assignments.runner_to_shard.values()
-                        if trial is not None
-                        else ()
-                    )
-                    if shard.resolved_backend is not None
-                    and engine_order_level(
-                        shard.resolved_backend,
-                        card_order=(),
-                        launch_order=payload.engine_order,
-                    )
-                    != "launch"
-                }
-            )
-            if chosen:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "None of the engines asked for can run this model "
-                        f"here right now; it would start on {', '.join(chosen)} "
-                        "instead. Nothing was launched."
-                    ),
-                    headers={"X-Skulk-Placement-Failure": "no_valid_placement"},
-                )
-
         await self._send(command)
 
         # The master places the command itself; this node's dry run is the same
         # algorithm over the same replicated state, so it is what a quick launch
         # without a preview can show about an engine install.
         planned_instance = planned.get(instance_id)
+        engine_pick: PlacementEnginePick | None = None
+        if payload.engine_order is not None:
+            # An order only ranks, so a launch whose engines cannot run the
+            # model here starts on the next engine in line. Say so in the
+            # answer: a person trying an engine must not take another
+            # engine's numbers for it.
+            planned_backends = sorted(
+                {
+                    shard.resolved_backend
+                    for shard in (
+                        planned_instance.shard_assignments.runner_to_shard.values()
+                        if planned_instance is not None
+                        else ()
+                    )
+                    if shard.resolved_backend is not None
+                }
+            )
+            engine_pick = PlacementEnginePick(
+                asked=list(payload.engine_order),
+                engines=planned_backends,
+                used=(
+                    all(
+                        engine_order_level(
+                            backend,
+                            card_order=(),
+                            launch_order=payload.engine_order,
+                        )
+                        == "launch"
+                        for backend in planned_backends
+                    )
+                    if planned_backends
+                    else None
+                ),
+            )
         return CreateInstanceResponse(
             message="Command received.",
             command_id=command.command_id,
@@ -4524,6 +4527,7 @@ class API:
                 if planned_instance is None
                 else self._engine_install_for_instance(planned_instance)
             ),
+            engine_pick=engine_pick,
         )
 
     async def create_instance(

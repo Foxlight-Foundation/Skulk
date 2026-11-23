@@ -85,6 +85,7 @@ from .api import OpenUrlToolRequest as OpenUrlToolRequest
 from .api import OpenUrlToolResponse as OpenUrlToolResponse
 from .api import PlaceInstanceParams as PlaceInstanceParams
 from .api import PlacementEngineInstall as PlacementEngineInstall
+from .api import PlacementEnginePick as PlacementEnginePick
 from .api import PlacementPreview as PlacementPreview
 from .api import PlacementPreviewResponse as PlacementPreviewResponse
 from .api import PowerUsage as PowerUsage

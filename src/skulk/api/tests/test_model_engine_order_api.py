@@ -217,7 +217,7 @@ def test_an_order_left_by_a_removed_model_can_still_be_cleared(api: API) -> None
     assert api.state.model_engine_orders == {}
 
 
-def _planned_on(backend: str):
+def _planned_on(backend: str | None):
     """Stand in for the dry run: the launch would start on ``backend``."""
 
     def dry_run(command: PlaceInstance, **_: object) -> Mapping[InstanceId, Instance]:
@@ -277,13 +277,19 @@ def test_a_launch_may_name_its_engines_for_that_launch_only(
     command = cast(object, send.await_args_list[0].args[0])
     assert isinstance(command, PlaceInstance)
     assert command.engine_order == asked
+    assert response.json()["engine_pick"] == {
+        "asked": asked,
+        "engines": [planned],
+        "used": True,
+    }
     # Trying an engine sets no standing order.
     assert api.state.model_engine_orders == {}
 
 
-def test_a_trial_that_would_start_on_another_engine_launches_nothing(
+def test_a_trial_whose_engines_cannot_run_starts_on_the_next_and_says_so(
     api: API, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An order only ranks; the answer names the engine used instead."""
     monkeypatch.setattr(
         api_main, "get_instance_placements", _planned_on("llama_cpp-vulkan")
     )
@@ -293,9 +299,33 @@ def test_a_trial_that_would_start_on_another_engine_launches_nothing(
             json={"model_id": str(MODEL), "engine_order": ["tensorfold-rocm"]},
         )
 
-    assert response.status_code == 409
-    assert "llama_cpp-vulkan" in response.text
-    send.assert_not_awaited()
+    assert response.status_code == 200, response.text
+    assert response.json()["engine_pick"] == {
+        "asked": ["tensorfold-rocm"],
+        "engines": ["llama_cpp-vulkan"],
+        "used": False,
+    }
+    command = cast(object, send.await_args_list[0].args[0])
+    assert isinstance(command, PlaceInstance)
+    assert command.engine_order == ["tensorfold-rocm"]
+
+
+def test_a_trial_planned_without_a_named_engine_does_not_claim_either_way(
+    api: API, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api_main, "get_instance_placements", _planned_on(None))
+    with patch.object(api, "_send", new=AsyncMock()):
+        response = TestClient(api.app).post(
+            "/place_instance",
+            json={"model_id": str(MODEL), "engine_order": ["tensorfold-rocm"]},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["engine_pick"] == {
+        "asked": ["tensorfold-rocm"],
+        "engines": [],
+        "used": None,
+    }
 
 
 def test_a_launch_that_names_no_engines_is_sent_as_before(
@@ -310,6 +340,7 @@ def test_a_launch_that_names_no_engines_is_sent_as_before(
         )
 
     assert response.status_code == 200, response.text
+    assert response.json()["engine_pick"] is None
     command = cast(object, send.await_args_list[0].args[0])
     assert isinstance(command, PlaceInstance)
     assert command.engine_order is None
