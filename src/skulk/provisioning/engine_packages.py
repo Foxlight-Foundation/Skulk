@@ -540,15 +540,106 @@ def adapter_python_supported(claims: EnginePackageClaims, python_version: str) -
     return required is None or _version_in(required, python_version)
 
 
-def check_engine_host(package: VerifiedEnginePackage, host: EngineHost) -> int:
-    """Decide whether a verified package can be installed on this host.
+@final
+@dataclass(frozen=True)
+class EngineHostRequirements:
+    """What an engine build needs from a host, wherever it was stated.
+
+    A signed manifest states these, and so does each entry of the signed
+    package index. Both are judged by ``engine_host_refusal``, so a package a
+    node is offered and a package a node will install are decided by one rule.
+
+    Attributes:
+        platform: Artifact family the build was made for.
+        lane: Accelerator class the build executes on.
+        compute_targets: Exact device targets it was compiled for; empty
+            means any device of the lane.
+        skulk_versions: Skulk versions it runs on.
+        control_protocol: Control-protocol versions its adapter speaks.
+        python_requires: Interpreter range of a Python adapter, else ``None``.
+    """
+
+    platform: str
+    lane: EngineLane
+    compute_targets: tuple[str, ...]
+    skulk_versions: str
+    control_protocol: EngineProtocolRange
+    python_requires: str | None
+
+
+def engine_host_refusal(
+    needs: EngineHostRequirements, host: EngineHost
+) -> EnginePackageRefusedError | None:
+    """Name the first requirement of a build this host does not meet.
 
     These are technical requirements of the build: its platform, the
     accelerator class it executes on, the device targets it was compiled for,
-    and the Skulk and protocol versions it was written against. Nothing here
-    is a list of tested hardware. A host whose exact device target could not
-    be detected is admitted, because the engine's own start-up is the final
-    check and failed detection is not evidence of a mismatch.
+    and the Skulk, protocol and interpreter versions it was written against.
+    Nothing here is a list of tested hardware. A host whose exact device
+    target could not be detected is admitted, because the engine's own
+    start-up is the final check and failed detection is not evidence of a
+    mismatch.
+
+    Args:
+        needs: The build's stated requirements.
+        host: The node's own facts.
+
+    Returns:
+        The refusal for the first unmet requirement, or ``None`` when the
+        host meets them all.
+    """
+    if not platform_matches(needs.platform, host.platform):
+        return _refuse(
+            "platform_mismatch",
+            f"the package is built for {needs.platform}; this host is "
+            f"{host.platform}",
+        )
+    if needs.lane not in host.lanes:
+        return _refuse(
+            "lane_unavailable",
+            f"the package executes on {needs.lane}, which this host does not offer",
+        )
+    if (
+        needs.compute_targets
+        and host.compute_targets
+        and not host.compute_targets.intersection(needs.compute_targets)
+    ):
+        return _refuse(
+            "compute_target_mismatch",
+            f"the package is compiled for {', '.join(needs.compute_targets)}; "
+            f"this host has {', '.join(sorted(host.compute_targets))}",
+        )
+    if not _version_in(needs.skulk_versions, host.skulk_version):
+        return _refuse(
+            "skulk_version_unsupported",
+            f"the package runs on Skulk {needs.skulk_versions}; this is "
+            f"{host.skulk_version}",
+        )
+    lowest = max(needs.control_protocol.minimum, host.control_protocols[0])
+    highest = min(needs.control_protocol.maximum, host.control_protocols[1])
+    if lowest > highest:
+        return _refuse(
+            "protocol_unsupported",
+            f"the adapter speaks control protocol "
+            f"{needs.control_protocol.minimum} to {needs.control_protocol.maximum}; "
+            f"this Skulk speaks {host.control_protocols[0]} to "
+            f"{host.control_protocols[1]}",
+        )
+    if needs.python_requires is not None and not _version_in(
+        needs.python_requires, host.python_version
+    ):
+        return _refuse(
+            "adapter_python_unsupported",
+            f"the adapter needs Python {needs.python_requires}; this node "
+            f"runs {host.python_version}",
+        )
+    return None
+
+
+def check_engine_host(package: VerifiedEnginePackage, host: EngineHost) -> int:
+    """Decide whether a verified package can be installed on this host.
+
+    The requirements and their order are those of ``engine_host_refusal``.
 
     Args:
         package: A manifest that already passed ``verify_engine_manifest``.
@@ -562,44 +653,20 @@ def check_engine_host(package: VerifiedEnginePackage, host: EngineHost) -> int:
             host does not meet.
     """
     claims = package.claims
-    if not platform_matches(claims.platform, host.platform):
-        raise _refuse(
-            "platform_mismatch",
-            f"the package is built for {claims.platform}; this host is "
-            f"{host.platform}",
-        )
-    if claims.lane not in host.lanes:
-        raise _refuse(
-            "lane_unavailable",
-            f"the package executes on {claims.lane}, which this host does not offer",
-        )
-    if (
-        claims.compute_targets
-        and host.compute_targets
-        and not host.compute_targets.intersection(claims.compute_targets)
-    ):
-        raise _refuse(
-            "compute_target_mismatch",
-            f"the package is compiled for {', '.join(claims.compute_targets)}; "
-            f"this host has {', '.join(sorted(host.compute_targets))}",
-        )
-    if not _version_in(claims.skulk_versions, host.skulk_version):
-        raise _refuse(
-            "skulk_version_unsupported",
-            f"the package runs on Skulk {claims.skulk_versions}; this is "
-            f"{host.skulk_version}",
-        )
-    protocol = select_control_protocol(claims, host)
-    adapter = claims.adapter
-    if adapter.python_requires is not None and not _version_in(
-        adapter.python_requires, host.python_version
-    ):
-        raise _refuse(
-            "adapter_python_unsupported",
-            f"the adapter needs Python {adapter.python_requires}; this node "
-            f"runs {host.python_version}",
-        )
-    return protocol
+    refusal = engine_host_refusal(
+        EngineHostRequirements(
+            platform=claims.platform,
+            lane=claims.lane,
+            compute_targets=claims.compute_targets,
+            skulk_versions=claims.skulk_versions,
+            control_protocol=claims.control_protocol,
+            python_requires=claims.adapter.python_requires,
+        ),
+        host,
+    )
+    if refusal is not None:
+        raise refusal
+    return select_control_protocol(claims, host)
 
 
 def verify_engine_file(path: Path, *, size: int, sha256: str) -> None:
