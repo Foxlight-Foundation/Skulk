@@ -26,13 +26,46 @@ import sys
 assert sys.platform == "win32"
 
 import contextlib
+import ctypes
+import ctypes.wintypes as wt
 import errno
+import msvcrt
 import os
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
 from foxlight_model_preservation import safefs
+
+_ERROR_FILE_NOT_FOUND = 2
+_ERROR_PATH_NOT_FOUND = 3
+_ERROR_SHARING_VIOLATION = 32
+_GENERIC_READ = 0x80000000
+_FILE_SHARE_ALL = 0x00000007
+_OPEN_EXISTING = 3
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.CreateFileW.argtypes = (
+    wt.LPCWSTR,
+    wt.DWORD,
+    wt.DWORD,
+    wt.LPVOID,
+    wt.DWORD,
+    wt.DWORD,
+    wt.HANDLE,
+)
+_kernel32.CreateFileW.restype = wt.HANDLE
+_kernel32.CloseHandle.argtypes = (wt.HANDLE,)
+_kernel32.CloseHandle.restype = wt.BOOL
+
+# Typed views of the foreign functions, so their results are not ``Any``.
+_create_file: Callable[[str, int, int, None, int, int, None], int | None] = (
+    _kernel32.CreateFileW
+)
+_close_handle: Callable[[int], int] = _kernel32.CloseHandle
+_INVALID_HANDLE = wt.HANDLE(-1).value
 
 
 def _owner_only(descriptor: int) -> bool:
@@ -152,11 +185,105 @@ def sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def children_fence(lock: Path) -> Path:
+    """The file a lock holder's child keeps open for as long as it runs.
+
+    A Windows file lock belongs to one process: when the holder dies its lock
+    is free at once, a moment before the operating system has ended the
+    programs the holder started. Such a program is therefore started holding
+    this file open with no sharing (:mod:`skulk.utils._owned_process_windows`),
+    and :func:`open_lock` refuses the lock while anyone holds it. That is the
+    part a POSIX child plays by inheriting the lock's own descriptor.
+    """
+    return lock.with_name(lock.name + ".children")
+
+
+def _refuse_while_a_child_remains(lock: Path) -> None:
+    """Raise ``BlockingIOError`` while a child of the lock's last holder runs."""
+    handle = _create_file(
+        str(children_fence(lock)),
+        _GENERIC_READ,
+        _FILE_SHARE_ALL,
+        None,
+        _OPEN_EXISTING,
+        # Whatever is at the path is opened as itself; a link is not followed.
+        _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle and handle != _INVALID_HANDLE:
+        # Nobody holds it: the last child, if there was one, has ended.
+        _close_handle(handle)
+        return
+    error = ctypes.get_last_error()
+    if error in (_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND):
+        # No holder of this lock has started a child yet.
+        return
+    if error == _ERROR_SHARING_VIOLATION:
+        raise BlockingIOError(
+            errno.EAGAIN, "a child of the lock's last holder is still running"
+        )
+    raise ctypes.WinError(error)
+
+
+def hold_children_fence(lock: Path) -> int:
+    """Open the lock's children fence so that nobody else can open it.
+
+    The fence is runtime state like the lock itself: it is created owner-only
+    when absent, and what is opened must be an owner-only regular file, never
+    a link and never a file made by other means. The check is made on the
+    opened file.
+
+    Args:
+        lock: The lock's own path.
+
+    Returns:
+        A descriptor on the fence, opened with no sharing; the caller closes
+        it once a child has its own copy.
+
+    Raises:
+        ValueError: What is at the fence's path is not an owner-only regular
+            file.
+        OSError: It cannot be opened; an earlier child still holding it is
+            one such case.
+    """
+    fence = children_fence(lock)
+    os.close(open_private(fence, os.O_RDWR | os.O_CREAT))
+    handle = _create_file(
+        str(fence),
+        _GENERIC_READ,
+        0,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if not handle or handle == _INVALID_HANDLE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    except BaseException:
+        _close_handle(handle)
+        raise
+    try:
+        information = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(information.st_mode)
+            or information.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            or not _owner_only(descriptor)
+        ):
+            raise ValueError("runtime lock must be owner-only")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def open_lock(root: Path, name: str) -> int:
     """Open and take the named lock in ``root``; the caller closes it to release.
 
     Raises:
-        BlockingIOError: Another holder has the lock.
+        BlockingIOError: Another holder has the lock, or a program the last
+            holder started is still running.
         ValueError: The lock file is not owner-only.
     """
     private_directory(root)
@@ -167,6 +294,7 @@ def open_lock(root: Path, name: str) -> int:
         ):
             raise ValueError("runtime lock must be owner-only")
         safefs.lock(descriptor)
+        _refuse_while_a_child_remains(root / name)
     except BaseException:
         os.close(descriptor)
         raise

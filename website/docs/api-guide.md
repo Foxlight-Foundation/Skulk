@@ -7503,7 +7503,9 @@ established by these local adapters.
 one exact signed `server_streaming`, `client_streaming` or `bidirectional`
 destination. Optional positive finite `timeout_seconds` has the same intersection
 semantics as the JSON endpoint; omission adds no generation ceiling. The actual
-installed owner and host reader must support the explicit 0.7.0rc4 stream cohort.
+installed owner and host reader must support the explicit 0.7.0rc4 or 0.7.0rc5
+cohort. The current author runtime selects 0.7.0rc5; installed releases keep their
+original signed binary closure.
 The issued 0.7.0rc3 cohort keeps its original closure and unary behavior.
 
 The handshake requires one `Authorization: Bearer <enrolled token>` header over

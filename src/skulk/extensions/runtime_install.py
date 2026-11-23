@@ -5,7 +5,6 @@ import contextlib
 import hashlib
 import json
 import os
-import signal
 import sqlite3
 import stat
 import sys
@@ -43,6 +42,7 @@ from skulk.extensions.runtime_integrity import (
     seal_runtime,
     verify_or_adopt_installed_runtime,
 )
+from skulk.utils.owned_process import start_owned
 from skulk.utils.runtime_files import (
     has_root_authority,
     open_private,
@@ -193,36 +193,28 @@ async def _execute(
     arguments: tuple[str, ...], directory: Path, lock: RuntimeLock, timeout: float
 ) -> bytes:
     async def owned() -> bytes:
-        process = await asyncio.create_subprocess_exec(
-            *arguments,
-            cwd=directory,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
-            pass_fds=(lock.descriptor,),
-            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-        )
+        child = await start_owned(arguments, cwd=directory, lock=lock)
         output = bytearray()
         try:
-            assert process.stdout is not None
             async with asyncio.timeout(timeout):
-                while block := await process.stdout.read(16384):
+                while block := await child.stdout.read(16384):
                     output.extend(block)
                     if len(output) > 262144:
                         raise ValueError("runtime installer output exceeds bound")
-                await process.wait()
-            if process.returncode != 0:
+                await child.wait()
+            if child.returncode != 0:
                 raise ValueError("runtime installer failed")
             return bytes(output)
         except (OSError, ValueError, TimeoutError):
             write_private(directory / "installer-evidence.log", bytes(output[:262144]))
             raise
         finally:
-            if process.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-            await finish_runtime_work(asyncio.create_task(process.wait()))
+            try:
+                if child.returncode is None:
+                    child.kill()
+                await finish_runtime_work(asyncio.create_task(child.wait()))
+            finally:
+                await finish_runtime_work(asyncio.create_task(child.close()))
 
     return await finish_runtime_work(asyncio.create_task(owned()))
 

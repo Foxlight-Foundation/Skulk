@@ -266,6 +266,24 @@ The signed model catalog and the capability store read TUF metadata through
 `Updater`: that one keeps its trusted root behind a symbolic link, which an
 ordinary Windows account may not create, so every refresh failed there
 (`tests/test_platform_participation.py` enforces the import).
+The runtime installer starts its child programs through
+`utils/owned_process.py` (`start_owned`, `OwnedProcess.kill`/`close`,
+`isolated_environment`): the whole tree can be stopped, and the child never
+outlives the directory lock. POSIX does that with a new session and the
+inherited lock descriptor, which covers the child and any descendant that kept
+the descriptor (a program started with Python's `subprocess` closes it by
+default); Windows with a Job Object set to end its processes when this
+process's handle closes (`utils/_owned_process_windows.py`). The child is named
+a member of the job in the `CreateProcessW` call itself, so it never exists
+outside it; Python's process classes cannot do that, which is why that module
+creates the process and supplies its output stream and exit wait. A Windows
+file lock belongs to one process and is freed a moment before the job is ended,
+so the child also holds `<lock>.children` open with no sharing and
+`RuntimeLock` refuses a new holder while it is held. Releasing a child waits,
+with no time limit, until every process of its tree has finished and let go of
+its files. `utils/tests/test_owned_process.py` lists the
+modules that still start process trees themselves (`runtime_service.py`,
+`service_snapshot.py`).
 
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`, dark = the operator design system's Den palette); components never branch on the theme name. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field (scene crown + shooting stars, mesh retired); default builds ship a CSS-only night gradient with the mesh.

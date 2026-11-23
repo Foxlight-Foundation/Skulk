@@ -270,6 +270,7 @@ class RuntimeLock:
             "native-host-key.lock",
         }:
             raise ValueError("unknown runtime lock")
+        self.path = root / name
         if sys.platform == "win32":
             self.descriptor = _windows.open_lock(root, name)
             return

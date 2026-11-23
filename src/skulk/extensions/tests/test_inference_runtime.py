@@ -15,6 +15,7 @@ from skulk.extensions.native_inference_contracts import (
     INFERENCE_KERNEL_VERSION,
     InferenceManifest,
     InferenceProfiles,
+    inference_cohort,
     inference_native_wheel,
 )
 from skulk.extensions.runtime_artifacts import (
@@ -100,7 +101,7 @@ def inference_fixture(
     return payload, key, trust, host
 
 
-@pytest.mark.parametrize("version", ["0.7.0rc3", "0.7.0rc4"])
+@pytest.mark.parametrize("version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5"])
 def test_inference_closure_preserves_exact_domains_and_no_generation_ceiling(
     tmp_path: Path,
     version: str,
@@ -123,6 +124,37 @@ def test_inference_closure_preserves_exact_domains_and_no_generation_ceiling(
     )
     assert bounds["inference_seconds"] is None
     assert runtime.configuration_schema is True
+
+
+@pytest.mark.parametrize("version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5"])
+@pytest.mark.parametrize("source_version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5"])
+def test_issued_inference_cohorts_bind_their_own_source(
+    version: str, source_version: str
+) -> None:
+    """Equal profile semantics cannot substitute another issued source revision."""
+    fields = InferenceProfiles.qualified(version).model_dump(mode="json")
+    fields["source_commit"] = inference_cohort(source_version)["source_commit"]
+    if version == source_version:
+        assert InferenceProfiles.model_validate(fields, strict=True).version == version
+    else:
+        with pytest.raises(ValueError, match="source/version pair differs"):
+            InferenceProfiles.model_validate(fields, strict=True)
+
+
+@pytest.mark.parametrize("older_version", ["0.7.0rc3", "0.7.0rc4"])
+def test_author_cohort_refuses_an_older_signed_binary(
+    tmp_path: Path, older_version: str
+) -> None:
+    """A valid signature and equal profiles cannot relabel an older wheel as rc5."""
+    payload, key, trust, host = inference_fixture(tmp_path, "0.7.0rc5")
+    filename, digest, size = inference_native_wheel(host.platform, version=older_version)
+    wheels = payload["wheels"]
+    assert isinstance(wheels, list)
+    wheels[1] = {"filename": filename, "sha256": digest, "size": size}
+    with pytest.raises(ValueError, match="qualified kernel closure"):
+        verify_runtime(
+            sign(payload, key, b"skulk.runtime/5\0"), trust, host, now=int(time.time())
+        )
 
 
 @pytest.mark.parametrize(
