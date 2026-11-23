@@ -319,8 +319,36 @@ ends what the program left running and exits with its exit code.
 `has_borrowed_identity()` in `utils/runtime_files.py` is the one test for a
 set-user-ID process; it is always false on Windows.
 `utils/tests/test_owned_process.py` lists the modules that still start, stop
-or replace processes themselves (`runtime_service.py`, `service_bootstrap.py`,
+or replace processes themselves (`service_bootstrap.py`,
 `service_snapshot.py`).
+The owner launcher (`extensions/runtime_service.py`) starts a plugin's owner
+with `start_supervised` from the same seam: a long-running child that holds
+one end of a lifetime pipe. Closing the launcher's end, which also happens
+when the launcher dies, is the request to shut down; the child reads end of
+input. The launcher's end is never inheritable. Unlike an installer child, a
+supervised child is not ended by the system when its parent dies, on either
+platform: it puts its own things away and holds the service fence until it has
+gone, so no second launcher starts an owner beside it. One that does not go
+within the bound has its whole tree ended (the process group on POSIX; a Job
+Object on Windows, created without *kill on close* for this kind of child).
+Where the owner finds its end of the pipe is the one platform difference, and
+`lifetime_arguments()` says so on the owner's command line:
+`--lifetime-fd <number>` on POSIX, unchanged, and `--lifetime-stdin` on
+Windows, where the pipe is the owner's standard input. The Windows argument is
+explicit so that an owner started by hand never takes a closed standard input
+for the end of a launcher. No issued owner runtime accepts it: an owner has to
+be built for it (a new qualified owner release, with the native kernel port),
+and until then a real owner on Windows exits at once and the lifetime reads
+`owner_exited`. Never send it on POSIX. The tests use a stand-in owner
+(`OWNER_SOURCE` in `extensions/tests/test_runtime_service.py`, one source for
+every platform). On Windows an owner takes the supervisor lock the way
+`RuntimeLock` does there: an exclusive `LockFileEx` on one byte at offset
+`0x7FFFFFFFFFFFFFFF`.
+A service's own stop request goes through `stop_on_signal()` in
+`utils/stop_signals.py`: `SIGTERM` and `SIGINT` through the event loop on
+POSIX; Ctrl-C and Ctrl-Break on Windows, where the loop cannot register a
+signal handler. `runtime_service` and `runtime_manager serve` both use it, so
+the manager runs as a program on Windows.
 Windows limits how long a path may be unless the machine has long paths
 switched on (off by default): a directory's path may be 247 characters and a
 file's 259. The deepest directory of an installed runtime lies 163 characters
