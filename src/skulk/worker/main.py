@@ -205,6 +205,7 @@ from skulk.shared.types.worker.downloads import (
     DownloadProgress,
 )
 from skulk.shared.types.worker.instances import (
+    Instance,
     InstanceFailureCode,
     InstanceId,
     LlamaRpcInstance,
@@ -1928,7 +1929,11 @@ class Worker:
         return 1.0 / shard.world_size if shard.world_size > 0 else 1.0
 
     def _local_shard_fit_error(
-        self, shard: ShardMetadata, context_token_limit: int | None = None
+        self,
+        shard: ShardMetadata,
+        context_token_limit: int | None = None,
+        *,
+        engine_need: Memory | None = None,
     ) -> str | None:
         """Reason this node cannot hold ``shard``, or ``None`` if it fits.
 
@@ -1954,6 +1959,12 @@ class Worker:
         VRAM has dropped since placement (stale telemetry, a concurrently loaded
         instance). MLX grows KV lazily (no up-front window), so the budget floor is
         the correct estimate there, capped by a smaller enforced serving window.
+
+        ``engine_need`` is what an engine package's own adapter said this exact
+        load takes, in the pool this guard checks (see
+        ``_engine_package_stated_need``). The guard checks the larger of it and
+        the admitted footprint, so an engine that needs more than its declared
+        figure is refused only when this node cannot hold what it asks for now.
         """
         if shard.model_card.separation is not None:
             from skulk.shared.models.separation_runtime import resolve_demucs_policy
@@ -1999,6 +2010,18 @@ class Worker:
             memory_settings=shard.memory_settings,
             cache_layer_count=shard.end_layer - shard.start_layer,
         )
+        if engine_need is not None and engine_need > footprint:
+            # The master reserved the admitted figure, so its accounting for
+            # this instance is short by the difference until the engine's
+            # figure is carried to it. This node's live memory is checked
+            # against what the engine says it takes.
+            logger.warning(
+                f"The engine package serving {shard.model_card.model_id} states "
+                f"~{engine_need.in_gb:.1f}GB for this load, above the "
+                f"~{footprint.in_gb:.1f}GB the launch was admitted on; checking "
+                "the engine's figure against this node's memory"
+            )
+            footprint = engine_need
         # On a discrete-GPU node the engine allocates from VRAM, not system RAM,
         # so size the guard against local usable VRAM or it would falsely refuse
         # the very placement the (VRAM-aware) master just admitted. None on
@@ -2075,6 +2098,68 @@ class Worker:
                 "to avoid an OOM abort that leaks GPU memory."
             )
         return None
+
+    async def _engine_package_stated_need(
+        self, instance: Instance, shard: ShardMetadata
+    ) -> Memory | None:
+        """Ask an engine package what this exact load takes, for the fit guard.
+
+        Called when a load is dispatched: the model's files are on the node
+        and the engine is installed, so the adapter can read both. It is asked
+        about the same model and settings the runner then states at load. The
+        adapter runs off the event loop in a short session of its own that
+        loads nothing.
+
+        Returns ``None``, leaving the admitted figure in force, for a built-in
+        engine, when the engine does not know or cannot be asked, and when it
+        names a memory pool other than the one its lane was admitted against:
+        the figure cannot then be compared with this guard's pool, and the
+        disagreement is logged.
+        """
+        backend = shard.resolved_backend
+        if backend is None or package_engine_of(backend) is None:
+            return None
+        from skulk.engines.estimate import EngineNeed, ask_engine_need
+        from skulk.worker.runner.bootstrap import installed_engine_package
+        from skulk.worker.runner.engine_package.request import package_load_request
+
+        def ask() -> EngineNeed | None:
+            try:
+                installed = installed_engine_package(
+                    backend, shard.resolved_engine_build
+                )
+                if installed is None:
+                    return None
+                model, settings = package_load_request(
+                    shard, instance.context_token_limit
+                )
+            except (RuntimeError, ValueError, OSError) as error:
+                # The runner's own load reports a missing package or model.
+                logger.warning(
+                    f"No engine memory estimate for {shard.model_card.model_id}: "
+                    f"{type(error).__name__}: {error}"
+                )
+                return None
+            return ask_engine_need(
+                installed,
+                instance_id=str(instance.instance_id),
+                model=model,
+                settings=settings,
+            )
+
+        need = await to_thread.run_sync(ask)
+        if need is None:
+            return None
+        admitted_pool = "gpu" if backend_offloads_to_vram(backend) else "host"
+        if need.pool != admitted_pool:
+            logger.warning(
+                f"The engine package serving {shard.model_card.model_id} reports "
+                f"its memory need in the {need.pool} pool, but its {backend} lane "
+                f"was admitted against the {admitted_pool} pool; using the "
+                "admitted figure"
+            )
+            return None
+        return Memory.from_bytes(need.bytes)
 
     async def _give_up_on_instance(
         self,
@@ -5533,8 +5618,27 @@ class Worker:
                 # has loaded, so this is the last accurate point - current free
                 # memory now reflects those other loads - to refuse before the
                 # runner allocates and risks an OOM-abort that leaks GPU memory.
+                engine_need: Memory | None = None
+                if package_engine_of(shard.resolved_backend or "") is not None:
+                    engine_need = await self._engine_package_stated_need(
+                        instance, shard
+                    )
+                    if (
+                        self.state.instances.get(task.instance_id) != instance
+                        or self.runners.get(runner_id) is not runner
+                    ):
+                        # The placement changed while the engine was being
+                        # asked. The created task is closed, and planning
+                        # runs again on current state.
+                        await self.event_sender.send(
+                            TaskStatusUpdated(
+                                task_id=task.task_id,
+                                task_status=TaskStatus.Cancelled,
+                            )
+                        )
+                        return
                 fit_error = self._local_shard_fit_error(
-                    shard, instance.context_token_limit
+                    shard, instance.context_token_limit, engine_need=engine_need
                 )
                 if fit_error is not None:
                     logger.error(fit_error)

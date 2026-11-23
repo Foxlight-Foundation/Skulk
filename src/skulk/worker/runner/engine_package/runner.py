@@ -41,7 +41,6 @@ from typing import Any, Final, Literal, cast
 import httpx
 
 from skulk.api.types import GenerationStats
-from skulk.download.download_utils import build_model_path
 from skulk.engines.adapter import (
     AdapterFailedError,
     AdapterRefusedError,
@@ -53,7 +52,6 @@ from skulk.engines.launch import (
     engine_state_directory,
     plan_adapter_launch,
 )
-from skulk.engines.protocol import LoadSettings, ModelIdentity
 from skulk.provisioning.engine_install import InstalledEngine
 from skulk.shared.backends import engine_load_refusal
 from skulk.shared.constants import CONTEXT_LENGTH_EXCEEDED_PREFIX
@@ -89,10 +87,13 @@ from skulk.shared.types.worker.shards import RpcDonorShardMetadata
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
+from skulk.worker.runner.engine_package.request import (
+    PARALLEL_STREAMS,
+    package_load_request,
+)
 from skulk.worker.runner.generation_stats import StreamStatsClock
 from skulk.worker.runner.llama_cpp.runner import (
     messages_for_llama,
-    serving_n_ctx,
     wants_logprobs,
 )
 from skulk.worker.runner.llm_inference.scaffolding_scrub import (
@@ -100,13 +101,6 @@ from skulk.worker.runner.llm_inference.scaffolding_scrub import (
 )
 from skulk.worker.runner.served_concurrency import ServedConcurrentDispatch
 from skulk.worker.runner.vllm.runner import parse_openai_sse_line
-
-PARALLEL_STREAMS: Final = 1
-"""Streams a packaged engine is loaded for. One until a placement carries the
-admitted stream count; the engine is told this number and may not exceed it."""
-
-DEFAULT_CACHE_PRECISION: Final = "default"
-"""Prompt-cache precision stated at load until a card carries one."""
 
 _HEALTH_DEADLINE_SECONDS: Final = 10.0
 _CANCEL_DEADLINE_SECONDS: Final = 10.0
@@ -359,22 +353,8 @@ class Runner(ServedConcurrentDispatch):
     def _load_model(self, task: Task) -> None:
         self.update_status(RunnerLoading())
         self.acknowledge_task(task)
-        card = self.shard_metadata.model_card
-        model_directory = build_model_path(
-            ModelId(card.model_id),
-            card.source_revision,
-            card.artifact_bundle.root if card.artifact_bundle is not None else None,
-        )
-        settings = LoadSettings(
-            context_tokens=serving_n_ctx(self.context_token_limit, logits_all=False),
-            parallel_streams=PARALLEL_STREAMS,
-            cache_precision=DEFAULT_CACHE_PRECISION,
-            drafting=False,
-        )
-        model = ModelIdentity(
-            model_id=str(card.model_id),
-            source_revision=card.source_revision,
-            directory=str(model_directory.resolve()),
+        model, settings = package_load_request(
+            self.shard_metadata, self.context_token_limit
         )
         try:
             with runner_phase(

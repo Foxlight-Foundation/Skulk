@@ -229,12 +229,27 @@ class ProbeResponse(_Frame):
 
 
 class EstimateResponse(_Frame):
-    """Memory need for one model. ``None`` byte counts mean unknown, never zero."""
+    """Memory need for one model. ``None`` byte counts mean unknown, never zero.
+
+    The adapter reports need only, never what is free. The host checks the
+    larger known figure against the pool the package's lane is admitted
+    against, so ``pool`` must name that pool or the figure is set aside.
+    """
 
     type: Literal["estimate"] = "estimate"
-    pool: Literal["gpu", "host"]
-    load_bytes: int | None = Field(ge=0)
-    steady_bytes: int | None = Field(ge=0)
+    pool: Literal["gpu", "host"] = Field(
+        description=(
+            "Where the bytes are taken from: ``gpu`` for the device memory of "
+            "a cuda, rocm or vulkan lane, ``host`` for system RAM, which is "
+            "also where a cpu lane and Apple unified memory are counted."
+        )
+    )
+    load_bytes: int | None = Field(
+        ge=0, description="Peak bytes while loading, or null when unknown."
+    )
+    steady_bytes: int | None = Field(
+        ge=0, description="Bytes held once loaded and serving, or null when unknown."
+    )
 
 
 class LoadResponse(_Frame):

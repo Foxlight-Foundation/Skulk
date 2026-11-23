@@ -42,7 +42,7 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import MpSender, mp_channel
 from skulk.worker.plan import _retried_on_failure
 from skulk.worker.runner import bootstrap
-from skulk.worker.runner.engine_package import runner as runner_module
+from skulk.worker.runner.engine_package import request as request_module
 from skulk.worker.runner.engine_package.runner import (
     Runner,
     chat_request_body,
@@ -232,7 +232,7 @@ class _Harness:
         def model_path(*_arguments: object, **_keywords: object) -> Path:
             return self.model_directory
 
-        monkeypatch.setattr(runner_module, "build_model_path", model_path)
+        monkeypatch.setattr(request_module, "build_model_path", model_path)
         self._senders: tuple[MpSender[Event], MpSender[Task], MpSender[TaskId]] = (
             event_sender,
             self._task_sender,
