@@ -257,6 +257,56 @@ async def test_owner_ignoring_shutdown_is_killed_within_bound(
     RuntimeLock(selector.root, "supervisor.lock").close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows ends what an owner left when the owner is released",
+)
+async def test_an_owner_that_exits_as_the_bound_runs_out_does_not_leave_its_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound ends the whole tree even when its leader went a moment before.
+
+    The owner ends at once when asked, leaving a child that holds the
+    supervisor fence. The launcher's wait for the owner is made to miss that
+    exit, as it does when the exit and the bound fall together.
+    """
+    source = OWNER_SOURCE.replace(
+        "print('sensitive fixture output',flush=True)",
+        "import subprocess\n"
+        "subprocess.Popen([sys.executable,'-I','-c','import time;time.sleep(120)'],"
+        "pass_fds=(f,))\n"
+        "print('sensitive fixture output',flush=True)",
+    )
+    selector = await installed(tmp_path, monkeypatch, source)
+    monkeypatch.setattr("skulk.extensions.runtime_service._SHUTDOWN_SECONDS", 0.5)
+    service = RuntimeService(selector.root)
+    stopped = asyncio.Event()
+    task = asyncio.create_task(service.serve(stopped))
+    try:
+        await running(service)
+        assert service.process is not None
+        owner = service.process
+        wait, missed = owner.wait, False
+
+        async def misses_the_exit() -> int:
+            nonlocal missed
+            if missed:
+                return await wait()
+            missed = True
+            await wait()
+            await asyncio.sleep(3600)
+            raise AssertionError("the bound never ran out")
+
+        monkeypatch.setattr(owner, "wait", misses_the_exit)
+    finally:
+        stopped.set()
+        async with asyncio.timeout(15):
+            assert await task
+    assert missed and service.process.returncode == 0
+    assert status(selector.root).state == "stopped"
+    RuntimeLock(selector.root, "supervisor.lock").close()
+
+
 def test_the_owner_is_told_where_its_end_of_the_lifetime_pipe_is() -> None:
     """A descriptor number where descriptors are inherited; standard input otherwise."""
     assert lifetime_arguments(7) == ("--lifetime-fd", "7")

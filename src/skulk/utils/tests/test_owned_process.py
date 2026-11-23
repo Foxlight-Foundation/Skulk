@@ -319,10 +319,21 @@ async def test_stopping_a_child_stops_everything_it_started(root: Path) -> None:
         lock.close()
 
 
-async def test_a_child_that_was_waited_for_is_never_signalled_on_posix(
+# Starts a writer that outlives it, reports the writer's process identifier
+# and ends at once.
+_LEAVES_ONE_BEHIND = (
+    "import subprocess, sys\n"
+    f"writer = {_WRITER!r}\n"
+    "print(subprocess.Popen("
+    "[sys.executable, '-I', '-c', writer, 'grandchild.log'],"
+    " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid, flush=True)\n"
+)
+
+
+async def test_a_stranger_with_a_waited_childs_identifier_is_never_signalled_on_posix(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Its identifier may by then belong to an unrelated process group."""
+    """Once the tree is gone its identifier may belong to an unrelated process."""
     if sys.platform == "win32":
         pytest.skip("Windows addresses the tree by its job, which is never reused")
     lock = RuntimeLock(root, "installer.lock")
@@ -332,13 +343,28 @@ async def test_a_child_that_was_waited_for_is_never_signalled_on_posix(
         )
         try:
             assert await child.wait() == 0
+            # Nothing is left and nobody has the identifier: quiet.
+            child.kill()
+
             signalled: list[int] = []
 
             def record(group: int, sent: int) -> None:
                 del sent
                 signalled.append(group)
 
+            def alive(identifier: int, sent: int) -> None:
+                """A live process, some stranger's, now has the identifier."""
+                assert (identifier, sent) == (child.pid, 0)
+
             monkeypatch.setattr(os, "killpg", record)
+            monkeypatch.setattr(os, "kill", alive)
+            child.kill()
+            assert signalled == []
+
+            def another_accounts(identifier: int, sent: int) -> None:
+                raise PermissionError(identifier, sent)
+
+            monkeypatch.setattr(os, "kill", another_accounts)
             child.kill()
             assert signalled == []
         finally:
@@ -347,23 +373,43 @@ async def test_a_child_that_was_waited_for_is_never_signalled_on_posix(
         lock.close()
 
 
+async def test_stopping_a_waited_child_ends_what_it_left_running_on_posix(
+    root: Path,
+) -> None:
+    """The group outlives its leader; it is still this tree, and still stoppable."""
+    if sys.platform == "win32":
+        pytest.skip("Windows ends such a descendant when the child is closed")
+    lock = RuntimeLock(root, "installer.lock")
+    left_behind = 0
+    try:
+        child = await start_owned(
+            (sys.executable, "-I", "-c", _LEAVES_ONE_BEHIND), cwd=root, lock=lock
+        )
+        try:
+            left_behind = int(await child.stdout.readline())
+            assert await asyncio.wait_for(child.wait(), 10) == 0
+            assert child.returncode == 0 and _running(left_behind)
+            child.kill()
+            await asyncio.to_thread(_wait_until_gone, [left_behind])
+        finally:
+            await child.close()
+    finally:
+        lock.close()
+        with contextlib.suppress(psutil.NoSuchProcess):
+            if left_behind:
+                psutil.Process(left_behind).kill()
+
+
 async def test_closing_ends_what_a_finished_child_left_running_on_windows(
     root: Path,
 ) -> None:
     """A descendant that outlives the first child is still part of the tree."""
     if sys.platform != "win32":
         pytest.skip("on POSIX such a descendant keeps holding the lock instead")
-    leaves_one_behind = (
-        "import subprocess, sys\n"
-        f"writer = {_WRITER!r}\n"
-        "print(subprocess.Popen("
-        "[sys.executable, '-I', '-c', writer, 'grandchild.log'],"
-        " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid, flush=True)\n"
-    )
     lock = RuntimeLock(root, "installer.lock")
     try:
         child = await start_owned(
-            (sys.executable, "-I", "-c", leaves_one_behind), cwd=root, lock=lock
+            (sys.executable, "-I", "-c", _LEAVES_ONE_BEHIND), cwd=root, lock=lock
         )
         try:
             left_behind = int(await child.stdout.readline())

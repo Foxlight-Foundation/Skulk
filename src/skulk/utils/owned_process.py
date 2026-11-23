@@ -81,10 +81,14 @@ class OwnedProcess(Protocol):
     def kill(self) -> None:
         """Stop every process in the tree at once; quiet when none is left.
 
-        Call it before waiting for the child. On POSIX the tree is addressed
-        by the child's process identifier, which the system may give to an
-        unrelated process once the child has been waited for, so after that
-        this does nothing there.
+        On POSIX the tree is addressed by the child's process identifier,
+        which names its process group. Once the child has been waited for,
+        that identifier is the tree's only for as long as a member is left;
+        after the last one it may go to an unrelated process. So when the
+        child has been waited for, the group is signalled only if no live
+        process has that identifier: what the child left running is ended, and
+        a stranger never is. An ended process lets go of its files a moment
+        after this returns.
         """
         ...
 
@@ -148,13 +152,24 @@ if sys.platform != "win32":
             return await self._process.wait()
 
         def kill(self) -> None:
-            if self._process.returncode is not None:
-                # The leader has been waited for, so its identifier no longer
-                # belongs to this session and may already name another
-                # process group. Signalling it could end a stranger.
+            leader = self._process.pid
+            if self._process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(leader, signal.SIGKILL)
                 return
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(self._process.pid, signal.SIGKILL)
+            # The leader has been waited for. The system keeps its identifier
+            # from every new process for as long as the group has a member,
+            # so a live process by that identifier now is a stranger, and a
+            # group by it would be the stranger's. With no such process, a
+            # group by that identifier can only be what the leader left.
+            try:
+                os.kill(leader, 0)
+            except ProcessLookupError:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(leader, signal.SIGKILL)
+            except PermissionError:
+                # Another account's process: a stranger.
+                return
 
         def release(self) -> None:
             if self._lifetime is not None:

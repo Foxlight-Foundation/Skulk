@@ -1490,6 +1490,13 @@ platform: it puts its own things away and holds the service fence until it has
 gone, so no second launcher starts an owner beside it. One that does not go
 within the bound has its whole tree ended (the process group on POSIX; a Job
 Object on Windows, created without *kill on close* for this kind of child).
+On POSIX that still works when the owner itself went just as the bound ran
+out and only what it started is left: a group outlives its leader, and `kill`
+signals it unless a live process now has the leader's identifier, which would
+be a stranger. After a forced end the launcher waits up to five seconds on the
+supervisor fence, because an ended process lets go of its files a moment
+later and a group that reads as empty is not proof that it has (macOS stops
+counting a process as a member before its files are closed).
 Where the owner finds its end of the pipe is the one platform difference, and
 `lifetime_arguments()` says so on the owner's command line:
 `--lifetime-fd <number>` on POSIX, unchanged, and `--lifetime-stdin` on

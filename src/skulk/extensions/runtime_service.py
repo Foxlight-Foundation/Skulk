@@ -27,7 +27,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from skulk.extensions.native_host_binding import provision_native_host
 from skulk.extensions.runtime_artifacts import Digest
-from skulk.extensions.runtime_files import RuntimeLock, write_private
+from skulk.extensions.runtime_files import (
+    RuntimeLock,
+    acquire_runtime_lock,
+    write_private,
+)
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_integrity import runtime_interpreter
 from skulk.extensions.runtime_selection import RuntimeSelection, RuntimeSelector
@@ -75,6 +79,8 @@ type ServiceProcessState = Literal[
 
 _CHECK_SECONDS = 30.0
 _SHUTDOWN_SECONDS = 30.0
+# How long a tree that was ended by force is given to let go of its fence.
+_RELEASE_SECONDS = 5.0
 
 
 class RuntimeServiceStatus(BaseModel):
@@ -177,6 +183,7 @@ class RuntimeService:
 
     async def _close(self) -> None:
         process = self.process
+        ended_by_force = False
         if process is not None:
             # Pipe EOF is the managed owner's graceful shutdown request. Sending
             # SIGTERM as well can race its final interpreter shutdown and turn a
@@ -186,7 +193,10 @@ class RuntimeService:
                 async with asyncio.timeout(_SHUTDOWN_SECONDS):
                     await process.wait()
             except TimeoutError:
+                # The bound ends the whole tree. That includes what the owner
+                # left running if it went, itself, just as the bound ran out.
                 process.kill()
+                ended_by_force = True
                 await process.wait()
         # A descendant can keep stdout open after its owner exits. Its pipe must
         # not prevent bounded shutdown or cause us to retain any output payload.
@@ -199,7 +209,16 @@ class RuntimeService:
             await process.close()
         # Children inherit the owner's fence. Do not report stopped or allow a
         # replacement if an old child survived the bounded owner teardown.
-        RuntimeLock(self.root, "supervisor.lock").close()
+        if ended_by_force:
+            # An ended process lets go of its files a moment after it is
+            # told to go, and on POSIX there is nothing to wait on for a
+            # descendant. The fence itself says when the tree has gone.
+            fence = await acquire_runtime_lock(
+                self.root, wait_seconds=_RELEASE_SECONDS, name="supervisor.lock"
+            )
+            fence.close()
+        else:
+            RuntimeLock(self.root, "supervisor.lock").close()
 
     async def serve(self, stopped: asyncio.Event) -> bool:
         """Run one verified owner lifetime; return false for an actionable failure.
