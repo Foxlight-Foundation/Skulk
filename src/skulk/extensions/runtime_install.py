@@ -9,7 +9,7 @@ import sqlite3
 import stat
 import sys
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from pathlib import Path
 from typing import Literal, cast, final
 from uuid import uuid4
@@ -40,8 +40,10 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 from skulk.extensions.runtime_integrity import (
+    RuntimePathTooLongError,
     environment_command,
     runtime_interpreter,
+    runtime_path_excess,
     seal_runtime,
     verify_or_adopt_installed_runtime,
 )
@@ -447,6 +449,42 @@ class RuntimeInstaller:
         finally:
             lock.close()
 
+    def check_path_room(
+        self, runtime: VerifiedRuntime, supplied: Mapping[str, bytes] | None = None
+    ) -> None:
+        """Refuse a runtime whose files this machine's path limit could not hold.
+
+        Called before anything is downloaded or written, so a refusal leaves
+        no partial generation behind. Only a Windows machine without long
+        paths has such a limit; everywhere else this returns at once.
+
+        Args:
+            runtime: The verified runtime that would be installed.
+            supplied: Its artifacts by name, when they are at hand. With them
+                every file of every wheel is counted; without them, everything
+                that is known before a download.
+
+        Raises:
+            RuntimePathTooLongError: The deepest path would be too long. It
+                carries by how many characters.
+        """
+        if supplied is None:
+            names: tuple[str, ...] = (
+                "bundle.pyz",
+                *(wheel.filename for wheel in runtime.claims.wheels),
+            )
+            wheels: tuple[bytes, ...] = ()
+        else:
+            names = tuple(supplied)
+            wheels = tuple(
+                content for name, content in supplied.items() if name.endswith(".whl")
+            )
+        excess = runtime_path_excess(
+            self.root / "generations" / runtime.digest, names, wheels
+        )
+        if excess:
+            raise RuntimePathTooLongError(excess)
+
     async def _ownership_lock(self, wait_for_ownership: bool) -> RuntimeLock:
         # Supervisor verification briefly shares this lock. Wait only before
         # staging or local entrypoint execution has any effects. Retrying either
@@ -554,6 +592,9 @@ class RuntimeInstaller:
                     supplied = await asyncio.to_thread(
                         verified_artifacts, runtime, artifacts
                     )
+                    # With the wheels at hand every file is counted, before
+                    # the generation folder exists.
+                    await asyncio.to_thread(self.check_path_room, runtime, supplied)
                     private_directory(self.root / "generations")
                     private_directory(generation)
                     artifact_directory = generation / "artifacts"

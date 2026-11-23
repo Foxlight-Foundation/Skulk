@@ -88,6 +88,10 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 from skulk.extensions.runtime_install import finish_runtime_work
+from skulk.extensions.runtime_integrity import (
+    RuntimePathTooLongError,
+    path_refusal_payload,
+)
 from skulk.extensions.runtime_service import RuntimeServiceStatus
 from skulk.extensions.service_snapshot import ServiceSnapshot, activate_staged_runtime
 from skulk.utils.local_transport import (
@@ -1097,6 +1101,13 @@ class RuntimeManager:
             with contextlib.suppress(OSError, TimeoutError):
                 async with asyncio.timeout(1):
                     writer.write(catalog_refusal_payload(refused))
+                    await writer.drain()
+        except RuntimePathTooLongError as refused:
+            # Also named: a code and how many characters too long, never the
+            # path. Nothing was journaled or downloaded.
+            with contextlib.suppress(OSError, TimeoutError):
+                async with asyncio.timeout(1):
+                    writer.write(path_refusal_payload(refused))
                     await writer.drain()
         except (OSError, ValueError, TimeoutError):
             with contextlib.suppress(OSError, TimeoutError):

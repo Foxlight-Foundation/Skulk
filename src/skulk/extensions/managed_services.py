@@ -33,6 +33,7 @@ from skulk.extensions.runtime_attachment import (
 )
 from skulk.extensions.runtime_catalog import catalog_refusal
 from skulk.extensions.runtime_files import RuntimeLock, read_private
+from skulk.extensions.runtime_integrity import path_refusal
 from skulk.extensions.runtime_manager import (
     CatalogInstallRequest,
     CatalogRegistration,
@@ -1051,6 +1052,9 @@ class ManagedServices:
             catalog_refused = catalog_refusal(result)
             if catalog_refused is not None:
                 raise catalog_refused
+            path_refused = path_refusal(result)
+            if path_refused is not None:
+                raise path_refused
             raise ValueError("managed service request refused")
         if isinstance(request, CatalogRequest) and request.action == "read_catalog":
             self._retry_deferred_followers(payload)

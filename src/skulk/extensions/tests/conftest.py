@@ -34,12 +34,13 @@ if sys.platform == "win32":
         root. A directory created through the file seam is what that code
         expects on Windows.
 
-        Short: a path on Windows is limited to 259 characters unless the
-        machine has long paths switched on, and an installed runtime uses 184
-        of them below its installation's root (the generation's 64-character
-        name, then up to 98 for the files of ``pip`` itself). pytest's own
-        directory, named after the test, leaves too little for a test that
-        installs under ``service/installations/<plugin>``.
+        Short: Windows creates no directory whose path is 248 characters or
+        longer unless the machine has long paths switched on, and an installed
+        runtime's deepest directory lies 163 below its installation's root
+        (the generation's 64-character name, then 77 for a folder of ``pip``
+        itself). pytest's own directory, named after the test, leaves too
+        little for a test that installs under
+        ``service/installations/<plugin>``.
         """
         private = tmp_path_factory.getbasetemp() / f"w{next(_short_names)}"
         private_directory(private)

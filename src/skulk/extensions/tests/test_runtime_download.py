@@ -20,6 +20,7 @@ from skulk.extensions.runtime_files import (
     read_private,
     write_private,
 )
+from skulk.extensions.runtime_integrity import RuntimePathTooLongError
 from skulk.extensions.runtime_selection import RuntimeSelector
 from skulk.extensions.tests.test_runtime_install import artifacts
 
@@ -137,6 +138,51 @@ async def test_staging_waits_for_short_lived_installer_ownership(
     assert staged.state == "staged" and staged.attempt == 0
     assert len(calls) == 3
     assert not (downloads.root / "selected-runtime.json").exists()
+
+
+async def test_a_path_too_long_refuses_an_install_before_it_is_journaled_or_downloaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal comes with the request, and a retry is refused the same way."""
+    downloads, _, _, calls = prepared(tmp_path, monkeypatch)
+    review = await downloads.inspect()
+    request = InstallRequest(
+        operation_id="b" * 32,
+        runtime_digest=review.runtime_digest,
+        expected_source_revision=1,
+    )
+    with monkeypatch.context() as limited:
+        limited.setattr(
+            "skulk.extensions.runtime_install.runtime_path_excess", lambda *_: 12
+        )
+        with pytest.raises(RuntimePathTooLongError) as refused:
+            await downloads.submit(request)
+    assert refused.value.excess == 12
+    assert calls == ["/private/runtime.json"]
+    assert downloads.work is None and downloads.current() is None
+    with pytest.raises(FileNotFoundError):
+        downloads.operation(request.operation_id)
+    assert not (downloads.root / "generations").exists()
+    # An install that stopped for another reason is not retried into the limit.
+    working = downloads.transport
+    downloads.transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, content=b"truncated")
+    )
+    await downloads.submit(request)
+    assert downloads.work is not None
+    await downloads.work
+    failed = downloads.current()
+    assert failed is not None and failed.state == "recovery_required"
+    downloads.transport = working
+    with monkeypatch.context() as limited:
+        limited.setattr(
+            "skulk.extensions.runtime_install.runtime_path_excess", lambda *_: 12
+        )
+        with pytest.raises(RuntimePathTooLongError):
+            await downloads.recover(request.operation_id, 1)
+    assert downloads.current() == failed
+    assert not (downloads.directory / "attempts").exists()
+    await downloads.close()
 
 
 @pytest.mark.parametrize("failure", ["timeout", "shutdown", "expired"])

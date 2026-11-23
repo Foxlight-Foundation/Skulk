@@ -6,6 +6,7 @@ import importlib.metadata
 import io
 import json
 import sqlite3
+import sys
 import time
 import zipfile
 from dataclasses import replace
@@ -28,6 +29,12 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 from skulk.extensions.runtime_install import RuntimeInstaller
+from skulk.extensions.runtime_integrity import (
+    RuntimePathTooLongError,
+    _paths_are_limited,  # pyright: ignore[reportPrivateUsage]
+    runtime_path_excess,
+    verify_installed_runtime,
+)
 
 
 def artifacts(
@@ -412,6 +419,110 @@ async def test_offline_stage_and_reconnect_leave_host_unchanged(
     with pytest.raises(ValueError, match="bundle differs"):
         await installer.stage(metadata, source, operation_id=operation.operation_id)
     assert installer.operation(operation.operation_id).state == "recovery_required"
+
+
+async def test_a_runtime_too_deep_for_the_machine_is_refused_before_it_is_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where paths are limited, staging refuses by name and creates no generation."""
+    source = tmp_path / "source"
+    metadata, trust, host = artifacts(source)
+    monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
+    runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
+    installer = RuntimeInstaller(tmp_path / "installation")
+    write_private(
+        installer.root / "publisher-trust.json", trust.model_dump_json().encode()
+    )
+    # Where no limit applies, the check passes whatever the path.
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._paths_are_limited", lambda: False
+    )
+    installer.check_path_room(runtime)
+    # A Windows machine without long paths, and a ``pip`` deep enough that
+    # this installation's folder cannot hold it.
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._paths_are_limited", lambda: True
+    )
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._pip_depth", lambda: (400, 420)
+    )
+    generation = installer.root / "generations" / runtime.digest
+    supplied = verified_artifacts(runtime, source)
+    expected = runtime_path_excess(
+        generation,
+        tuple(supplied),
+        tuple(content for name, content in supplied.items() if name.endswith(".whl")),
+    )
+    assert expected > 0 and any(name.endswith(".whl") for name in supplied)
+    with pytest.raises(RuntimePathTooLongError) as before_download:
+        installer.check_path_room(runtime)
+    assert before_download.value.excess == expected
+    with pytest.raises(RuntimePathTooLongError) as refused:
+        await installer.stage(metadata, source, operation_id="1" * 32)
+    assert refused.value.excess == expected
+    assert not generation.exists()
+    assert installer.operation("1" * 32).state == "recovery_required"
+    # The refusal held nothing: the same operation installs once paths fit.
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._paths_are_limited", lambda: False
+    )
+    retried = await installer.stage(
+        metadata, source, operation_id="1" * 32, recover=True
+    )
+    assert retried.state == "staged"
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="only Windows limits how long a path may be"
+)
+async def test_the_refusal_starts_exactly_where_an_install_stops_working(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The longest root the check accepts installs; one character more would not.
+
+    Real installs on a machine without long paths. A machine with them on,
+    which GitHub's Windows runners are, has no limit to find.
+    """
+    if not _paths_are_limited():
+        pytest.skip("long paths are switched on, so no path is too long here")
+    source = tmp_path / "source"
+    metadata, trust, host = artifacts(source)
+    monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
+    runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
+    supplied = verified_artifacts(runtime, source)
+    wheels = tuple(
+        content for name, content in supplied.items() if name.endswith(".whl")
+    )
+    # The excess grows by one with each character of the root, so one
+    # measurement of a root far too long gives the longest that fits.
+    probe = Path("r" * 250) / "generations" / runtime.digest
+    longest = 250 - runtime_path_excess(probe, tuple(supplied), wheels)
+
+    def installer(length: int) -> RuntimeInstaller:
+        """An installer whose root's path is exactly this long."""
+        made = RuntimeInstaller(tmp_path / ("r" * (length - len(str(tmp_path)) - 1)))
+        assert len(str(made.root)) == length
+        write_private(
+            made.root / "publisher-trust.json", trust.model_dump_json().encode()
+        )
+        return made
+
+    fits = installer(longest)
+    staged = await fits.stage(metadata, source, operation_id="1" * 32)
+    assert staged.state == "staged"
+    verify_installed_runtime(fits.root / "generations" / runtime.digest, runtime.digest)
+
+    too_long = installer(longest + 1)
+    with pytest.raises(RuntimePathTooLongError) as refused:
+        await too_long.stage(metadata, source, operation_id="1" * 32)
+    assert refused.value.excess == 1
+    assert not (too_long.root / "generations" / runtime.digest).exists()
+    # Not a character early: left to try, that install fails.
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._paths_are_limited", lambda: False
+    )
+    with pytest.raises(ValueError, match="runtime installer failed"):
+        await too_long.stage(metadata, source, operation_id="2" * 32)
 
 
 async def test_interrupted_generation_is_retained_without_replay(
