@@ -432,11 +432,11 @@ from skulk.shared.backends import (
     AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
     ON_DEMAND_ENGINE_DOWNLOAD_BYTES,
-    EngineType,
     audio_cpp_cuda_hardware_matches,
     engine_install_notice,
     engine_of,
     expand_engine_backends,
+    package_engine_of,
 )
 from skulk.shared.constants import (
     DASHBOARD_DIR,
@@ -5116,11 +5116,12 @@ class API:
         preview says so before the operator places it.
         """
         node_resources = self._telemetry_view.node_resources
+        from skulk.engines.on_demand import engine_package_download_bytes
         from skulk.provisioning.comfy_extension import extension_for_build
 
-        installing: dict[EngineType, list[str]] = {}
-        sizes: dict[EngineType, int] = {}
-        extension_only: dict[EngineType, bool] = {}
+        installing: dict[str, list[str]] = {}
+        sizes: dict[str, int] = {}
+        extension_only: dict[str, bool] = {}
         assignments = instance.shard_assignments
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = assignments.runner_to_shard.get(runner_id)
@@ -5144,6 +5145,19 @@ class API:
                 sizes[engine] = max(sizes.get(engine, 0), size)
                 extension_only[engine] = extension_only.get(engine, True) and wheel is not None and not base_missing
                 installing.setdefault(engine, []).append(str(node_id))
+                continue
+            package = package_engine_of(backend)
+            if package is not None and backend in resources.on_demand_backends:
+                # The size comes from this node's own kept package list; a
+                # build it does not list is announced without a size.
+                sizes[package] = max(
+                    sizes.get(package, 0),
+                    engine_package_download_bytes(
+                        shard.resolved_engine_build if shard is not None else None
+                    ),
+                )
+                extension_only[package] = False
+                installing.setdefault(package, []).append(str(node_id))
         if not installing:
             return None
         engine, node_ids = next(iter(installing.items()))

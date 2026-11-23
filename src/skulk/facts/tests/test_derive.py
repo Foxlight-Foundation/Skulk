@@ -715,3 +715,54 @@ def test_a_record_naming_a_built_in_or_bare_tag_offers_nothing(tag: str) -> None
     )
 
     assert after == derive_node_backends(facts)
+
+
+def test_a_package_the_node_could_install_is_offered_on_demand_and_nothing_else_moves() -> None:
+    """The tag is advertised and marked on demand; every built-in result stays."""
+    for facts in _representative_nodes():
+        before = derive_node_backends(facts)
+        assert facts.engine_package_installable_builds == {}
+        after = derive_node_backends(
+            facts.model_copy(
+                update={
+                    "engine_package_installable_builds": {
+                        "tensorfold-cpu": _PACKAGE_BUILD
+                    }
+                }
+            )
+        )
+
+        assert after.backends == before.backends | {"tensorfold-cpu"}
+        assert after.on_demand_backends == before.on_demand_backends | {
+            "tensorfold-cpu"
+        }
+        assert after.installed_backends == before.installed_backends
+        assert after.conflicts == before.conflicts
+        assert after.notes == before.notes
+
+
+def test_a_package_the_node_holds_is_never_also_on_demand() -> None:
+    facts = _representative_nodes()[0].model_copy(
+        update={
+            "engine_package_builds": {"tensorfold-cpu": _PACKAGE_BUILD},
+            "engine_package_installable_builds": {"tensorfold-cpu": "b" * 64},
+        }
+    )
+
+    derived = derive_node_backends(facts)
+
+    assert "tensorfold-cpu" in derived.installed_backends
+    assert "tensorfold-cpu" not in derived.on_demand_backends
+
+
+def test_an_offer_under_a_built_in_engine_tag_is_ignored() -> None:
+    facts = _representative_nodes()[0]
+    before = derive_node_backends(facts)
+
+    after = derive_node_backends(
+        facts.model_copy(
+            update={"engine_package_installable_builds": {"vllm-cuda": _PACKAGE_BUILD}}
+        )
+    )
+
+    assert after == before

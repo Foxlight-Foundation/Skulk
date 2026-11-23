@@ -329,6 +329,11 @@ class NodeFacts(CamelCaseModel):
         description="Backend tag to build identity (the package manifest digest) for each installed engine package's usable active generation. Empty when none is installed or engine packages are turned off.",
     )
 
+    engine_package_installable_builds: dict[str, str] = Field(
+        default_factory=dict,
+        description="Backend tag to build identity for each engine package this node does not hold but may install when a model needs it, from the package list it last verified. Empty when nothing fits, the node is offline, installs are turned off, or engine packages are turned off.",
+    )
+
     engine_package_problems: tuple[str, ...] = Field(
         default=(),
         description="One short line per installed engine package lane whose active generation cannot be offered: engine ID, lane and the refusal code.",

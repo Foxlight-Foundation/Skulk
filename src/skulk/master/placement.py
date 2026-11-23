@@ -756,12 +756,18 @@ def _cycle_engine_ready_score(
     engine ready wins when nothing more important separates them. Nodes
     without a resources entry are not counted against the cycle.
     """
+
+    def ready(resources: NodeResources) -> bool:
+        installed = resources.backends - resources.on_demand_backends
+        # A card may name an engine package by its bare name, which a node
+        # advertises only as a lane tag.
+        return bool(installed & compatible_backends) or any(
+            package_engine_of(tag) in compatible_backends for tag in installed
+        )
+
     return int(
         all(
-            bool(
-                (resources.backends - resources.on_demand_backends)
-                & compatible_backends
-            )
+            ready(resources)
             for node_id in cycle
             if (resources := node_resources.get(node_id)) is not None
         )
@@ -1967,7 +1973,14 @@ def place_instance(
                 # manifest digest. Without it a later activation could move
                 # this placement onto a build it was never admitted for.
                 assert resources is not None
-                build = resources.engine_builds.get(resolved_backend)
+                # A package the node will install first is stamped with the
+                # build its package list offers; the worker installs exactly
+                # that build or gives the instance up.
+                build = resources.engine_builds.get(resolved_backend) or (
+                    resources.installable_engine_builds.get(resolved_backend)
+                    if resolved_backend in resources.on_demand_backends
+                    else None
+                )
                 if build is None:
                     raise PlacementError(
                         "Engine package placement lacks its exact package build"

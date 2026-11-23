@@ -835,6 +835,17 @@ def derive_node_backends(facts: NodeFacts) -> BackendDerivation:
         on_demand.update(facts.stable_diffusion_cpp_installable_builds)
         tags.update(facts.stable_diffusion_cpp_installable_builds)
 
+    # An engine package this node could install is offered the same way. A
+    # tag the node already holds a package for was derived above and is never
+    # also offered on demand.
+    installable_packages = {
+        tag
+        for tag in facts.engine_package_installable_builds
+        if tag not in tags and package_engine_of(tag) is not None
+    }
+    on_demand.update(installable_packages)
+    tags.update(installable_packages)
+
     if any(gpu.detection_source == "nvidia_device_node" for gpu in facts.gpus):
         # The #612 class: hardware is visibly present but the node cannot read
         # its name or VRAM, so served-context sizing and hardware attribution

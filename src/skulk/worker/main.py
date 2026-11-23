@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 import anyio
 from anyio import (
@@ -61,9 +61,9 @@ from skulk.shared.backends import (
     ENGINE_LOAD_REFUSED_FAILURE_MARKER,
     ENGINE_UNAVAILABLE_FAILURE_MARKER,
     ENGINE_UNKNOWN_FAILURE_MARKER,
-    EngineType,
     engine_load_refusal_code,
     engine_of,
+    package_engine_of,
 )
 from skulk.shared.constants import (
     SKULK_ENGINES_DIR,
@@ -423,8 +423,15 @@ def _model_files_incomplete_instance_failure_message(model_id: ModelId) -> str:
     )
 
 
-def _engine_install_failure_message(step: str | None, engine: EngineType = "comfy") -> str:
+def _engine_install_failure_message(step: str | None, engine: str = "comfy") -> str:
     """Return safe operator guidance for a failed on-demand engine install."""
+    if package_engine_of(engine) == engine:
+        return _instance_failure_message(
+            f"Could not install the {engine} engine package on this node: "
+            f"{step or 'the install'} failed. Check the node's internet "
+            "connection and free disk space, then place the model again. The "
+            "reason is in the node's log."
+        )
     if engine == "vllm":
         return _instance_failure_message(
             f"Could not install the vLLM runtime on this node: {step or 'the install'} failed. "
@@ -479,11 +486,19 @@ def _engine_load_refused_instance_failure_message(model_id: ModelId, code: str) 
     )
 
 
+_ENGINE_PACKAGE_LIST_FIRST_REFRESH_SECONDS: Final = 60.0
+"""Wait after worker start before first asking the store for the package
+list, so it never competes with start-up."""
+
+_ENGINE_PACKAGE_LIST_REFRESH_SECONDS: Final = 3600.0
+"""How often a worker asks the store for a newer package list."""
+
+
 @dataclass
 class _EngineInstallJob:
     """One on-demand engine install shared by every instance waiting for it."""
 
-    engine: EngineType
+    engine: str
     resolved_backend: str | None = None
     expected_build: str | None = None
     waiters: dict[InstanceId, TaskId] = field(default_factory=dict)
@@ -1550,7 +1565,7 @@ class Worker:
             self._send_native_music_source_packet, self._send_separation_output_packet,
             self._fail_native_music, self._native_music_reader_drained,
         )
-        self._engine_install_jobs: dict[EngineType | tuple[EngineType, str | None, str | None], _EngineInstallJob] = {}
+        self._engine_install_jobs: dict[str | tuple[str, str | None, str | None], _EngineInstallJob] = {}
         self._stopped: anyio.Event = anyio.Event()
 
     async def _gather_node_resources(self) -> NodeResources:
@@ -2248,6 +2263,7 @@ class Worker:
             tg.start_soon(info_gatherer.run)
             tg.start_soon(self._forward_info, info_recv)
             tg.start_soon(self._restore_cached_native_runtimes)
+            tg.start_soon(self._keep_engine_package_list_fresh)
             tg.start_soon(self.plan_step)
             tg.start_soon(self._event_applier)
             tg.start_soon(self._poll_connection_updates)
@@ -4739,7 +4755,7 @@ class Worker:
         await self.event_sender.send(
             TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Running)
         )
-        key = (task.engine, task.resolved_backend, task.expected_build) if task.engine in {"stable_diffusion_cpp", "mlx_video", "vllm"} or (task.engine == "comfy" and task.expected_build is not None) else task.engine
+        key = (task.engine, task.resolved_backend, task.expected_build) if task.engine in {"stable_diffusion_cpp", "mlx_video", "vllm"} or (task.engine == "comfy" and task.expected_build is not None) or package_engine_of(task.engine) == task.engine else task.engine
         job = self._engine_install_jobs.get(key)
         if job is not None and job.finished and job.succeeded:
             await self.event_sender.send(
@@ -4785,6 +4801,9 @@ class Worker:
             install_vllm_on_demand,
         )
 
+        if package_engine_of(job.engine) == job.engine:
+            await self._run_engine_package_install(job)
+            return
         failure_step: str | None = None
         stop = threading.Event()
         try:
@@ -4863,6 +4882,76 @@ class Worker:
         except Exception as error:  # noqa: BLE001 - each waiter gets one explained failure
             failure_step = "the engine install"
             logger.opt(exception=error).error("Engine install failed")
+        await self._release_engine_install_waiters(job, failure_step)
+
+    async def _run_engine_package_install(self, job: _EngineInstallJob) -> None:
+        """Install one engine package a placement named, then release its waiters.
+
+        The package build is the one the placement was stamped with. After
+        the install the node's facts are read again, and the job succeeds
+        only when the node now holds exactly that build as the active one.
+
+        Side effects: downloads, installs and activates the package,
+        refreshes the facts snapshot and the cached on-demand backends, and
+        publishes fresh node resources.
+        """
+        from skulk.engines.on_demand import (
+            EnginePackageInstallError,
+            install_engine_package_on_demand,
+        )
+        from skulk.facts import (
+            current_backend_derivation,
+            current_node_facts,
+            refresh_node_facts,
+        )
+
+        failure_step: str | None = None
+        stop = threading.Event()
+        try:
+            backend, build = job.resolved_backend, job.expected_build
+            if backend is None or build is None:
+                raise EnginePackageInstallError(
+                    "the placement check",
+                    "engine package placement lacks backend/build identity",
+                )
+            facts = await to_thread.run_sync(current_node_facts)
+            try:
+                await to_thread.run_sync(
+                    lambda: install_engine_package_on_demand(
+                        backend, build, facts, offline=self._offline, stop=stop
+                    ),
+                    abandon_on_cancel=True,
+                )
+            except anyio.get_cancelled_exc_class():
+                stop.set()
+                raise
+            refreshed_facts = await to_thread.run_sync(refresh_node_facts)
+            derivation = await to_thread.run_sync(current_backend_derivation)
+            if (
+                refreshed_facts.engine_package_builds.get(backend) != build
+                or backend not in derivation.installed_backends
+            ):
+                raise EnginePackageInstallError(
+                    "the engine check",
+                    "the installed package does not report as usable on this node",
+                )
+            self._on_demand_backends = derivation.on_demand_backends
+            await self._publish_fresh_node_resources()
+            job.succeeded = True
+        except EnginePackageInstallError as error:
+            failure_step = error.step
+            logger.error(
+                f"Engine package {job.engine} install failed at {error.step}: {error.detail}"
+            )
+        except Exception as error:  # noqa: BLE001 - each waiter gets one explained failure
+            failure_step = "the engine install"
+            logger.opt(exception=error).error("Engine package install failed")
+        await self._release_engine_install_waiters(job, failure_step)
+
+    async def _release_engine_install_waiters(
+        self, job: _EngineInstallJob, failure_step: str | None
+    ) -> None:
+        """Mark a finished install job and answer every instance waiting on it."""
         job.finished = True
         waiters = dict(job.waiters)
         job.waiters.clear()
@@ -4881,6 +4970,53 @@ class Worker:
                     _engine_install_failure_message(failure_step, job.engine),
                     error_code="engine_install_failed",
                 )
+
+    async def _keep_engine_package_list_fresh(self) -> None:
+        """Renew the list of installable engine packages for the node's life.
+
+        A node offers only the packages in the list it last verified. This
+        asks the store for a newer one a minute after start and hourly after
+        that, and re-reads the node's facts only when what it would offer
+        changed. A node that may not install packages (offline, installs or
+        packages turned off) never asks. Every failure is quiet: the node
+        keeps offering what it offered before.
+        """
+        from skulk.engines.on_demand import (
+            installable_engine_package_builds,
+            on_demand_gates_pass,
+            refresh_engine_package_list,
+        )
+        from skulk.facts import (
+            current_backend_derivation,
+            current_node_facts,
+            refresh_node_facts,
+        )
+
+        if self._offline or not on_demand_gates_pass():
+            return
+        await anyio.sleep(_ENGINE_PACKAGE_LIST_FIRST_REFRESH_SECONDS)
+        while True:
+            try:
+                await to_thread.run_sync(
+                    lambda: refresh_engine_package_list(offline=self._offline),
+                    abandon_on_cancel=True,
+                )
+                facts = await to_thread.run_sync(current_node_facts)
+                offered = await to_thread.run_sync(
+                    lambda facts=facts: installable_engine_package_builds(
+                        facts, offline=self._offline
+                    )
+                )
+                if offered != facts.engine_package_installable_builds:
+                    await to_thread.run_sync(refresh_node_facts)
+                    derivation = await to_thread.run_sync(current_backend_derivation)
+                    self._on_demand_backends = derivation.on_demand_backends
+                    await self._publish_fresh_node_resources()
+            except Exception as error:  # noqa: BLE001 - an optional list must never stop a worker
+                logger.opt(exception=error).debug(
+                    "Engine package list refresh failed; keeping the current offers"
+                )
+            await anyio.sleep(_ENGINE_PACKAGE_LIST_REFRESH_SECONDS)
 
     async def _publish_fresh_node_resources(self) -> None:
         """Advertise this node's resources now rather than at the next poll."""

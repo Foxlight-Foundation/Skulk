@@ -798,6 +798,79 @@ def test_preview_names_the_engine_a_placement_installs() -> None:
     )
 
 
+def test_preview_names_the_engine_package_a_placement_installs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A package the node will install first is announced like a built-in engine."""
+    import skulk.engines.on_demand as on_demand_module
+
+    api = _build_api()
+    installer = NodeId("installer-node")
+    holder = NodeId("holder-node")
+    build = "d" * 64
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=installer,
+            info=NodeResources(
+                backends=frozenset({"tensorfold-rocm"}),
+                on_demand_backends=frozenset({"tensorfold-rocm"}),
+                installable_engine_builds={"tensorfold-rocm": build},
+            ),
+        )
+    )
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=holder,
+            info=NodeResources(
+                backends=frozenset({"tensorfold-rocm"}),
+                engine_builds={"tensorfold-rocm": build},
+            ),
+        )
+    )
+    def known_size(digest: str | None) -> int:
+        return 924 * 1024**2 if digest == build else 0
+
+    monkeypatch.setattr(
+        on_demand_module, "engine_package_download_bytes", known_size
+    )
+
+    notice = api._engine_install_for_instance(  # pyright: ignore[reportPrivateUsage]
+        _single_node_instance(
+            str(installer),
+            resolved_backend="tensorfold-rocm",
+            resolved_engine_build=build,
+        )
+    )
+    unsized = api._engine_install_for_instance(  # pyright: ignore[reportPrivateUsage]
+        _single_node_instance(
+            str(installer),
+            resolved_backend="tensorfold-rocm",
+            resolved_engine_build="e" * 64,
+        )
+    )
+
+    assert notice is not None and unsized is not None
+    assert notice.engine == "tensorfold"
+    assert notice.node_ids == [str(installer)]
+    assert notice.approximate_download_bytes == 924 * 1024**2
+    assert notice.detail == (
+        "The tensorfold engine (about 924 MB) will be installed with this "
+        "model, so placement will take longer."
+    )
+    assert unsized.approximate_download_bytes == 0
+    assert "tensorfold engine will be installed" in unsized.detail
+    assert (
+        api._engine_install_for_instance(  # pyright: ignore[reportPrivateUsage]
+            _single_node_instance(
+                str(holder),
+                resolved_backend="tensorfold-rocm",
+                resolved_engine_build=build,
+            )
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize("installs", [True, False])
 def test_quick_launch_returns_the_engine_install_notice(
     monkeypatch: pytest.MonkeyPatch, installs: bool

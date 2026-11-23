@@ -1,13 +1,13 @@
 from enum import Enum
-from typing import final
+from typing import final, get_args
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 
 from skulk.api.types import (
     ImageEditsTaskParams,
     ImageGenerationTaskParams,
 )
-from skulk.shared.backends import EngineType
+from skulk.shared.backends import EngineType, package_engine_of
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
     RealtimeAudioTranscriptionTaskParams,
@@ -63,11 +63,25 @@ class InstallEngine(BaseTask):  # emitted by Worker
     finish. One install serves every instance waiting for the same engine.
     """
 
-    engine: EngineType
+    engine: str = Field(
+        max_length=64,
+        description=(
+            "The engine to install: a built-in engine, or the name of an "
+            "engine package, whose build `expected_build` then names."
+        ),
+    )
     resolved_backend: str | None = Field(
         default=None,
         description="Exact backend requesting this installation; absent for legacy engine tasks.",
     )
+
+    @field_validator("engine")
+    @classmethod
+    def _require_engine_name(cls, value: str) -> str:
+        """Accept a built-in engine or a well-formed engine package name."""
+        if value in get_args(EngineType) or package_engine_of(value) == value:
+            return value
+        raise ValueError("engine must be a built-in engine or an engine package name")
     expected_build: str | None = Field(
         default=None, description="Immutable executable build selected by placement."
     )

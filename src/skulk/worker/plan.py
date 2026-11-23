@@ -10,6 +10,7 @@ from skulk.shared.backends import (
     ON_DEMAND_ENGINE_DOWNLOAD_BYTES,
     EngineType,
     engine_of,
+    package_engine_of,
 )
 from skulk.shared.models.capabilities import is_gemma4_family
 from skulk.shared.models.model_cards import same_model_artifact
@@ -337,6 +338,21 @@ def awaited_engine(
     return engine_of(backend)
 
 
+def awaited_engine_package(
+    shard: ShardMetadata, on_demand_backends: Set[str]
+) -> str | None:
+    """The engine package a shard still waits for on this node, if any.
+
+    A package backend the node advertises but does not hold yet is installed
+    before the model loads, exactly as a built-in on-demand engine is.
+    Returns the package's engine name.
+    """
+    backend = shard.resolved_backend
+    if backend is None or backend not in on_demand_backends:
+        return None
+    return package_engine_of(backend)
+
+
 def _engine_needs_install(
     runners: Mapping[RunnerId, RunnerSupervisor],
     on_demand_backends: Set[str],
@@ -369,6 +385,16 @@ def _engine_needs_install(
                 expected_build=runner.bound_instance.bound_shard.resolved_engine_build,
                 approximate_download_bytes=download_bytes,
             )
+        package = awaited_engine_package(
+            runner.bound_instance.bound_shard, on_demand_backends
+        )
+        if package is not None:
+            return InstallEngine(
+                instance_id=instance_id,
+                engine=package,
+                resolved_backend=runner.bound_instance.bound_shard.resolved_backend,
+                expected_build=runner.bound_instance.bound_shard.resolved_engine_build,
+            )
     return None
 
 
@@ -389,6 +415,8 @@ def _load_model(
             on_demand_backends,
             native_image_ready=instance.instance_id in engine_install_ready,
             comfy_extension_ready=instance.instance_id in engine_install_ready,
+        ) or awaited_engine_package(
+            runner.bound_instance.bound_shard, on_demand_backends
         ):
             continue
 
