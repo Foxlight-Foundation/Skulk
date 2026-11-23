@@ -375,3 +375,41 @@ async def test_discovery_excludes_executor_alias_even_when_explicitly_allowed(
         assert reply.outcome == "complete" and reply.payload == b"[]"
     finally:
         reply.release()
+
+
+@pytest.mark.parametrize("keep_other_destination", [False, True])
+async def test_discovery_omits_an_unenrolled_runtime_generation(
+    parent: Parent, keep_other_destination: bool
+) -> None:
+    """An upgraded generation cannot suppress other exact-granted observations."""
+    source, allowed, broader = parent.visible
+    if keep_other_destination:
+        # This fixture normally narrows to one child. Retain two already
+        # enrolled destinations for the mixed-generation observation case.
+        context = _OBJECT.validate_json(parent.active.context.canonical())
+        context["allowed_targets"] = [
+            v.target.model_dump(mode="json") for v in (source, allowed, broader)
+        ]
+        parent.active.context = parent.service.kernel.CompositionV3Contract.from_json(
+            "Context", json.dumps(context)
+        )
+    fields = allowed.model_dump(mode="json")
+    fields["runtime_digest"] = "d" * 64
+    upgraded = InferenceListing.model_validate_json(json.dumps(fields))
+    assert upgraded.target == allowed.target and upgraded.grant() != allowed.grant()
+    with pytest.raises(ValueError):
+        parent.service.callers.authorize(parent.caller, upgraded.grant())
+    parent.visible = (source, upgraded, broader)
+    response = await parent.query()
+    try:
+        assert response.outcome == "complete"
+        response.check()
+        observed = TypeAdapter(list[dict[str, JsonValue]]).validate_json(
+            response.payload
+        )
+        assert [item["target"] for item in observed] == (
+            [broader.target.model_dump(mode="json")] if keep_other_destination else []
+        )
+        assert parent.active.next_delegation == 1
+    finally:
+        response.release()

@@ -1,7 +1,10 @@
 """Signed inference admission is a distinct closure, never an execution grant."""
 
 import hashlib
+import importlib.metadata
 import json
+import subprocess
+import sys
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -9,7 +12,7 @@ from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from skulk.extensions.native_inference_contracts import (
     INFERENCE_KERNEL_VERSION,
@@ -17,6 +20,7 @@ from skulk.extensions.native_inference_contracts import (
     InferenceProfiles,
     inference_cohort,
     inference_native_wheel,
+    inference_profile_readers,
 )
 from skulk.extensions.runtime_artifacts import (
     QualifiedHost,
@@ -30,6 +34,7 @@ from skulk.extensions.runtime_files import (
     read_private,
     write_private,
 )
+from skulk.extensions.runtime_install import inference_reader_probe
 from skulk.extensions.runtime_selection import (
     RuntimeSelection,
     RuntimeSelector,
@@ -101,7 +106,7 @@ def inference_fixture(
     return payload, key, trust, host
 
 
-@pytest.mark.parametrize("version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5"])
+@pytest.mark.parametrize("version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7"])
 def test_inference_closure_preserves_exact_domains_and_no_generation_ceiling(
     tmp_path: Path,
     version: str,
@@ -126,8 +131,10 @@ def test_inference_closure_preserves_exact_domains_and_no_generation_ceiling(
     assert runtime.configuration_schema is True
 
 
-@pytest.mark.parametrize("version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5"])
-@pytest.mark.parametrize("source_version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5"])
+@pytest.mark.parametrize("version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7"])
+@pytest.mark.parametrize(
+    "source_version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7"]
+)
 def test_issued_inference_cohorts_bind_their_own_source(
     version: str, source_version: str
 ) -> None:
@@ -141,13 +148,69 @@ def test_issued_inference_cohorts_bind_their_own_source(
             InferenceProfiles.model_validate(fields, strict=True)
 
 
+@pytest.mark.parametrize(
+    ("version", "count"),
+    [("0.7.0rc3", 13), ("0.7.0rc4", 13), ("0.7.0rc5", 13), ("0.7.0rc7", 14)],
+)
+def test_installed_reader_inventory_selects_the_issued_version(
+    version: str, count: int
+) -> None:
+    """New profiles cannot change the installer's expectation for retained closures."""
+    readers = inference_profile_readers(version)
+    assert len(readers) == count
+    assert (("skulk.discovery/1", "discovery_profile_digest") in readers) == (
+        count == 14
+    )
+    with pytest.raises(ValueError, match="unqualified native inference reader"):
+        inference_profile_readers("0.7.0rc6")
+
+
+def test_real_isolated_installer_probe_reports_every_selected_binary_profile(
+    tmp_path: Path,
+) -> None:
+    """Run the production probe against the actual installed compiled binary."""
+    version = importlib.metadata.version("skulk-capability-kernel")
+    payload, key, trust, host = inference_fixture(tmp_path / "source", version)
+    runtime = verify_runtime(
+        sign(payload, key, b"skulk.runtime/5\0"), trust, host, now=int(time.time())
+    )
+    assert runtime.native_manifest is not None
+    write_private(
+        tmp_path / "native-manifest.json",
+        runtime.native_manifest.canonical_json.encode(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", inference_reader_probe()],
+        cwd=tmp_path,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    observed = OBJECT.validate_json(result.stdout)
+    profiles = OBJECT.validate_python(observed["all_profiles"], strict=True)
+    assert observed["version"] == version
+    assert observed["manifest_digest"] == runtime.native_manifest.digest
+    assert len(profiles) == (14 if version == "0.7.0rc7" else 13)
+    entries = TypeAdapter(list[dict[str, JsonValue]]).validate_python(
+        inference_cohort(version)["profiles"], strict=True
+    )
+    assert profiles == {
+        TypeAdapter(str).validate_python(entry["profile"], strict=True): entry[
+            "profile_digest"
+        ]
+        for entry in entries
+    }
+
+
 @pytest.mark.parametrize("older_version", ["0.7.0rc3", "0.7.0rc4"])
 def test_author_cohort_refuses_an_older_signed_binary(
     tmp_path: Path, older_version: str
 ) -> None:
     """A valid signature and equal profiles cannot relabel an older wheel as rc5."""
     payload, key, trust, host = inference_fixture(tmp_path, "0.7.0rc5")
-    filename, digest, size = inference_native_wheel(host.platform, version=older_version)
+    filename, digest, size = inference_native_wheel(
+        host.platform, version=older_version
+    )
     wheels = payload["wheels"]
     assert isinstance(wheels, list)
     wheels[1] = {"filename": filename, "sha256": digest, "size": size}

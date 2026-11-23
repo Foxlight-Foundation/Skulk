@@ -18,8 +18,9 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
 from skulk.extensions.native_inference_contracts import (
-    INFERENCE_PROFILE_READERS,
+    INFERENCE_READER_VERSIONS,
     inference_cohort,
+    inference_profile_readers,
 )
 from skulk.extensions.runtime_artifacts import (
     Digest,
@@ -102,12 +103,14 @@ import _skulk_capability_kernel as kernel
 source=Path('native-manifest.json').read_bytes()
 record=kernel.ManagedV2Contract.from_json('Manifest',source.decode())
 if record.canonical() != source: raise ValueError('noncanonical inference manifest')
+version=importlib.metadata.version('skulk-capability-kernel')
+readers=__READERS__[version]
 health={'protocol':2,'contract_profile':'skulk.calls/2',
 'profile_digest':kernel.calls_v2_profile_digest(),'kind':'health','payload_size':0,
 'nonce':'installed-inference','ready':False,'surfaces':[]}
 metadata,body=kernel.decode_call_v2_frame(kernel.encode_call_v2_frame(json.dumps(health),b''))
 if json.loads(metadata) != health or body: raise ValueError('installed inference codec refused')
-print(json.dumps({'version':importlib.metadata.version('skulk-capability-kernel'),
+print(json.dumps({'version':version,
 'manifest_digest':record.digest,
 'portable':kernel.portable_v2_profile_digest(),
 'managed':kernel.managed_v2_profile_digest(),
@@ -115,8 +118,16 @@ print(json.dumps({'version':importlib.metadata.version('skulk-capability-kernel'
 'transport':kernel.transport_v2_profile_digest(),
 'composition':kernel.composition_v3_profile_digest(),
 'calls':kernel.calls_v2_profile_digest(),
-'all_profiles':{name:getattr(kernel,reader)() for name,reader in __READERS__}},sort_keys=True))
-""".replace("__READERS__", repr(INFERENCE_PROFILE_READERS))
+'all_profiles':{name:getattr(kernel,reader)() for name,reader in readers}},sort_keys=True))
+""".replace(
+    "__READERS__",
+    repr(
+        {
+            version: inference_profile_readers(version)
+            for version in INFERENCE_READER_VERSIONS
+        }
+    ),
+)
 
 
 def _check_native_manifest(generation: Path, runtime: VerifiedRuntime) -> None:
@@ -125,6 +136,16 @@ def _check_native_manifest(generation: Path, runtime: VerifiedRuntime) -> None:
         generation / "native-manifest.json", 262144
     ) != native.canonical_json.encode():
         raise ValueError("installed native manifest differs")
+
+
+def inference_reader_probe() -> str:
+    """Return the isolated installer program for the exact issued native reader.
+
+    The program runs inside the signed environment and reports its actual binary
+    and manifest identities. Generating it imports no application and grants no
+    execution authority; the installer compares its result with signed claims.
+    """
+    return _INFERENCE_READER
 
 
 def _without_shared_write(directory: Path) -> None:
@@ -598,7 +619,7 @@ class RuntimeInstaller:
                     raise ValueError("installed runtime inventory differs")
                 if (native := runtime.native_manifest) is not None:
                     reader = (
-                        _INFERENCE_READER
+                        inference_reader_probe()
                         if runtime.claims.protocol == 5
                         else _CALL_READER
                         if runtime.claims.protocol == 4
@@ -622,7 +643,14 @@ class RuntimeInstaller:
                     if runtime.claims.protocol == 5:
                         entries = TypeAdapter(
                             list[dict[str, JsonValue]]
-                        ).validate_python(inference_cohort()["profiles"], strict=True)
+                        ).validate_python(
+                            inference_cohort(
+                                TypeAdapter(str).validate_python(
+                                    profiles["version"], strict=True
+                                )
+                            )["profiles"],
+                            strict=True,
+                        )
                         expected["all_profiles"] = {
                             TypeAdapter(str).validate_python(
                                 entry["profile"], strict=True
