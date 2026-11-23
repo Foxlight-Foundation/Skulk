@@ -26,6 +26,7 @@ from skulk.extensions.runtime_integrity import (
     _current_base,  # pyright: ignore[reportPrivateUsage]
     _paths_are_limited,  # pyright: ignore[reportPrivateUsage]
     _pip_depth,  # pyright: ignore[reportPrivateUsage]
+    _wheel_depth,  # pyright: ignore[reportPrivateUsage]
     adopt_current_interpreter,
     environment_command,
     path_refusal,
@@ -204,11 +205,12 @@ def test_no_path_is_too_long_where_paths_have_no_limit(
         ),
         ("x-1.0.data/scripts/{long}.exe", "runtime/Scripts/{long}.exe"),
         ("x-1.0.data/data/share/{long}.txt", "runtime/share/{long}.txt"),
-        # pip adds this file when it installs a wheel named on its command
-        # line, which is how the installer names every wheel.
+        # pip adds direct_url.json when it installs a wheel named on its
+        # command line, which is how the installer names every wheel, and
+        # writes it under a temporary name twelve characters longer.
         (
             "{long}-1.0.dist-info/WHEEL",
-            "runtime/Lib/site-packages/{long}-1.0.dist-info/direct_url.json",
+            "runtime/Lib/site-packages/{long}-1.0.dist-info/direct_url.jsonxxxxxxxx.tmp",
         ),
         # Headers really go somewhere shorter; they are counted where they
         # sit in the wheel, which can only refuse early.
@@ -334,6 +336,20 @@ def test_the_measure_covers_pip_the_artifacts_and_the_environment(
     assert runtime_path_excess(_generation(fits + 1)) == 1
     # A wheel that cannot be read is pip's to report, not this measure's.
     assert runtime_path_excess(_generation(100), (), (b"not a wheel",)) == 0
+
+
+def test_generated_metadata_is_measured_under_its_temporary_name() -> None:
+    """Every wheel gets INSTALLER; only one named on the command line a direct URL."""
+    with zipfile.ZipFile(io.BytesIO(_wheel("x-1.0.dist-info/WHEEL"))) as archive:
+        folder = "runtime/Lib/site-packages/x-1.0.dist-info"
+        assert _wheel_depth(archive, direct=False) == (
+            len(folder),
+            len(folder + "/INSTALLER") + 12,
+        )
+        assert _wheel_depth(archive, direct=True) == (
+            len(folder),
+            len(folder + "/direct_url.json") + 12,
+        )
 
 
 def test_the_bundled_pip_is_found_and_measured() -> None:

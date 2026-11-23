@@ -333,8 +333,8 @@ is too long, so a root from about 62 characters gets a runtime with some of
 `pip`'s compiled files missing and nothing else different.
 `runtime_path_excess()` in `extensions/runtime_integrity.py` measures all of
 this from the bundled `pip` wheel and the runtime's own wheels (each member
-where `pip` puts it, and the `Scripts\<name>.exe` it generates for an entry
-point), in UTF-16 code units as Windows counts them, and returns zero where no
+where `pip` puts it, the metadata it generates under the temporary name it
+writes it by, and the `Scripts\<name>.exe` it generates for an entry point), in UTF-16 code units as Windows counts them, and returns zero where no
 limit applies. `RuntimeInstaller.check_path_room()` refuses with
 `RuntimePathTooLongError` twice: when an install or a retry is requested,
 before it is journaled or downloaded (`RuntimeDownloads.submit` and `recover`),

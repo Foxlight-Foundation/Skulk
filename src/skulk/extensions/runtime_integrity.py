@@ -145,6 +145,10 @@ def environment_command(runtime: Path) -> tuple[str, ...]:
 _DIRECTORY_LIMIT: Final = 247
 _FILE_LIMIT: Final = 259
 _SITE: Final = "Lib/site-packages/"
+# pip writes the metadata files it generates under a temporary name beside
+# the final one, then renames: the final name, eight random characters and
+# ``.tmp`` (``adjacent_tmp_file`` in pip 26.3, which Python 3.13 bundles).
+_TEMPORARY: Final = "x" * 8 + ".tmp"
 # What a generation holds whatever is installed into it: the installer's own
 # record, the environment's folders and interpreter, and the longest name
 # adoption gives a file it is replacing.
@@ -319,22 +323,24 @@ def _launchers(archive: zipfile.ZipFile) -> list[str]:
 def _wheel_depth(archive: zipfile.ZipFile, *, direct: bool) -> tuple[int, int]:
     """How deep one wheel's files go below a generation folder.
 
+    Besides the wheel's members, ``pip`` generates ``INSTALLER`` in the
+    wheel's metadata folder, and writes it under a longer temporary name
+    first. ``RECORD`` is written the same way and is shorter.
+
     Args:
         archive: The wheel.
         direct: Whether ``pip`` installs it from a file named on its command
-            line, in which case it adds ``direct_url.json`` to the wheel's
-            metadata folder.
+            line, in which case it generates ``direct_url.json`` as well.
     """
     members = archive.namelist()
     placed = [_placed(member) for member in members]
-    if direct:
-        placed += sorted(
-            {
-                _SITE + head + "/direct_url.json"
-                for head in (member.partition("/")[0] for member in members)
-                if head.endswith(".dist-info")
-            }
-        )
+    generated = ("INSTALLER", "direct_url.json") if direct else ("INSTALLER",)
+    placed += sorted(
+        _SITE + head + "/" + name + _TEMPORARY
+        for head in {member.partition("/")[0] for member in members}
+        if head.endswith(".dist-info")
+        for name in generated
+    )
     placed += _launchers(archive)
     return _depth("runtime/" + path for path in placed)
 
@@ -386,8 +392,9 @@ def runtime_path_excess(
     """How many characters too long a runtime's deepest path would be.
 
     Counts the environment ``venv`` builds, the ``pip`` it installs there, the
-    retained artifacts, every file of the given wheels and the program files
-    ``pip`` generates for their entry points. Lengths are in UTF-16 code
+    retained artifacts, every file of the given wheels, the metadata ``pip``
+    generates for each (under the temporary names it writes them by) and the
+    program files it generates for their entry points. Lengths are in UTF-16 code
     units, as Windows counts them. Compiled files are not counted: Python
     skips one whose path is too long.
 
