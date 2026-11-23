@@ -3331,7 +3331,10 @@ or has engine packages turned off offers no package this way.
 Two cluster settings in the `engines` section of `GET /config` and
 `PUT /config` govern engine packages. They are settings and not launch
 switches, so they work the same in a packaged Skulk, and a node applies a
-change within about a minute, without a restart.
+change within about a minute, without a restart. The dashboard edits both
+under Settings, in the section named Add-on engines: "Use add-on engines" is
+`packages_enabled`, and "Install test builds" switches `package_channel`
+between `stable` and `candidate`.
 
 - `engines.package_channel`: `stable` (the default) installs released builds
   only; `candidate` makes every node also install builds that are still being

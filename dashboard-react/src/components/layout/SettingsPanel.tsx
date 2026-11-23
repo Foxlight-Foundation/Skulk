@@ -6,6 +6,7 @@ import { generateInstallId } from './TelemetryConsentModal';
 import {
   useConfig,
   type StoreConfig,
+  type EnginesConfig,
   type FullConfig,
   type IntelligentFabricConfig,
   type LoggingConfig,
@@ -231,6 +232,8 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   // On by default, unlike most sections: a restart bringing models back is the
   // expected behavior, so an absent section reads as on.
   const [recoveryDraft, setRecoveryDraft] = useState<RestartRecoveryConfig>({ enabled: true });
+  // An absent section means the defaults: add-on engines on, released builds only.
+  const [enginesDraft, setEnginesDraft] = useState<Required<EnginesConfig>>({ packages_enabled: true, package_channel: 'stable' });
   // Fetch config when panel opens
   useEffect(() => {
     if (!open) return;
@@ -264,6 +267,10 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
     });
     setRecoveryDraft({ enabled: fullConfig?.restart_recovery?.enabled ?? true });
+    setEnginesDraft({
+      packages_enabled: fullConfig?.engines?.packages_enabled ?? true,
+      package_channel: fullConfig?.engines?.package_channel ?? 'stable',
+    });
     setTelemetryDraft(
       fullConfig?.telemetry ?? {
         consent: 'unasked',
@@ -340,6 +347,12 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     if (fullConfig?.restart_recovery || !recoveryDraft.enabled) {
       updated.restart_recovery = { ...recoveryDraft };
     }
+    // Same rule: an untouched default stays absent. A build without the
+    // section refuses a settings document that carries it, so it is written
+    // only once the operator has chosen something.
+    if (fullConfig?.engines || !enginesDraft.packages_enabled || enginesDraft.package_channel !== 'stable') {
+      updated.engines = { ...(fullConfig?.engines ?? {}), ...enginesDraft };
+    }
     // Retain compatibility with nodes that still expose the retired model-trust
     // field, but never write the inert legacy allow-list back through Settings.
     delete updated.model_trust;
@@ -370,7 +383,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, storeDefaults, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, recoveryDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
+  }, [draft, storeDefaults, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, recoveryDraft, enginesDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- Closing the modal resets its nested navigation for the next opening.
   useEffect(() => { if (!open) { setDevicesOpen(false); setAccessOpen(false); } }, [open]);
@@ -725,6 +738,57 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   'Models stay stopped after a restart until you place them again. Steward proposal history is still kept.',
                 )}
               </HintText>
+            )}
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            {...section('engines')}
+            title={t('settings.engines.legend', 'Add-on engines')}
+            summary={!enginesDraft.packages_enabled
+              ? t('common.off', 'Off')
+              : enginesDraft.package_channel === 'candidate'
+                ? t('settings.engines.summaryTesting', 'On, with test builds')
+                : t('common.on', 'On')}
+          >
+            <Row>
+              <FieldLabel>
+                {t('settings.engines.enabled', 'Use add-on engines')}
+                <InfoTooltip
+                  filled
+                  content={t(
+                    'settings.engines.enabledTooltip',
+                    'An engine is the program that runs a model. Skulk includes several. An add-on engine is installed separately, on the machine that needs it, the first time a model asks for it.',
+                  )}
+                />
+              </FieldLabel>
+              <Toggle aria-label={t('settings.engines.enabled', 'Use add-on engines')} $on={enginesDraft.packages_enabled} onClick={() => setEnginesDraft(prev => ({ ...prev, packages_enabled: !prev.packages_enabled }))} />
+            </Row>
+            {!enginesDraft.packages_enabled && (
+              <HintText>
+                {t(
+                  'settings.engines.offHint',
+                  'Every machine stops using its add-on engines within about a minute and installs no new ones. The engines stay on disk and come back when you turn this on. A model already running on one keeps running until you stop it.',
+                )}
+              </HintText>
+            )}
+            {enginesDraft.packages_enabled && (
+              <Row>
+                <FieldLabel>
+                  {t('settings.engines.testBuilds', 'Install test builds')}
+                  <InfoTooltip
+                    filled
+                    content={t(
+                      'settings.engines.testBuildsTooltip',
+                      'Machines also install engine builds that are still being tested, before they are released. Leave this off unless you are helping test an engine. An engine a machine already has is never replaced by this setting.',
+                    )}
+                  />
+                </FieldLabel>
+                <Toggle
+                  aria-label={t('settings.engines.testBuilds', 'Install test builds')}
+                  $on={enginesDraft.package_channel === 'candidate'}
+                  onClick={() => setEnginesDraft(prev => ({ ...prev, package_channel: prev.package_channel === 'candidate' ? 'stable' : 'candidate' }))}
+                />
+              </Row>
             )}
           </CollapsibleSection>
 
