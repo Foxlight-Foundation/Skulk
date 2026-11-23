@@ -66,7 +66,13 @@ class OwnedProcess(Protocol):
         ...
 
     def kill(self) -> None:
-        """Stop every process in the tree at once; quiet when none is left."""
+        """Stop every process in the tree at once; quiet when none is left.
+
+        Call it before waiting for the child. On POSIX the tree is addressed
+        by the child's process identifier, which the system may give to an
+        unrelated process once the child has been waited for, so after that
+        this does nothing there.
+        """
         ...
 
     async def close(self) -> None:
@@ -114,6 +120,11 @@ if sys.platform != "win32":
             return await self._process.wait()
 
         def kill(self) -> None:
+            if self._process.returncode is not None:
+                # The leader has been waited for, so its identifier no longer
+                # belongs to this session and may already name another
+                # process group. Signalling it could end a stranger.
+                return
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(self._process.pid, signal.SIGKILL)
 

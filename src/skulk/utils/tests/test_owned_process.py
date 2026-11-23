@@ -195,7 +195,8 @@ async def test_stopping_a_child_stops_everything_it_started(root: Path) -> None:
             assert await asyncio.wait_for(child.stdout.read(), 10) == b""
             await asyncio.to_thread(_wait_until_gone, [child.pid, grandchild])
             await asyncio.to_thread(_assert_writing_has_stopped, root)
-            # Stopping what has already stopped is quiet.
+            # Stopping what has already stopped is quiet, and on POSIX signals
+            # nobody: the child's identifier is no longer this tree's.
             child.kill()
         finally:
             await child.close()
@@ -203,6 +204,34 @@ async def test_stopping_a_child_stops_everything_it_started(root: Path) -> None:
         # another process holds open cannot be removed.
         (root / "child.log").unlink()
         (root / "grandchild.log").unlink()
+    finally:
+        lock.close()
+
+
+async def test_a_child_that_was_waited_for_is_never_signalled_on_posix(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its identifier may by then belong to an unrelated process group."""
+    if sys.platform == "win32":
+        pytest.skip("Windows addresses the tree by its job, which is never reused")
+    lock = RuntimeLock(root, "installer.lock")
+    try:
+        child = await start_owned(
+            (sys.executable, "-I", "-c", "pass"), cwd=root, lock=lock
+        )
+        try:
+            assert await child.wait() == 0
+            signalled: list[int] = []
+
+            def record(group: int, sent: int) -> None:
+                del sent
+                signalled.append(group)
+
+            monkeypatch.setattr(os, "killpg", record)
+            child.kill()
+            assert signalled == []
+        finally:
+            await child.close()
     finally:
         lock.close()
 
