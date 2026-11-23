@@ -3,16 +3,16 @@ revision = 5
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
     "python_full_version < '3.14' and platform_machine == 'AMD64' and sys_platform == 'win32'",
 ]
 supported-markers = [
     "platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "(platform_machine == 'aarch64' or platform_machine == 'x86_64') and sys_platform == 'linux'",
+    "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')",
     "python_full_version < '3.14' and platform_machine == 'AMD64' and sys_platform == 'win32'",
 ]
 
@@ -389,8 +389,8 @@ version = "4.6.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
 dependencies = [
@@ -627,8 +627,8 @@ version = "2026.1.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d5/7d/5df2650c57d47c57232af5ef4b4fdbff182070421e405e0d62c6cdbfaa87/fsspec-2026.1.0.tar.gz", hash = "sha256:e987cb0496a0d81bba3a9d1cee62922fb395e7d4c3b575e57f547953334fe07b", size = 310496, upload-time = "2026-01-09T15:21:35.562Z" }
@@ -2600,9 +2600,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "qrcode" },
     { name = "rustworkx" },
-    { name = "skulk-capability-kernel", version = "0.7.0rc4", source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-macosx_11_0_arm64.whl" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
-    { name = "skulk-capability-kernel", version = "0.7.0rc4", source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-manylinux_2_34_aarch64.whl" }, marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
-    { name = "skulk-capability-kernel", version = "0.7.0rc4", source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-manylinux_2_34_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "skulk-capability-kernel", version = "0.7.0rc5", source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-macosx_11_0_arm64.whl" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "skulk-capability-kernel", version = "0.7.0rc5", source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-manylinux_2_34_aarch64.whl" }, marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
+    { name = "skulk-capability-kernel", version = "0.7.0rc5", source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-manylinux_2_34_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "skulk-pyo3-bindings", version = "0.2.11", source = { registry = "https://wheels.foxlight.ai/simple/" }, marker = "sys_platform == 'win32'" },
     { name = "skulk-pyo3-bindings", version = "0.2.11", source = { editable = "rust/skulk_pyo3_bindings" }, marker = "sys_platform != 'win32'" },
     { name = "tiktoken" },
@@ -2674,9 +2674,9 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "qrcode", specifier = ">=8.2" },
     { name = "rustworkx", specifier = ">=0.17.1" },
-    { name = "skulk-capability-kernel", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-macosx_11_0_arm64.whl" },
-    { name = "skulk-capability-kernel", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'", url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-manylinux_2_34_aarch64.whl" },
-    { name = "skulk-capability-kernel", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-manylinux_2_34_x86_64.whl" },
+    { name = "skulk-capability-kernel", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-macosx_11_0_arm64.whl" },
+    { name = "skulk-capability-kernel", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'", url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-manylinux_2_34_aarch64.whl" },
+    { name = "skulk-capability-kernel", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-manylinux_2_34_x86_64.whl" },
     { name = "skulk-pyo3-bindings", marker = "sys_platform != 'win32'", editable = "rust/skulk_pyo3_bindings" },
     { name = "skulk-pyo3-bindings", marker = "sys_platform == 'win32'", specifier = "==0.2.11", index = "https://wheels.foxlight.ai/simple/" },
     { name = "tiktoken", specifier = ">=0.12.0" },
@@ -2744,38 +2744,38 @@ requires-dist = [
 
 [[package]]
 name = "skulk-capability-kernel"
-version = "0.7.0rc4"
-source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-macosx_11_0_arm64.whl" }
+version = "0.7.0rc5"
+source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-macosx_11_0_arm64.whl" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
     "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 wheels = [
-    { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-macosx_11_0_arm64.whl", hash = "sha256:b6f17739d9f49a488194c73a57cbd525c8faab19497c716e0c4ec2a58520d391" },
+    { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-macosx_11_0_arm64.whl", hash = "sha256:dba1882aae2473e5e768dfe709848091079ce72e0987bdc640603a4f303baf17" },
 ]
 
 [[package]]
 name = "skulk-capability-kernel"
-version = "0.7.0rc4"
-source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-manylinux_2_34_aarch64.whl" }
+version = "0.7.0rc5"
+source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-manylinux_2_34_aarch64.whl" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
 ]
 wheels = [
-    { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-manylinux_2_34_aarch64.whl", hash = "sha256:c4f2c27755ce3545a593f98941eaa3b56f07b185e06b2b76197798096a1a97e3" },
+    { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-manylinux_2_34_aarch64.whl", hash = "sha256:c3c829dee6a80089faa21a99b843199421e7f780268807acade773841a29be19" },
 ]
 
 [[package]]
 name = "skulk-capability-kernel"
-version = "0.7.0rc4"
-source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-manylinux_2_34_x86_64.whl" }
+version = "0.7.0rc5"
+source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-manylinux_2_34_x86_64.whl" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
     "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
 wheels = [
-    { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.4/skulk_capability_kernel-0.7.0rc4-cp313-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:68f7fe9ed6448d68dea4bbe9a8fc12fad7c89f7b3a6102cf69ca1d6119a88f36" },
+    { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0-rc.5/skulk_capability_kernel-0.7.0rc5-cp313-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:ad7dc13b57c6b468345e2eb765dd9524a27a86aa2d47e05d53e48d9d1090ae54" },
 ]
 
 [[package]]
@@ -2795,10 +2795,10 @@ version = "0.2.11"
 source = { editable = "rust/skulk_pyo3_bindings" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
 
