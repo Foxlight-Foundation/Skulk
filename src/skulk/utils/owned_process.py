@@ -22,8 +22,9 @@ On Windows the tree runs inside a Job Object that the operating system
 destroys, with every process in it, when this process's handle to it closes
 (:mod:`skulk.utils._owned_process_windows`). A file lock there belongs to one
 process and cannot be inherited, so the child instead holds a file that the
-lock checks: the lock cannot be taken again until the child has ended, and the
-job ends the rest of the tree with it.
+lock checks: the lock cannot be taken again until the child has ended. The
+job ends the rest of the tree in the same operation as the child, though
+Windows does not promise the order within it.
 """
 
 import asyncio

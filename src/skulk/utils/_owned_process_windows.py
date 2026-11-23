@@ -33,7 +33,16 @@ the lock is free while the tree still runs (measured: about 1 run in 130 saw a
 late write). So the child is also started holding the lock's *children fence*
 open with no sharing (:func:`skulk.utils._runtime_files_windows.children_fence`).
 The lock refuses a new holder while that file is held, which is until the
-child has ended. By then the job has ended the rest of the tree with it.
+child has ended.
+
+What that covers exactly: the fence is held by the child, not by what the
+child starts. When this process dies, one operation ends the whole job, and
+Windows does not promise the order within it, so a descendant can be ended
+some microseconds after the child has gone and freed the fence. (The same
+stress run with the fence in place: 0 late writes in 800, from a child and a
+grandchild each writing every millisecond.) POSIX has the wider form of this
+limit: there a descendant that did not keep the lock's descriptor is not
+ended at all when the child goes.
 """
 
 import sys
