@@ -39,6 +39,8 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 from skulk.extensions.runtime_integrity import (
+    environment_command,
+    runtime_interpreter,
     seal_runtime,
     verify_or_adopt_installed_runtime,
 )
@@ -134,7 +136,13 @@ def _without_shared_write(directory: Path) -> None:
     group-writable, and the installed-runtime seal refuses any member another
     user could change, so every install on such a host failed. Links are left
     alone: the seal accepts only venv's interpreter aliases and lib64.
+
+    Windows has no such permission to remove. Everything created under the
+    owner-only generation folder takes that folder's access, which names the
+    account and SYSTEM only, and the seal refuses a member that grants more.
     """
+    if sys.platform == "win32":
+        return
     # os.walk yields only descendants; the root is created under the caller's
     # umask too, and a terminal install on Ubuntu leaves it group-writable.
     paths = [directory]
@@ -544,19 +552,12 @@ class RuntimeInstaller:
                         ).encode(),
                     )
                     await _execute(
-                        (
-                            str(Path(sys.executable).resolve()),
-                            "-I",
-                            "-m",
-                            "venv",
-                            "--symlinks",
-                            str(generation / "runtime"),
-                        ),
+                        environment_command(generation / "runtime"),
                         generation,
                         lock,
                         120,
                     )
-                    python = str(generation / "runtime" / "bin" / "python")
+                    python = str(runtime_interpreter(generation / "runtime"))
                     await _execute(
                         (
                             python,
@@ -583,7 +584,7 @@ class RuntimeInstaller:
                     await asyncio.to_thread(
                         _without_shared_write, generation / "runtime"
                     )
-                python = str(generation / "runtime" / "bin" / "python")
+                python = str(runtime_interpreter(generation / "runtime"))
                 await _execute(
                     (python, "-I", "-B", "-m", "pip", "--isolated", "check"),
                     generation,

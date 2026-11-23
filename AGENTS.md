@@ -257,10 +257,28 @@ administrator on Windows (`utils/_windows_account.py`). With these the plugin
 manager starts and answers on Windows; owner processes and the native kernel
 do not run there yet. Plugin-hosting code in `extensions/` never asks who owns
 a file or opens one link-safely by calling the operating system itself: it uses
-`is_private_directory`, `open_private` and `sync_directory` from the same
-module, and a guard in `utils/tests/test_runtime_files_platforms.py` lists the
-modules not yet moved (`runtime_integrity.py`, `local_setup.py` and the
-`service_*` modules). Take a module off that list when it is ported; add none.
+`is_private_directory`, `open_private`, `sync_directory`, `examine`,
+`open_unfollowed` and `create_file` from the same module, and a guard in
+`utils/tests/test_runtime_files_platforms.py` lists the modules not yet moved
+(`local_setup.py` and the `service_*` modules). Take a module off that list
+when it is ported; add none.
+An installed runtime is laid out differently per platform, and only
+`extensions/runtime_integrity.py` knows how: `runtime_interpreter()` gives the
+environment's interpreter (`runtime/bin/python`, or `runtime\Scripts\python.exe`
+on Windows) and `environment_command()` the `venv` call (`--symlinks`, or
+`--copies` on Windows, where an ordinary account cannot create links and `venv`
+would otherwise fall back to copies without saying so). Never spell either
+path out. The Windows environment contains no link: its interpreter is a
+launcher that finds the base through `home` in `pyvenv.cfg`. So the seal there
+refuses every reparse point (a junction needs no privilege), requires that
+each member is the account's and grants access to nobody but the account and
+SYSTEM (`examine().exclusive`; inherited access counts, because `venv` and `pip`
+create the files), checks that `home` is the base's folder, and records the
+base (its path and the digests of `python.exe` and `python3XX.dll`) in a `base`
+field that a POSIX seal does not have. The base on Windows is
+`sys._base_executable`: `sys.executable` is the environment's launcher there.
+Adoption after an application move or update rewrites `pyvenv.cfg` and that
+record; the launcher copies keep their sealed bytes.
 The signed model catalog and the capability store read TUF metadata through
 `foxlight_model_preservation.tuf_client.TufUpdater`, never python-tuf's own
 `Updater`: that one keeps its trusted root behind a symbolic link, which an

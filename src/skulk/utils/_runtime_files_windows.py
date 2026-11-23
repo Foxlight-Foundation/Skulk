@@ -19,6 +19,11 @@ and SYSTEM only, but its access list is not marked protected, so it does not
 count as owner-only: runtime state has to be created through these functions,
 as it is on POSIX where the mode bits are set at creation. A volume without
 access lists (FAT, exFAT) cannot hold owner-only state at all.
+
+Files that other programs create, such as an installed Python environment,
+are held to a second rule, :func:`examine`'s ``exclusive``: owned by the
+account, with an access list that grants nothing to anyone but the account
+and SYSTEM, whether those entries are its own or inherited.
 """
 
 import sys
@@ -34,9 +39,17 @@ import os
 import stat
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from foxlight_model_preservation import safefs
+
+from skulk.utils import _windows_account
+
+# What :class:`skulk.utils.runtime_files.Custody` is built from: kind, status,
+# owned, exclusive. That module imports this one, so the type stays there.
+_Kind = Literal["file", "directory", "link", "other"]
+_Custody = tuple[_Kind, os.stat_result, bool, bool]
 
 _ERROR_FILE_NOT_FOUND = 2
 _ERROR_PATH_NOT_FOUND = 3
@@ -45,6 +58,14 @@ _GENERIC_READ = 0x80000000
 _FILE_SHARE_ALL = 0x00000007
 _OPEN_EXISTING = 3
 _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_READ_CONTROL = 0x00020000
+_FILE_READ_ATTRIBUTES = 0x0080
+_SE_FILE_OBJECT = 1
+_DACL_SECURITY_INFORMATION = 0x00000004
+_ACL_SIZE_INFORMATION = 2
+_ACCESS_ALLOWED_ACE = 0
+_ACCESS_DENIED_ACE = 1
 
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _kernel32.CreateFileW.argtypes = (
@@ -60,11 +81,36 @@ _kernel32.CreateFileW.restype = wt.HANDLE
 _kernel32.CloseHandle.argtypes = (wt.HANDLE,)
 _kernel32.CloseHandle.restype = wt.BOOL
 
+_kernel32.LocalFree.argtypes = (wt.LPVOID,)
+_kernel32.LocalFree.restype = wt.LPVOID
+
+_advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+_advapi32.GetSecurityInfo.argtypes = (
+    wt.HANDLE,
+    ctypes.c_int,
+    wt.DWORD,
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(ctypes.c_void_p),
+)
+_advapi32.GetSecurityInfo.restype = wt.DWORD
+_advapi32.GetAclInformation.argtypes = (wt.LPVOID, wt.LPVOID, wt.DWORD, ctypes.c_int)
+_advapi32.GetAclInformation.restype = wt.BOOL
+_advapi32.GetAce.argtypes = (wt.LPVOID, wt.DWORD, ctypes.POINTER(ctypes.c_void_p))
+_advapi32.GetAce.restype = wt.BOOL
+
+
 # Typed views of the foreign functions, so their results are not ``Any``.
 _create_file: Callable[[str, int, int, None, int, int, None], int | None] = (
     _kernel32.CreateFileW
 )
 _close_handle: Callable[[int], int] = _kernel32.CloseHandle
+_local_free: Callable[..., object] = _kernel32.LocalFree
+_get_security_info: Callable[..., int] = _advapi32.GetSecurityInfo
+_get_acl_information: Callable[..., int] = _advapi32.GetAclInformation
+_get_ace: Callable[..., int] = _advapi32.GetAce
 _INVALID_HANDLE = wt.HANDLE(-1).value
 
 
@@ -122,6 +168,115 @@ def open_private(path: Path, flags: int) -> int:
         os.close(descriptor)
         raise
     return descriptor
+
+
+def _granted_to_no_other(descriptor: int) -> bool:
+    """Whether an open entry's access list names only this account and SYSTEM.
+
+    Inherited entries count like the entry's own, and the list need not be
+    protected: this is the rule for files other programs created, which take
+    their access from the folder they were created in. An entry of a kind
+    other than a plain grant or denial is someone this cannot vouch for.
+    """
+    access_list = ctypes.c_void_p()
+    security = ctypes.c_void_p()
+    result = _get_security_info(
+        msvcrt.get_osfhandle(descriptor),
+        _SE_FILE_OBJECT,
+        _DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        ctypes.byref(access_list),
+        None,
+        ctypes.byref(security),
+    )
+    if result != 0:
+        # A volume without access lists cannot keep anyone out.
+        return False
+    try:
+        if access_list.value is None:
+            # No access list at all grants everything to everyone.
+            return False
+        # ACL_SIZE_INFORMATION is three 32-bit counts: entries, then the
+        # bytes used and free.
+        size = ctypes.create_string_buffer(12)
+        if not _get_acl_information(access_list, size, 12, _ACL_SIZE_INFORMATION):
+            return False
+        allowed = {_windows_account.this_account(), _windows_account.SYSTEM_ACCOUNT}
+        for index in range(int.from_bytes(size.raw[:4], sys.byteorder)):
+            entry = ctypes.c_void_p()
+            if not _get_ace(access_list, index, ctypes.byref(entry)) or not entry.value:
+                return False
+            kind = ctypes.c_ubyte.from_address(entry.value).value
+            if kind == _ACCESS_DENIED_ACE:
+                continue
+            if kind != _ACCESS_ALLOWED_ACE:
+                return False
+            # A grant is a four-byte header, a four-byte mask, then the
+            # identifier of the account it names.
+            if _windows_account.identifier_text(entry.value + 8) not in allowed:
+                return False
+        return True
+    finally:
+        _local_free(security)
+
+
+def _custody(descriptor: int) -> _Custody:
+    information = os.fstat(descriptor)
+    kind: _Kind
+    if information.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        # A junction reports itself as a folder; the attribute is what says
+        # that the entry stands for another.
+        kind = "link"
+    elif stat.S_ISDIR(information.st_mode):
+        kind = "directory"
+    elif stat.S_ISREG(information.st_mode):
+        kind = "file"
+    else:
+        kind = "other"
+    return (
+        kind,
+        information,
+        safefs.owned(descriptor),
+        kind != "link" and _granted_to_no_other(descriptor),
+    )
+
+
+def examine(entry: Path | int) -> _Custody:
+    """Report what an entry is and who can change it, never following a link."""
+    if isinstance(entry, int):
+        return _custody(entry)
+    handle = _create_file(
+        str(entry),
+        _READ_CONTROL | _FILE_READ_ATTRIBUTES,
+        _FILE_SHARE_ALL,
+        None,
+        _OPEN_EXISTING,
+        # Opens the entry as itself, a folder included.
+        _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
+    if not handle or handle == _INVALID_HANDLE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    except BaseException:
+        _close_handle(handle)
+        raise
+    try:
+        return _custody(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def open_unfollowed(path: Path) -> int:
+    """Open an existing file for reading as itself; the caller closes it."""
+    return safefs.open_path(path, os.O_RDONLY)
+
+
+def create_file(path: Path, mode: int) -> int:
+    """Create a new file for writing; whatever is already there is a refusal."""
+    return safefs.open_path(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
 
 
 def read_private(path: Path, limit: int) -> bytes:

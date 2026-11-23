@@ -1,4 +1,20 @@
-"""Bounded installed-runtime integrity checks performed before Python startup."""
+"""Bounded installed-runtime integrity checks performed before Python startup.
+
+An installed runtime is a Python environment built by ``venv``, and the two
+platform families lay one out differently:
+
+- **POSIX.** The interpreter is ``runtime/bin/python``, a symbolic link that
+  ends at the base interpreter. The seal records where each such link ends
+  and the base's digest.
+- **Windows.** An ordinary account may not create symbolic links, so the
+  environment is built from copies. The interpreter is
+  ``runtime\\Scripts\\python.exe``, a small launcher that finds the base through
+  ``home`` in ``pyvenv.cfg``. The tree holds no link of any kind and the seal
+  refuses one; it records the base in a field of its own.
+
+Who owns a member and who can change it is asked through
+:mod:`skulk.utils.runtime_files`, which has a side for each platform.
+"""
 
 import base64
 import hashlib
@@ -18,6 +34,12 @@ from skulk.extensions.runtime_files import (
     is_desktop_metadata,
     read_private,
     write_private,
+)
+from skulk.utils.runtime_files import (
+    create_file,
+    examine,
+    open_unfollowed,
+    sync_directory,
 )
 
 # venv writes exactly these keys; anything else means the file is not one
@@ -40,10 +62,21 @@ class _Entry(BaseModel):
     target: str | None = Field(default=None, max_length=4096)
 
 
+class _Base(BaseModel):
+    """The base interpreter of an environment that reaches it without a link."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    path: str = Field(max_length=4096)
+    # The program and, beside it, the library that holds the interpreter.
+    files: dict[str, Digest] = Field(min_length=1, max_length=2)
+
+
 class _Seal(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     runtime_digest: Digest
     entries: dict[str, _Entry] = Field(min_length=1, max_length=20000)
+    # Windows only. A POSIX seal binds the base through its interpreter links.
+    base: _Base | None = None
 
 
 class _Rebase(BaseModel):
@@ -54,7 +87,48 @@ class _Rebase(BaseModel):
     rewritten: str = Field(max_length=_CONFIGURATION_LIMIT * 2)
 
 
+def runtime_interpreter(runtime: Path) -> Path:
+    """The interpreter that starts an installed runtime's code.
+
+    Args:
+        runtime: The environment's directory, ``<generation>/runtime``.
+
+    Returns:
+        The path ``venv`` gives the environment's interpreter on this
+        platform.
+    """
+    if sys.platform == "win32":
+        return runtime / "Scripts" / "python.exe"
+    return runtime / "bin" / "python"
+
+
+def environment_command(runtime: Path) -> tuple[str, ...]:
+    """The command that builds an empty environment on the current base.
+
+    Windows asks for copies outright. Asked for links there, ``venv`` tries,
+    fails for an ordinary account and falls back to copies, so the layout
+    would depend on who ran it.
+
+    Args:
+        runtime: Where to build the environment.
+
+    Returns:
+        The program and its arguments.
+    """
+    return (
+        str(_current_base()),
+        "-I",
+        "-m",
+        "venv",
+        "--copies" if sys.platform == "win32" else "--symlinks",
+        str(runtime),
+    )
+
+
 def _interpreter_names() -> frozenset[str]:
+    """The links ``venv`` makes to the base interpreter; none on Windows."""
+    if sys.platform == "win32":
+        return frozenset()
     return frozenset(
         {
             "bin/python",
@@ -75,15 +149,11 @@ def _inventory(directory: Path, base: Path | None) -> dict[str, _Entry]:
     The unresolved form exists only for adoption, which must inspect a runtime
     whose interpreter moved or was replaced and so cannot resolve it yet.
     """
-    root_info = directory.lstat()
-    if (
-        not stat.S_ISDIR(root_info.st_mode)
-        or root_info.st_uid != os.getuid()
-        or root_info.st_mode & 0o022
-    ):
+    root = examine(directory)
+    if root.kind != "directory" or not root.owned or not root.exclusive:
         raise ValueError("installed runtime directory is unsafe")
     entries: dict[str, _Entry] = {
-        ".": _Entry(kind="directory", mode=stat.S_IMODE(root_info.st_mode))
+        ".": _Entry(kind="directory", mode=stat.S_IMODE(root.info.st_mode))
     }
     interpreter_names = _interpreter_names()
     total = 0
@@ -96,11 +166,14 @@ def _inventory(directory: Path, base: Path | None) -> dict[str, _Entry]:
         if is_desktop_metadata(path):
             continue
         relative = path.relative_to(directory).as_posix()
-        info = path.lstat()
-        if info.st_uid != os.getuid():
+        member = examine(path)
+        if not member.owned:
             raise ValueError("installed runtime ownership differs")
-        mode = stat.S_IMODE(info.st_mode)
-        if stat.S_ISLNK(info.st_mode):
+        mode = stat.S_IMODE(member.info.st_mode)
+        if member.kind == "link":
+            if sys.platform == "win32":
+                # venv makes none there, and a junction needs no privilege.
+                raise ValueError("installed runtime contains an unsupported link")
             target = os.readlink(path)
             if (relative == "lib64" and target == "lib") or (
                 relative in interpreter_names and base is None
@@ -118,29 +191,63 @@ def _inventory(directory: Path, base: Path | None) -> dict[str, _Entry]:
                 )
             else:
                 raise ValueError("installed runtime contains an unsupported link")
-        elif mode & 0o022:
+        elif not member.exclusive:
             raise ValueError("installed runtime is writable by another user")
-        elif stat.S_ISDIR(info.st_mode):
+        elif member.kind == "directory":
             entry = _Entry(kind="directory", mode=mode)
-        elif stat.S_ISREG(info.st_mode):
-            total += info.st_size
+        elif member.kind == "file":
+            total += member.info.st_size
             if total > 536870912:
                 raise ValueError("installed runtime size exceeds bound")
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(descriptor, "rb") as source:
+            with os.fdopen(open_unfollowed(path), "rb") as source:
                 opened = os.fstat(source.fileno())
-                if (opened.st_ino, opened.st_dev) != (info.st_ino, info.st_dev):
+                if (opened.st_ino, opened.st_dev) != (
+                    member.info.st_ino,
+                    member.info.st_dev,
+                ):
                     raise ValueError("installed runtime changed during verification")
                 digest = hashlib.file_digest(source, "sha256").hexdigest()
             entry = _Entry(kind="file", mode=mode, digest=digest)
         else:
             raise ValueError("installed runtime contains an unsupported member")
         entries[relative] = entry
+    if (
+        sys.platform == "win32"
+        and base is not None
+        and (configuration := entries.get("pyvenv.cfg")) is not None
+        and configuration.kind == "file"
+        and _configured_home(directory / "pyvenv.cfg") != base.parent
+    ):
+        # The launcher starts whatever this names; no link says so here.
+        raise ValueError("installed interpreter is not the qualified base")
     return entries
 
 
 def _current_base() -> Path:
+    """The interpreter a new environment is built on, and a sealed one must use.
+
+    A Windows process started from an environment has that environment's
+    launcher as its executable, which is not a link to anything, so the base
+    is taken from where Python itself records it.
+    """
+    if sys.platform == "win32":
+        return Path(getattr(sys, "_base_executable", sys.executable)).resolve(
+            strict=True
+        )
     return Path(sys.executable).resolve(strict=True)
+
+
+def _sealed_base(base: Path) -> _Base | None:
+    """What a seal made now records about the base outside its entries."""
+    if sys.platform != "win32":
+        return None
+    files = {base.name: _file_digest(base)}
+    library = base.with_name(
+        f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+    )
+    if library.is_file():
+        files[library.name] = _file_digest(library)
+    return _Base(path=str(base), files=files)
 
 
 def _read_seal(generation: Path) -> _Seal:
@@ -150,10 +257,11 @@ def _read_seal(generation: Path) -> _Seal:
 
 
 def _write_seal(generation: Path, seal: _Seal) -> None:
-    write_private(
-        generation / "installed-files.json",
-        canonical_json(seal.model_dump(mode="json")),
-    )
+    record = seal.model_dump(mode="json")
+    if seal.base is None:
+        # A POSIX seal stays the bytes it has always been.
+        del record["base"]
+    write_private(generation / "installed-files.json", canonical_json(record))
 
 
 def seal_runtime(generation: Path, runtime_digest: str) -> None:
@@ -164,11 +272,13 @@ def seal_runtime(generation: Path, runtime_digest: str) -> None:
     it is not a replacement for publisher signatures or a same-user sandbox.
     Runtime processes must disable bytecode writes to keep the seal immutable.
     """
+    base = _current_base()
     _write_seal(
         generation,
         _Seal(
             runtime_digest=runtime_digest,
-            entries=_inventory(generation / "runtime", _current_base()),
+            entries=_inventory(generation / "runtime", base),
+            base=_sealed_base(base),
         ),
     )
 
@@ -181,17 +291,20 @@ def verify_installed_runtime(generation: Path, runtime_digest: str) -> None:
     is imported to perform this verification.
     """
     seal = _read_seal(generation)
-    if seal.runtime_digest != runtime_digest or seal.entries != _inventory(
-        generation / "runtime", _current_base()
+    base = _current_base()
+    if (
+        seal.runtime_digest != runtime_digest
+        or seal.entries != _inventory(generation / "runtime", base)
+        or seal.base != _sealed_base(base)
     ):
         raise ValueError("installed runtime integrity differs")
 
 
 def _read_configuration(path: Path) -> bytes:
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    descriptor = open_unfollowed(path)
     try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        custody = examine(descriptor)
+        if custody.kind != "file" or not custody.owned:
             raise ValueError("installed runtime integrity differs")
         with os.fdopen(descriptor, "rb", closefd=False) as source:
             content = source.read(_CONFIGURATION_LIMIT + 1)
@@ -202,15 +315,27 @@ def _read_configuration(path: Path) -> bytes:
     return content
 
 
+def _configured_home(path: Path) -> Path:
+    """The folder ``pyvenv.cfg`` says the base interpreter is in."""
+    for line in _read_configuration(path).decode("utf-8").splitlines():
+        key, separator, value = line.partition(" = ")
+        if separator and key == "home":
+            return Path(value)
+    raise ValueError("installed runtime configuration is not recognized")
+
+
 def _rebased_configuration(original: bytes, base: Path) -> bytes:
     """Rewrite only the interpreter-derived values venv recorded.
 
     Python itself reads only ``home``; the other interpreter values are
-    rewritten too so the file stays what venv would write for this base.
+    rewritten too so the file stays what venv would write for this base,
+    line endings included.
     """
     rewritten: list[str] = []
     seen: set[str] = set()
-    for line in original.decode("utf-8").splitlines():
+    text = original.decode("utf-8")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    for line in text.splitlines():
         key, separator, value = line.partition(" = ")
         if not separator or key not in _CONFIGURATION_KEYS or key in seen:
             raise ValueError("installed runtime configuration is not recognized")
@@ -237,31 +362,20 @@ def _rebased_configuration(original: bytes, base: Path) -> bytes:
         rewritten.append(f"{key} = {value}")
     if "home" not in seen or "version" not in seen:
         raise ValueError("installed runtime configuration is not recognized")
-    return ("\n".join(rewritten) + "\n").encode()
-
-
-def _sync_directory(directory: Path) -> None:
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    return (newline.join(rewritten) + newline).encode()
 
 
 def _replace_file(path: Path, content: bytes, mode: int) -> None:
     temporary = path.with_name(f".{path.name}.rebase-{uuid4().hex}")
-    descriptor = os.open(
-        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
-    )
+    # Created with the sealed mode itself, so the umask does not decide it.
+    descriptor = create_file(temporary, mode)
     try:
         with os.fdopen(descriptor, "wb") as target:
             target.write(content)
             target.flush()
-            # The umask must not decide the sealed mode.
-            os.fchmod(target.fileno(), mode)
             os.fsync(target.fileno())
         os.replace(temporary, path)
-        _sync_directory(path.parent)
+        sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -271,7 +385,7 @@ def _replace_link(path: Path, target: Path) -> None:
     try:
         temporary.symlink_to(target)
         os.replace(temporary, path)
-        _sync_directory(path.parent)
+        sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -299,6 +413,10 @@ def adopt_current_interpreter(generation: Path, runtime_digest: str) -> bool:
     change before the generation is resealed. An interrupted adoption resumes
     from a private journal holding the sealed configuration bytes.
 
+    A Windows environment has no interpreter links: there adoption rewrites
+    ``pyvenv.cfg`` and the seal's record of the base, and the launcher copies
+    keep their sealed bytes.
+
     Call only while holding the installer lock. Returns whether the generation
     was resealed; raises ValueError when the runtime cannot be adopted, which
     leaves it for ordinary verification to refuse.
@@ -314,10 +432,17 @@ def adopt_current_interpreter(generation: Path, runtime_digest: str) -> bool:
     }
     base = _current_base()
     base_digest = _file_digest(base)
-    if not sealed_links or all(
-        entry.target == str(base) and entry.digest == base_digest
-        for entry in sealed_links.values()
-    ):
+    current_base = _sealed_base(base)
+    if current_base is not None:
+        if seal.base is None:
+            raise ValueError("installed runtime integrity differs")
+        unchanged = seal.base == current_base
+    else:
+        unchanged = not sealed_links or all(
+            entry.target == str(base) and entry.digest == base_digest
+            for entry in sealed_links.values()
+        )
+    if unchanged:
         journal_path.unlink(missing_ok=True)
         return False
     if not sealed_links.keys() <= _interpreter_names():
@@ -388,7 +513,10 @@ def adopt_current_interpreter(generation: Path, runtime_digest: str) -> bool:
         mode=sealed_configuration.mode,
         digest=hashlib.sha256(rewritten).hexdigest(),
     )
-    _write_seal(generation, _Seal(runtime_digest=runtime_digest, entries=entries))
+    _write_seal(
+        generation,
+        _Seal(runtime_digest=runtime_digest, entries=entries, base=current_base),
+    )
     journal_path.unlink()
     return True
 

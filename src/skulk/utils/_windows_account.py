@@ -79,6 +79,27 @@ def _last_error(action: str) -> OSError:
     return ctypes.WinError(ctypes.get_last_error(), action)
 
 
+def identifier_text(identifier: int | None) -> str:
+    """A security identifier in its ``S-1-...`` form.
+
+    Args:
+        identifier: The address of the identifier in memory.
+
+    Returns:
+        The identifier as text.
+    """
+    text = wt.LPWSTR()
+    if not identifier or not _sid_to_text(identifier, ctypes.byref(text)):
+        raise _last_error("ConvertSidToStringSid")
+    try:
+        value = text.value
+    finally:
+        _local_free(text)
+    if not value:
+        raise OSError("account identifier is empty")
+    return value
+
+
 def process_account(process: int) -> str:
     """The security identifier of the account a process runs as, as text.
 
@@ -100,17 +121,7 @@ def process_account(process: int) -> str:
         ):
             raise _last_error("GetTokenInformation")
         # TOKEN_USER begins with a pointer to the account's identifier.
-        identifier = ctypes.c_void_p.from_buffer(buffer).value
-        text = wt.LPWSTR()
-        if not _sid_to_text(identifier, ctypes.byref(text)):
-            raise _last_error("ConvertSidToStringSid")
-        try:
-            value = text.value
-        finally:
-            _local_free(text)
-        if not value:
-            raise OSError("account identifier is empty")
-        return value
+        return identifier_text(ctypes.c_void_p.from_buffer(buffer).value)
     finally:
         _close_handle(token)
 
