@@ -29,7 +29,10 @@ OWNER_WAITS = (
 )
 # A stand-in for a plugin's owner, in one source for every platform. It takes
 # the supervisor lock as a real owner does, says it has started, and ends when
-# its launcher's end of the lifetime pipe closes.
+# its launcher's end of the lifetime pipe closes. It runs in the runtime's
+# isolated interpreter, so it takes the lock with the standard library alone:
+# on Windows that is the one byte, far past the end of the file, that
+# ``RuntimeLock`` locks there.
 OWNER_SOURCE = f"""import argparse,os,sys,time
 p=argparse.ArgumentParser()
 p.add_argument('--root');p.add_argument('--lifetime-fd',type=int)
@@ -37,8 +40,12 @@ p.add_argument('--lifetime-stdin',action='store_true')
 a=p.parse_args()
 f=os.open(os.path.join(a.root,'supervisor.lock'),os.O_CREAT|os.O_RDWR,0o600)
 if sys.platform=='win32':
-    import msvcrt
-    msvcrt.locking(f,msvcrt.LK_NBLCK,1)
+    import ctypes,msvcrt
+    class Region(ctypes.Structure):
+        _fields_=[('a',ctypes.c_void_p),('b',ctypes.c_void_p),('low',ctypes.c_ulong),('high',ctypes.c_ulong),('e',ctypes.c_void_p)]
+    region=Region(None,None,0xFFFFFFFF,0x7FFFFFFF,None)
+    held=ctypes.WinDLL('kernel32').LockFileEx(ctypes.c_void_p(msvcrt.get_osfhandle(f)),3,0,1,0,ctypes.byref(region))
+    assert held,'another owner holds the supervisor lock'
 else:
     import fcntl,signal
     fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
