@@ -266,11 +266,54 @@ def _depth(paths: Iterable[str]) -> tuple[int, int]:
     directory = file = 0
     for path in paths:
         if path.endswith("/"):
-            directory = max(directory, len(path) - 1)
+            directory = max(directory, _units(path) - 1)
         else:
-            file = max(file, len(path))
-            directory = max(directory, path.rfind("/"))
+            file = max(file, _units(path))
+            directory = max(directory, _units(path.rpartition("/")[0]))
     return directory, file
+
+
+def _units(text: str) -> int:
+    """The length of a path as Windows counts it: in UTF-16 code units.
+
+    A character outside the Basic Multilingual Plane, an emoji for one, is
+    one character to Python and two units to Windows.
+    """
+    if text.isascii():
+        return len(text)
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _launchers(archive: zipfile.ZipFile) -> list[str]:
+    """The program files ``pip`` generates in ``Scripts`` for a wheel's entry points.
+
+    They are not members of the wheel: ``pip`` writes ``<name>.exe`` for each
+    name under ``console_scripts`` and ``gui_scripts``. Read as data, within
+    a bound; a declaration this cannot read is ``pip``'s to report.
+    """
+    found: list[str] = []
+    for item in archive.infolist():
+        head, _, name = item.filename.partition("/")
+        if (
+            not head.endswith(".dist-info")
+            or name != "entry_points.txt"
+            or item.file_size > 65536
+        ):
+            continue
+        try:
+            text = archive.read(item).decode("utf-8")
+        except (UnicodeDecodeError, OSError, RuntimeError, zipfile.BadZipFile):
+            continue
+        section = None
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1].strip()
+            elif section in ("console_scripts", "gui_scripts") and "=" in line:
+                found.append("Scripts/" + line.partition("=")[0].strip() + ".exe")
+    return found
 
 
 def _wheel_depth(archive: zipfile.ZipFile, *, direct: bool) -> tuple[int, int]:
@@ -283,15 +326,17 @@ def _wheel_depth(archive: zipfile.ZipFile, *, direct: bool) -> tuple[int, int]:
             metadata folder.
     """
     members = archive.namelist()
+    placed = [_placed(member) for member in members]
     if direct:
-        members += sorted(
+        placed += sorted(
             {
-                head + "/direct_url.json"
+                _SITE + head + "/direct_url.json"
                 for head in (member.partition("/")[0] for member in members)
                 if head.endswith(".dist-info")
             }
         )
-    return _depth("runtime/" + _placed(member) for member in members)
+    placed += _launchers(archive)
+    return _depth("runtime/" + path for path in placed)
 
 
 @functools.cache
@@ -341,8 +386,10 @@ def runtime_path_excess(
     """How many characters too long a runtime's deepest path would be.
 
     Counts the environment ``venv`` builds, the ``pip`` it installs there, the
-    retained artifacts and every file of the given wheels. Compiled files are
-    not counted: Python skips one whose path is too long.
+    retained artifacts, every file of the given wheels and the program files
+    ``pip`` generates for their entry points. Lengths are in UTF-16 code
+    units, as Windows counts them. Compiled files are not counted: Python
+    skips one whose path is too long.
 
     Args:
         generation: The generation folder the runtime would be installed in.
@@ -357,7 +404,7 @@ def runtime_path_excess(
     if not _paths_are_limited():
         return 0
     directory, file = _generation_depth(artifacts, wheels)
-    below = len(str(generation)) + 1
+    below = _units(str(generation)) + 1
     return max(0, below + directory - _DIRECTORY_LIMIT, below + file - _FILE_LIMIT)
 
 

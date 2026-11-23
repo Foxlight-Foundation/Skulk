@@ -150,12 +150,14 @@ def test_environment_commands_follow_the_platform_layout(tmp_path: Path) -> None
         assert runtime_interpreter(runtime) == runtime / "bin" / "python"
 
 
-def _wheel(*members: str) -> bytes:
-    """A wheel with these members and nothing in them."""
+def _wheel(*members: str, entry_points: str | None = None) -> bytes:
+    """A wheel with these members, empty but for its entry-point declaration."""
     content = io.BytesIO()
     with zipfile.ZipFile(content, "w") as archive:
         for member in members:
             archive.writestr(member, b"")
+        if entry_points is not None:
+            archive.writestr("x-1.0.dist-info/entry_points.txt", entry_points)
     return content.getvalue()
 
 
@@ -253,6 +255,63 @@ def test_a_directory_is_refused_twelve_characters_before_a_file(
     fits = 259 - 1 - len(directory + name)
     assert runtime_path_excess(_generation(fits), (), long) == 0
     assert runtime_path_excess(_generation(fits + 1), (), long) == 1
+
+
+def test_a_generated_program_file_is_measured_though_no_wheel_holds_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pip writes ``Scripts/<name>.exe`` for an entry point; the wheel has no such member."""
+    _limit_paths(monkeypatch, (0, 0))
+    name = "n" * 200
+    declared = (
+        "# tools\n[other.group]\nignored = a:b\n\n"
+        f"[console_scripts]\n{name} = package.tool:main\n"
+        f"[gui_scripts]\n{name}w=package.tool:window\n"
+    )
+    wheels = (_wheel("package/tool.py", entry_points=declared),)
+    fits = 259 - 1 - len(f"runtime/Scripts/{name}w.exe")
+    assert runtime_path_excess(_generation(fits), (), wheels) == 0
+    assert runtime_path_excess(_generation(fits + 1), (), wheels) == 1
+    # Without the declaration the same wheel fits far deeper.
+    plain = (_wheel("package/tool.py"),)
+    assert runtime_path_excess(_generation(fits + 1), (), plain) == 0
+    # A declaration that cannot be read, or is too large to be one, counts
+    # as nothing: pip reports it.
+    unreadable = io.BytesIO()
+    with zipfile.ZipFile(unreadable, "w") as archive:
+        archive.writestr(
+            "x-1.0.dist-info/entry_points.txt", b"\xff\xfe[console_scripts]"
+        )
+        archive.writestr("y-1.0.dist-info/entry_points.txt", b"#" * 70000)
+    assert runtime_path_excess(_generation(100), (), (unreadable.getvalue(),)) == 0
+
+
+def test_a_path_is_measured_as_windows_counts_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A character outside the basic plane is two units to Windows, one to Python."""
+    _limit_paths(monkeypatch, (0, 0))
+    directory = "runtime/Lib/site-packages/package/" + "d" * 60
+    wheels = (_wheel("package/" + "d" * 60 + "/m.py"),)
+    fits = 247 - 1 - len(directory)
+    # In the installation's own folder: three such characters take six units.
+    emoji = Path("g" * (fits - 6) + "\U0001f98a" * 3)
+    assert len(str(emoji)) == fits - 3
+    assert runtime_path_excess(emoji, (), wheels) == 0
+    assert runtime_path_excess(Path("g" + str(emoji)), (), wheels) == 1
+    # In a wheel's member, for its folder and for its file. The folder is
+    # 59 characters to Python and 60 units to Windows.
+    member = "package/" + "d" * 58 + "\U0001f98a/m.py"
+    assert runtime_path_excess(_generation(fits), (), (_wheel(member),)) == 0
+    assert runtime_path_excess(_generation(fits + 1), (), (_wheel(member),)) == 1
+    name = "/" + "m" * 40 + "\U0001f98a.py"
+    fits = 259 - 1 - len(directory + name) - 1
+    long = (_wheel("package/" + "d" * 60 + name),)
+    assert runtime_path_excess(_generation(fits), (), long) == 0
+    assert runtime_path_excess(_generation(fits + 1), (), long) == 1
+    # Characters of the basic plane are one unit each, accents included.
+    accented = Path("\u00e9" * (247 - 1 - len(directory)))
+    assert runtime_path_excess(accented, (), wheels) == 0
 
 
 def test_the_measure_covers_pip_the_artifacts_and_the_environment(
