@@ -21,6 +21,9 @@ The data endpoint speaks one pinned chat dialect, version 1:
   "type", "code"}}``. A 400 whose ``code`` or ``type`` is
   ``context_length_exceeded`` is a context overflow. OpenAI puts that name in
   ``code`` beside the type ``invalid_request_error``; both places are read.
+* An engine may also open the stream and then refuse or fail: one event whose
+  object has an ``error`` member of that same shape and no choices, followed
+  by ``[DONE]``. That is a refusal too, never an empty reply.
 
 The dialect carries no tools, images or per-token log probabilities, so a
 request asking for one is answered with a clear error instead of a degraded
@@ -179,6 +182,21 @@ def response_id(line: str) -> str | None:
     return None
 
 
+def _engine_error_reason(detail: object, fallback: str) -> tuple[str, bool]:
+    """The engine's own bounded reason, and whether it names a context overflow."""
+    overflow = False
+    if isinstance(detail, dict):
+        fields = cast("dict[str, object]", detail)
+        message = str(fields.get("message") or "")
+        overflow = "context_length_exceeded" in (
+            fields.get("code"),
+            fields.get("type"),
+        )
+    else:
+        message = detail if isinstance(detail, str) else fallback
+    return " ".join(message.split())[:300] or fallback, overflow
+
+
 def raise_for_engine_status(response: httpx.Response) -> None:
     """Raise for an HTTP refusal, keeping the engine's own bounded reason.
 
@@ -195,22 +213,40 @@ def raise_for_engine_status(response: httpx.Response) -> None:
     detail = (
         cast("dict[str, object]", body).get("error") if isinstance(body, dict) else None
     )
-    kind = ""
-    if isinstance(detail, dict):
-        fields = cast("dict[str, object]", detail)
-        message = str(fields.get("message") or "")
-        kind = (
-            "context_length_exceeded"
-            if "context_length_exceeded" in (fields.get("code"), fields.get("type"))
-            else ""
-        )
-    else:
-        message = detail if isinstance(detail, str) else response.text
-    message = " ".join(message.split())[:300]
-    explanation = f"the engine answered {response.status_code}: " + (
-        message or response.reason_phrase
+    reason, overflow = _engine_error_reason(
+        detail if detail is not None else response.text, response.reason_phrase
     )
-    if response.status_code == 400 and kind == "context_length_exceeded":
+    explanation = f"the engine answered {response.status_code}: {reason}"
+    if response.status_code == 400 and overflow:
+        explanation = f"{CONTEXT_LENGTH_EXCEEDED_PREFIX} {explanation}"
+    raise RuntimeError(explanation)
+
+
+def raise_for_stream_error(line: str) -> None:
+    """Raise when a stream event is the engine's error event.
+
+    An engine can accept the request, open the stream and only then refuse it
+    (a prompt past the window) or fail while generating. It says so with one
+    event whose object has an ``error`` member and no choices. Read as an
+    ordinary event that line carries no text, so the caller would receive an
+    empty reply that looks finished. A context overflow keeps the API's
+    sentinel, as it does when the engine answers 400 before the stream opens.
+    """
+    if not line.startswith("data:") or '"error"' not in line:
+        return
+    try:
+        event = cast(object, json.loads(line[len("data:") :]))
+    except ValueError:
+        return
+    if not isinstance(event, dict):
+        return
+    fields = cast("dict[str, object]", event)
+    detail = fields.get("error")
+    if not detail or fields.get("choices"):
+        return
+    reason, overflow = _engine_error_reason(detail, "no reason given")
+    explanation = f"the engine ended the reply with an error: {reason}"
+    if overflow:
         explanation = f"{CONTEXT_LENGTH_EXCEEDED_PREFIX} {explanation}"
     raise RuntimeError(explanation)
 
@@ -539,6 +575,7 @@ class Runner(ServedConcurrentDispatch):
                     # request and releases its slot before the stream closes.
                     self._cancel_at_engine(engine_request)
                     break
+                raise_for_stream_error(line)
                 delta = parse_openai_sse_line(line)
                 if delta is None:
                     continue

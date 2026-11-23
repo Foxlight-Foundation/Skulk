@@ -48,6 +48,7 @@ from skulk.worker.runner.engine_package.runner import (
     Runner,
     chat_request_body,
     raise_for_engine_status,
+    raise_for_stream_error,
     response_id,
     unsupported_request_reason,
 )
@@ -104,6 +105,21 @@ class Engine(BaseHTTPRequestHandler):
             return event({"id": "chat-1", "choices": [{"delta": delta, "finish_reason": finish}]})
 
         try:
+            if config["mode"] == "stream-overflow":
+                # Some engines open the stream and then refuse inside it.
+                self.wfile.write(event({"id": "chat-1", "error": {
+                    "message": "the prompt is too long", "type": "invalid_request_error",
+                    "code": "context_length_exceeded", "param": "messages"}}))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+            if config["mode"] == "stream-failure":
+                self.wfile.write(piece({"content": "Hel"}))
+                self.wfile.write(event({"error": {"message": "the decoder failed",
+                                                  "type": "server_error"}}))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
             if config["mode"] == "slow":
                 deadline = time.monotonic() + 20
                 while not cancelled.is_set() and time.monotonic() < deadline:
@@ -464,6 +480,61 @@ def test_a_context_overflow_keeps_the_api_sentinel(
     assert len(errors) == 1
     assert errors[0].error_message.startswith(CONTEXT_LENGTH_EXCEEDED_PREFIX)
     assert "the prompt is too long" in errors[0].error_message
+
+
+def test_an_overflow_refused_inside_the_stream_is_not_an_empty_reply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An engine that answers 200 and then refuses must not read as a finished reply."""
+    harness = _Harness(tmp_path, monkeypatch, "stream-overflow")
+    harness.load()
+    try:
+        harness.runner._generate(_generation())
+    finally:
+        harness.close()
+
+    chunks = harness.chunks()
+    errors = [chunk for chunk in chunks if isinstance(chunk, ErrorChunk)]
+    assert len(errors) == 1
+    assert errors[0].error_message.startswith(CONTEXT_LENGTH_EXCEEDED_PREFIX)
+    assert "the prompt is too long" in errors[0].error_message
+    assert not [chunk for chunk in chunks if isinstance(chunk, TokenChunk)]
+
+
+def test_a_failure_inside_the_stream_ends_the_reply_with_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Text already sent stays sent; the reply ends as an error, not as a stop."""
+    harness = _Harness(tmp_path, monkeypatch, "stream-failure")
+    harness.load()
+    try:
+        harness.runner._generate(_generation())
+    finally:
+        harness.close()
+
+    chunks = harness.chunks()
+    errors = [chunk for chunk in chunks if isinstance(chunk, ErrorChunk)]
+    tokens = [chunk for chunk in chunks if isinstance(chunk, TokenChunk)]
+    assert len(errors) == 1
+    assert "the decoder failed" in errors[0].error_message
+    assert not errors[0].error_message.startswith(CONTEXT_LENGTH_EXCEEDED_PREFIX)
+    assert [chunk.text for chunk in tokens] == ["Hel"]
+    assert all(chunk.finish_reason is None for chunk in tokens)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'data: {"id": "c", "choices": [{"delta": {"content": "an \\"error\\" here"}}]}',
+        'data: {"id": "c", "choices": [], "usage": {"prompt_tokens": 1}}',
+        'data: {"id": "c", "error": null, "choices": [{"delta": {"content": "x"}}]}',
+        "data: [DONE]",
+        ": keep-alive",
+        'data: {"error"',
+    ],
+)
+def test_ordinary_stream_lines_are_not_read_as_errors(line: str) -> None:
+    raise_for_stream_error(line)
 
 
 def test_a_request_outside_the_dialect_never_reaches_the_engine(
