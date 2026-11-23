@@ -7,7 +7,7 @@ import stat
 import sys
 import time
 from pathlib import Path
-from typing import final
+from typing import Literal, NamedTuple, final
 from uuid import uuid4
 
 if sys.platform != "win32":
@@ -162,6 +162,109 @@ def open_private(path: Path, flags: int) -> int:
             or info.st_mode & 0o077
         ):
             raise ValueError("runtime file must be owner-only")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+class Custody(NamedTuple):
+    """One entry as itself: what it is, and who can change it."""
+
+    kind: Literal["file", "directory", "link", "other"]
+    """A link is any entry that stands for another: a symbolic link, and on
+    Windows a junction or any other reparse point."""
+    info: os.stat_result
+    """The entry's own status, never a link target's."""
+    owned: bool
+    """Whether it belongs to this account."""
+    exclusive: bool
+    """Whether no other account can change it. On POSIX that is no group or
+    other write permission. On Windows it is an access list that grants
+    nothing to anyone but this account and SYSTEM, inherited or not."""
+
+
+def examine(entry: Path | int) -> Custody:
+    """Report what an entry is and who can change it, without following a link.
+
+    Args:
+        entry: A path, examined as itself, or an open descriptor.
+
+    Returns:
+        The entry's custody. Whether a link is ``exclusive`` is not examined:
+        what matters about a link is where it points.
+
+    Raises:
+        OSError: When the entry cannot be examined, for example because it
+            does not exist.
+    """
+    if sys.platform == "win32":
+        return Custody(*_windows.examine(entry))
+    info = os.fstat(entry) if isinstance(entry, int) else entry.lstat()
+    kind: Literal["file", "directory", "link", "other"]
+    if stat.S_ISLNK(info.st_mode):
+        kind = "link"
+    elif stat.S_ISDIR(info.st_mode):
+        kind = "directory"
+    elif stat.S_ISREG(info.st_mode):
+        kind = "file"
+    else:
+        kind = "other"
+    return Custody(
+        kind=kind,
+        info=info,
+        owned=info.st_uid == os.getuid(),
+        exclusive=not info.st_mode & 0o022,
+    )
+
+
+def open_unfollowed(path: Path) -> int:
+    """Open an existing file for reading as itself, never through a link.
+
+    Nothing is checked about who owns it: pass the descriptor to
+    :func:`examine` for that.
+
+    Args:
+        path: The file to open.
+
+    Returns:
+        An open descriptor; the caller closes it.
+
+    Raises:
+        OSError: When it cannot be opened; a link in its place is one such
+            case.
+    """
+    if sys.platform == "win32":
+        return _windows.open_unfollowed(path)
+    return os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+
+
+def create_file(path: Path, mode: int) -> int:
+    """Create a new file for writing with exactly these permission bits.
+
+    Whatever is already at the path, a link included, is a refusal. The
+    process's umask does not decide the result. Windows has no permission
+    bits: a file created there takes its access from the folder it is in,
+    unless ``mode`` gives nobody else access, which makes it owner-only.
+
+    Args:
+        path: The file to create.
+        mode: Its permission bits.
+
+    Returns:
+        An open descriptor; the caller closes it.
+
+    Raises:
+        OSError: When it cannot be created, for example because something is
+            already there.
+    """
+    if sys.platform == "win32":
+        return _windows.create_file(path, mode)
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        os.fchmod(descriptor, mode)
     except BaseException:
         os.close(descriptor)
         raise

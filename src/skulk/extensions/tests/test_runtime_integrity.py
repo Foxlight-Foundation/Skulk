@@ -1,5 +1,6 @@
 """Installed-file mutations are refused without importing the private runtime."""
 
+import json
 import os
 import platform
 import shutil
@@ -7,6 +8,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -16,11 +18,56 @@ from skulk.extensions.runtime_install import (
     _without_shared_write,  # pyright: ignore[reportPrivateUsage]
 )
 from skulk.extensions.runtime_integrity import (
+    _current_base,  # pyright: ignore[reportPrivateUsage]
     adopt_current_interpreter,
+    environment_command,
+    runtime_interpreter,
     seal_runtime,
     verify_installed_runtime,
 )
 from skulk.extensions.tests.test_runtime_install import artifacts
+from skulk.utils.runtime_files import has_root_authority
+
+_WINDOWS = sys.platform == "win32"
+_MINOR = f"python{sys.version_info.major}.{sys.version_info.minor}"
+# On Windows, the file beside python.exe that holds the interpreter.
+_LIBRARY = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+# Where venv puts installed packages inside an environment.
+_SITE = (
+    Path("Lib") / "site-packages"
+    if _WINDOWS
+    else Path("lib") / _MINOR / "site-packages"
+)
+
+posix_only = pytest.mark.skipif(_WINDOWS, reason="POSIX permission bits and links")
+windows_only = pytest.mark.skipif(
+    not _WINDOWS, reason="a Windows base is a program and its library"
+)
+# The installer refuses an administrator, as it refuses root.
+installs = pytest.mark.skipif(
+    has_root_authority(), reason="the installer refuses root authority"
+)
+
+
+def _stand_in_link(link: Path, directory: Path) -> None:
+    """Put a link where a member should be, by the means an ordinary account has."""
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(directory), str(link))
+    else:
+        link.symlink_to(directory)
+
+
+def _let_another_account_write(path: Path) -> None:
+    if _WINDOWS:
+        subprocess.run(
+            ["icacls", str(path), "/grant", "*S-1-1-0:(W)"],
+            check=True,
+            capture_output=True,
+        )
+    else:
+        path.chmod(0o666)
 
 
 @pytest.mark.parametrize(
@@ -32,8 +79,12 @@ def test_installed_runtime_seal_detects_mutation(tmp_path: Path, fault: str) -> 
     runtime = tmp_path / "runtime"
     private_directory(runtime)
     write_private(runtime / "library.py", b"VALUE=7\n")
-    private_directory(runtime / "bin")
-    (runtime / "bin/python").symlink_to(Path(sys.executable).resolve())
+    interpreter = runtime_interpreter(runtime)
+    private_directory(interpreter.parent)
+    if _WINDOWS:
+        write_private(interpreter, b"launcher")
+    else:
+        interpreter.symlink_to(Path(sys.executable).resolve())
     seal_runtime(tmp_path, "a" * 64)
     verify_installed_runtime(tmp_path, "a" * 64)
     if fault == "changed":
@@ -43,12 +94,49 @@ def test_installed_runtime_seal_detects_mutation(tmp_path: Path, fault: str) -> 
     elif fault == "missing":
         (runtime / "library.py").unlink()
     elif fault == "mode":
-        (runtime / "library.py").chmod(0o666)
+        _let_another_account_write(runtime / "library.py")
+    elif fault == "link" and _WINDOWS:
+        # The same folder with the same launcher, reached through a junction.
+        elsewhere = tmp_path / "elsewhere"
+        interpreter.parent.rename(elsewhere)
+        _stand_in_link(interpreter.parent, elsewhere)
     elif fault == "link":
-        (runtime / "bin/python").unlink()
-        (runtime / "bin/python").symlink_to("/bin/sh")
+        interpreter.unlink()
+        interpreter.symlink_to("/bin/sh")
     with pytest.raises(ValueError):
         verify_installed_runtime(tmp_path, ("b" if fault == "identity" else "a") * 64)
+
+
+def test_a_seal_names_the_base_only_where_no_link_does(tmp_path: Path) -> None:
+    """A POSIX seal is the bytes it has always been; a Windows one adds the base."""
+    private_directory(tmp_path)
+    runtime = tmp_path / "runtime"
+    private_directory(runtime)
+    write_private(runtime / "library.py", b"VALUE=7\n")
+    seal_runtime(tmp_path, "a" * 64)
+    sealed = cast(
+        dict[str, dict[str, object]],
+        json.loads((tmp_path / "installed-files.json").read_bytes()),
+    )
+    if _WINDOWS:
+        assert sealed["base"].keys() == {"path", "executable", "library"}
+        assert sealed["base"]["path"] == str(_current_base())
+    else:
+        assert sealed.keys() == {"runtime_digest", "entries"}
+
+
+def test_environment_commands_follow_the_platform_layout(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    command = environment_command(runtime)
+    assert command[0] == str(_current_base())
+    assert command[1:4] == ("-I", "-m", "venv")
+    assert command[-1] == str(runtime)
+    if _WINDOWS:
+        assert command[4] == "--copies"
+        assert runtime_interpreter(runtime) == runtime / "Scripts" / "python.exe"
+    else:
+        assert command[4] == "--symlinks"
+        assert runtime_interpreter(runtime) == runtime / "bin" / "python"
 
 
 def test_desktop_metadata_does_not_unseal_a_generation(tmp_path: Path) -> None:
@@ -64,11 +152,12 @@ def test_desktop_metadata_does_not_unseal_a_generation(tmp_path: Path) -> None:
     write_private(runtime / "._library.py", b"appledouble")
     verify_installed_runtime(tmp_path, "a" * 64)
     (runtime / "lib/.DS_Store").unlink()
-    (runtime / "lib/.DS_Store").symlink_to(runtime / "library.py")
+    _stand_in_link(runtime / "lib/.DS_Store", tmp_path)
     with pytest.raises(ValueError):
         verify_installed_runtime(tmp_path, "a" * 64)
 
 
+@installs
 async def test_cached_stage_refuses_startup_injection_before_execution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -84,13 +173,7 @@ async def test_cached_stage_refuses_startup_injection_before_execution(
     generation = installer.root / "generations" / operation.runtime_digest
     verify_installed_runtime(generation, operation.runtime_digest)
     marker = tmp_path / "unexpected-startup"
-    site = (
-        generation
-        / "runtime/lib"
-        / f"python{sys.version_info.major}.{sys.version_info.minor}"
-        / "site-packages"
-    )
-    injection = site / "unexpected.pth"
+    injection = generation / "runtime" / _SITE / "unexpected.pth"
     injection.write_text(f"import pathlib; pathlib.Path({str(marker)!r}).touch()\n")
     os.chmod(injection, 0o600)
     with pytest.raises(ValueError, match="integrity differs"):
@@ -99,11 +182,14 @@ async def test_cached_stage_refuses_startup_injection_before_execution(
     assert installer.operation(operation.operation_id).state == "recovery_required"
 
 
-_MINOR = f"python{sys.version_info.major}.{sys.version_info.minor}"
-
-
 def _interpreter(directory: Path, content: bytes) -> Path:
     """A stand-in base interpreter; adoption hashes it but never runs it."""
+    if _WINDOWS:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "python.exe"
+        path.write_bytes(content)
+        (directory / _LIBRARY).write_bytes(b"library of " + content)
+        return path.resolve()
     (directory / "bin").mkdir(parents=True, exist_ok=True)
     path = directory / "bin" / _MINOR
     path.write_bytes(content)
@@ -112,17 +198,26 @@ def _interpreter(directory: Path, content: bytes) -> Path:
 
 
 def _environment(generation: Path, base: Path) -> Path:
-    """Lay out a runtime the way ``venv --symlinks`` does for ``base``."""
+    """Lay out a runtime the way ``venv`` does for ``base`` on this platform."""
     private_directory(generation)
     runtime = generation / "runtime"
-    private_directory(runtime)
-    site = runtime / "lib" / _MINOR / "site-packages"
+    if _WINDOWS:
+        # As venv leaves it: access inherited from the private generation.
+        runtime.mkdir()
+    else:
+        private_directory(runtime)
+    site = runtime / _SITE
     site.mkdir(parents=True)
     (site / "library.py").write_bytes(b"VALUE=7\n")
-    (runtime / "bin").mkdir()
-    (runtime / "bin" / _MINOR).symlink_to(base)
-    (runtime / "bin/python").symlink_to(_MINOR)
-    (runtime / "bin/python3").symlink_to(_MINOR)
+    interpreter = runtime_interpreter(runtime)
+    interpreter.parent.mkdir()
+    if _WINDOWS:
+        interpreter.write_bytes(b"launcher")
+    else:
+        (runtime / "bin" / _MINOR).symlink_to(base)
+        interpreter.symlink_to(_MINOR)
+        (runtime / "bin/python3").symlink_to(_MINOR)
+    # venv writes the file as text, so with the platform's line ending.
     (runtime / "pyvenv.cfg").write_text(
         f"home = {base.parent}\n"
         "include-system-site-packages = false\n"
@@ -130,10 +225,21 @@ def _environment(generation: Path, base: Path) -> Path:
         f"executable = {base}\n"
         f"command = {base} -m venv --without-pip {runtime}\n"
     )
-    for path in (runtime, *runtime.rglob("*")):
-        if not path.is_symlink():
-            path.chmod(0o755 if path.is_dir() else 0o644)
+    if not _WINDOWS:
+        for path in (runtime, *runtime.rglob("*")):
+            if not path.is_symlink():
+                path.chmod(0o755 if path.is_dir() else 0o644)
     return runtime
+
+
+def _base_of(runtime: Path) -> Path:
+    """The base interpreter an environment would start."""
+    if not _WINDOWS:
+        return runtime_interpreter(runtime).resolve()
+    for line in (runtime / "pyvenv.cfg").read_text().splitlines():
+        if line.startswith("home = "):
+            return Path(line.removeprefix("home = ")) / "python.exe"
+    raise AssertionError("pyvenv.cfg names no home")
 
 
 def _use_base(monkeypatch: pytest.MonkeyPatch, base: Path) -> None:
@@ -155,7 +261,7 @@ def test_adoption_keeps_a_runtime_across_an_interpreter_change(
     assert not adopt_current_interpreter(generation, "a" * 64)
     if change == "moved":
         new = _interpreter(tmp_path / "Moved.app", b"old interpreter")
-        (tmp_path / "Old.app/bin" / _MINOR).unlink()
+        old.unlink()
     else:
         new = _interpreter(tmp_path / "Old.app", b"updated interpreter")
     _use_base(monkeypatch, new)
@@ -163,10 +269,13 @@ def test_adoption_keeps_a_runtime_across_an_interpreter_change(
         verify_installed_runtime(generation, "a" * 64)
     assert adopt_current_interpreter(generation, "a" * 64)
     verify_installed_runtime(generation, "a" * 64)
-    assert (runtime / "bin/python").resolve() == new
+    assert _base_of(runtime) == new
     configuration = (runtime / "pyvenv.cfg").read_text()
     assert f"home = {new.parent}\n" in configuration
     assert f"command = {new} -m venv --without-pip {runtime}\n" in configuration
+    # Every line still ends the way venv ended it on this platform.
+    written = (runtime / "pyvenv.cfg").read_bytes()
+    assert written.count(os.linesep.encode()) == written.count(b"\n") == 5
     assert not (generation / "interpreter-rebase.json").exists()
     sealed = (generation / "installed-files.json").read_bytes()
     assert not adopt_current_interpreter(generation, "a" * 64)
@@ -191,7 +300,7 @@ def test_adoption_refuses_anything_but_an_interpreter_change(
         )
     _use_base(monkeypatch, old)
     seal_runtime(generation, "a" * 64)
-    site = runtime / "lib" / _MINOR / "site-packages"
+    site = runtime / _SITE
     if fault == "library":
         (site / "library.py").write_bytes(b"VALUE=8\n")
     elif fault == "added":
@@ -205,13 +314,67 @@ def test_adoption_refuses_anything_but_an_interpreter_change(
     with pytest.raises(ValueError):
         adopt_current_interpreter(generation, "a" * 64)
     assert (generation / "installed-files.json").read_bytes() == sealed
-    assert (runtime / "bin" / _MINOR).resolve() == old
+    assert _base_of(runtime) == old
 
 
-def test_interrupted_adoption_resumes_from_its_journal(
+@windows_only
+def test_a_changed_library_alone_is_an_interpreter_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A crash after pyvenv.cfg was rewritten still finishes on the next start."""
+    """On Windows the library is the interpreter; python.exe only starts it."""
+    base = _interpreter(tmp_path / "App", b"interpreter")
+    generation = tmp_path / "generation"
+    _environment(generation, base)
+    _use_base(monkeypatch, base)
+    seal_runtime(generation, "a" * 64)
+    base.with_name(_LIBRARY).write_bytes(b"updated library")
+    with pytest.raises(ValueError, match="integrity differs"):
+        verify_installed_runtime(generation, "a" * 64)
+    assert adopt_current_interpreter(generation, "a" * 64)
+    verify_installed_runtime(generation, "a" * 64)
+
+
+@windows_only
+@pytest.mark.parametrize("moment", ["sealing", "verification", "adoption"])
+def test_a_base_without_its_library_is_never_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, moment: str
+) -> None:
+    """Such a base cannot start, so no seal may come to name it as complete."""
+    base = _interpreter(tmp_path / "App", b"interpreter")
+    generation = tmp_path / "generation"
+    runtime = _environment(generation, base)
+    _use_base(monkeypatch, base)
+    if moment == "sealing":
+        base.with_name(_LIBRARY).unlink()
+        with pytest.raises(FileNotFoundError):
+            seal_runtime(generation, "a" * 64)
+        assert not (generation / "installed-files.json").exists()
+        return
+    seal_runtime(generation, "a" * 64)
+    sealed = (generation / "installed-files.json").read_bytes()
+    configuration = (runtime / "pyvenv.cfg").read_bytes()
+    if moment == "verification":
+        base.with_name(_LIBRARY).unlink()
+        with pytest.raises(FileNotFoundError):
+            verify_installed_runtime(generation, "a" * 64)
+    else:
+        moved = _interpreter(tmp_path / "Moved", b"interpreter")
+        moved.with_name(_LIBRARY).unlink()
+        _use_base(monkeypatch, moved)
+        with pytest.raises(FileNotFoundError):
+            adopt_current_interpreter(generation, "a" * 64)
+    assert (generation / "installed-files.json").read_bytes() == sealed
+    assert (runtime / "pyvenv.cfg").read_bytes() == configuration
+    assert not (generation / "interpreter-rebase.json").exists()
+
+
+@pytest.mark.parametrize(
+    "step", [pytest.param("link", marks=posix_only), "configuration", "seal"]
+)
+def test_interrupted_adoption_resumes_from_its_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """A crash at any step after the journal was written finishes on the next start."""
     old = _interpreter(tmp_path / "Old.app", b"old interpreter")
     generation = tmp_path / "generation"
     runtime = _environment(generation, old)
@@ -219,28 +382,43 @@ def test_interrupted_adoption_resumes_from_its_journal(
     seal_runtime(generation, "a" * 64)
     new = _interpreter(tmp_path / "New.app", b"new interpreter")
     _use_base(monkeypatch, new)
-    leftover = runtime / "bin" / f".{_MINOR}.rebase-{'0' * 32}"
+    if step == "link":
+        leftover = runtime / "bin" / f".{_MINOR}.rebase-{'0' * 32}"
+    else:
+        leftover = runtime / f".pyvenv.cfg.rebase-{'0' * 32}"
 
-    def crash(path: Path, target: Path) -> None:
-        del path
-        leftover.symlink_to(target)
+    def crash(*arguments: object) -> None:
+        if step == "link":
+            leftover.symlink_to(str(arguments[1]))
+        else:
+            leftover.write_bytes(b"half written")
         raise OSError("power lost")
 
     monkeypatch.setattr(
-        "skulk.extensions.runtime_integrity._replace_link", crash, raising=True
+        "skulk.extensions.runtime_integrity."
+        + {
+            "link": "_replace_link",
+            "configuration": "_replace_file",
+            "seal": "_write_seal",
+        }[step],
+        crash,
+        raising=True,
     )
     with pytest.raises(OSError, match="power lost"):
         adopt_current_interpreter(generation, "a" * 64)
-    assert f"home = {new.parent}\n" in (runtime / "pyvenv.cfg").read_text()
+    rewritten = f"home = {new.parent}\n" in (runtime / "pyvenv.cfg").read_text()
+    assert rewritten is (step != "configuration")
     assert (generation / "interpreter-rebase.json").exists()
     monkeypatch.undo()
     _use_base(monkeypatch, new)
     assert adopt_current_interpreter(generation, "a" * 64)
     verify_installed_runtime(generation, "a" * 64)
-    assert not leftover.is_symlink()
+    assert _base_of(runtime) == new
+    assert not leftover.is_symlink() and not leftover.exists()
     assert not (generation / "interpreter-rebase.json").exists()
 
 
+@installs
 async def test_locked_generation_adopts_a_moved_interpreter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -253,16 +431,36 @@ async def test_locked_generation_adopts_a_moved_interpreter(
         installer.root / "publisher-trust.json", trust.model_dump_json().encode()
     )
     operation = await installer.stage(metadata, source)
-    moved = tmp_path / "Moved.app/bin" / _MINOR
+    base = _current_base()
+    moved = (
+        tmp_path / "Moved.app" / base.name
+        if _WINDOWS
+        else tmp_path / "Moved.app/bin" / _MINOR
+    )
     moved.parent.mkdir(parents=True)
-    shutil.copy2(Path(sys.executable).resolve(), moved)
+    shutil.copy2(base, moved)
+    if _WINDOWS:
+        shutil.copy2(base.with_name(_LIBRARY), moved.with_name(_LIBRARY))
     _use_base(monkeypatch, moved.resolve())
     async with installer.locked_generation(operation.runtime_digest):
         pass
     generation = installer.root / "generations" / operation.runtime_digest
-    assert (generation / "runtime/bin/python").resolve() == moved.resolve()
+    assert _base_of(generation / "runtime") == moved.resolve()
 
 
+def _standalone_interpreter(prefix: Path) -> Path:
+    """Where a relocatable standalone CPython keeps its interpreter."""
+    return prefix / "python.exe" if _WINDOWS else prefix / "bin" / _MINOR
+
+
+def _run_from(monkeypatch: pytest.MonkeyPatch, interpreter: Path) -> None:
+    """Make ``interpreter`` the one this process appears to be running on."""
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+    if _WINDOWS:
+        monkeypatch.setattr(sys, "_base_executable", str(interpreter), raising=False)
+
+
+@installs
 @pytest.mark.slow
 async def test_relinked_runtime_starts_on_a_moved_standalone_interpreter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -274,11 +472,13 @@ async def test_relinked_runtime_starts_on_a_moved_standalone_interpreter(
     does, and starts the relinked environment's own Python.
     """
     prefix = Path(sys.base_prefix).resolve()
-    if not (prefix / "bin" / _MINOR).is_file() or "Python.framework" in str(prefix):
+    if not _standalone_interpreter(prefix).is_file() or "Python.framework" in str(
+        prefix
+    ):
         pytest.skip("needs a relocatable standalone CPython")
     old = tmp_path / "Old.app" / "python"
     shutil.copytree(prefix, old, symlinks=True)
-    monkeypatch.setattr(sys, "executable", str(old / "bin" / _MINOR))
+    _run_from(monkeypatch, _standalone_interpreter(old))
     source = tmp_path / "source"
     metadata, trust, host = artifacts(source)
     monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
@@ -290,13 +490,13 @@ async def test_relinked_runtime_starts_on_a_moved_standalone_interpreter(
     moved = tmp_path / "Moved.app" / "python"
     moved.parent.mkdir()
     old.rename(moved)
-    monkeypatch.setattr(sys, "executable", str(moved / "bin" / _MINOR))
+    _run_from(monkeypatch, _standalone_interpreter(moved))
     async with installer.locked_generation(operation.runtime_digest):
         pass
     runtime = installer.root / "generations" / operation.runtime_digest / "runtime"
     started = subprocess.run(
         (
-            str(runtime / "bin/python"),
+            str(runtime_interpreter(runtime)),
             "-I",
             "-B",
             "-c",
@@ -310,6 +510,7 @@ async def test_relinked_runtime_starts_on_a_moved_standalone_interpreter(
     assert started.stdout.split() == ["7", str(moved)]
 
 
+@posix_only
 def test_a_new_runtime_loses_group_and_other_write(tmp_path: Path) -> None:
     """Shared write bits copied from a base Python's templates are removed."""
     runtime = tmp_path / "runtime"
@@ -329,6 +530,7 @@ def test_a_new_runtime_loses_group_and_other_write(tmp_path: Path) -> None:
     assert (runtime / "bin" / "python").is_symlink()
 
 
+@posix_only
 @pytest.mark.slow
 async def test_a_base_python_with_group_writable_templates_still_installs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
