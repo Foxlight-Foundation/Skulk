@@ -35,6 +35,17 @@ open with no sharing (:func:`skulk.utils._runtime_files_windows.hold_children_fe
 The lock refuses a new holder while that file is held, which is until the
 child has ended.
 
+A *supervised* child (:func:`start` with ``supervised``) is the exception to
+*kill on close*. It is a long-running program with state of its own to put
+away, so its job only groups its tree: ``TerminateJobObject`` still ends all
+of it, but closing the job's last handle ends nothing. Its standard input is
+the reading end of a pipe whose writing end this process keeps, and when that
+end closes, by request or because this process died, the child reads end of
+input and ends itself. The children fence keeps the lock from any new holder
+until it has. If this process is itself inside a job that ends its members
+when it closes (a service wrapper, a CI runner), the child is a member of
+that job too and ends with it; nothing here can change that.
+
 What that covers exactly: the fence is held by the child, not by what the
 child starts. When this process dies, one operation ends the whole job, and
 Windows does not promise the order within it, so a descendant can be ended
