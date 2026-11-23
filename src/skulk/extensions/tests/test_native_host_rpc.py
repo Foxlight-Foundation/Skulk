@@ -4,7 +4,12 @@ import asyncio
 
 import pytest
 
-from skulk.extensions.native_host_protocol import Operation, RequestFrame, ResponseFrame
+from skulk.extensions.native_host_protocol import (
+    Operation,
+    Received,
+    RequestFrame,
+    ResponseFrame,
+)
 from skulk.extensions.native_host_rpc import Peer, Reply
 from skulk.extensions.tests.test_native_host_protocol import (
     Channels,
@@ -97,6 +102,58 @@ async def test_bidirectional_delegate_does_not_compete_for_the_reader(
         result.release()
     finally:
         await asyncio.gather(core_peer.close(), owner_peer.close())
+
+
+async def test_full_root_and_media_lanes_preserve_scoped_discovery(
+    channels: Channels,
+) -> None:
+    """Thirty-two active roots can each observe without starving their own calls."""
+    entered: asyncio.Queue[None] = asyncio.Queue()
+    release = asyncio.Event()
+
+    async def hold(_peer: Peer, _frame: RequestFrame, _body: bytes) -> Reply:
+        entered.put_nowait(None)
+        await release.wait()
+        return Reply("complete", {}, b"[]")
+
+    core = Peer(channels.core, hold, frozenset(), lambda: None)
+    owner = Peer(
+        channels.owner,
+        hold,
+        frozenset({"invoke", "stream_next", "describe_inference"}),
+        lambda: None,
+    )
+    calls: list[asyncio.Task[object]] = []
+    operations: tuple[tuple[Operation, int], ...] = (
+        ("invoke", 32),
+        ("stream_next", 96),
+        ("describe_inference", 32),
+    )
+    try:
+        async with asyncio.timeout(5):
+            for operation, count in operations:
+                for _ in range(count):
+                    calls.append(asyncio.create_task(core.request(operation, {})))
+                for _ in range(count):
+                    await entered.get()
+                with pytest.raises(ValueError, match="capacity"):
+                    await core.request(operation, {})
+                core.check()
+                owner.check()
+            release.set()
+            for value in await asyncio.gather(*calls):
+                assert isinstance(value, Received)
+                value.release()
+            result = await core.request("describe_inference", {})
+            result.release()
+            assert channels.core_budget.used == channels.owner_budget.used == 0
+    finally:
+        release.set()
+        for call in calls:
+            if not call.done():
+                call.cancel()
+        await asyncio.gather(*calls, return_exceptions=True)
+        await asyncio.gather(core.close(), owner.close())
 
 
 async def test_cancel_waits_for_remote_cleanup_without_replaying(

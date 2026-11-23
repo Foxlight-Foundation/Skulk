@@ -7,8 +7,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+- Admit the issued native7 inference/discovery cohort while retaining older signed closures; installed probes check each version's exact profile inventory, and scoped discovery omits unenrolled runtime generations while preserving other exact-granted destinations.
+
 ### SDK 1 candidate composition
 
+- Add protected invocation-scoped directory queries under the original caller's
+  narrowed permissions. Keep observation separate from execution authority,
+  recheck policy at delivery, and preserve cancellation and independent metadata
+  progress when root and stream lanes are full. Requires a matching owner/SDK.
 - Adopt the issued native author runtime 0.7.0rc5 with its exact binary and
   source receipts. Retain the 0.7.0rc3 and 0.7.0rc4 signed closures, refuse
   crossed source/binary claims, and include every receipt in frozen packaging.

@@ -1549,18 +1549,18 @@ an issued generation's pinned binary. Ordinary selection refuses changes between
 legacy, native transport and native calls interpretations, even when state/schema
 labels match. Such changes require explicit qualified state migration. Call-format
 startup alone does not advertise native invocation or delegation capacity.
-The PyInstaller native hook includes all four cohort receipts and the selected
+The PyInstaller native hook includes all six cohort receipts and the selected
 reader metadata/licenses, refusing a missing receipt during the build.
 
 Runtime envelope 5 and release envelope 3 independently select the published
-0.7.0rc3 or 0.7.0rc4 inference cohort: portable2/managed2/handshake2/transport2/composition3/
+0.7.0rc3, 0.7.0rc4, 0.7.0rc5 or 0.7.0rc7 inference cohort: portable2/managed2/handshake2/transport2/composition3/
 calls2. Their signature/digest domains are `skulk.runtime/5\0` and
-`skulk.release/3\0`. Staging validates the installed binary's complete thirteen
-profile inventory, exact manifest identity and calls2 framing. Native inference
+`skulk.release/3\0`. Staging validates the installed binary's thirteen baseline profiles plus
+`skulk.discovery/1` for native7, exact manifest identity and calls2 framing. Native inference
 registration retains full descriptor identities; it does not imply readiness.
 Old issued runtime closures and signing bytes remain unchanged. Selection also
 fences transitions into this interpretation, regardless of equal state labels.
-The frozen reader carries all four cohort receipts, retaining both issued inference closures.
+The frozen reader carries all six cohort receipts, retaining all four issued inference closures.
 
 `inference_callers.py` owns original client authentication and credential custody;
 `inference_enrollment.py` verifies exact signed, persisted destinations without
@@ -3665,3 +3665,18 @@ diagnostics. Keep its package version distinct from either earlier branch so
 normal `uv sync` rebuilds the combined source instead of retaining a cached wheel.
 These repairs preserve network protocol `v0.0.3`; their wire-neutral entries and
 original branch versions remain in `rust/networking/WIRE_COMPAT.md`.
+
+Invocation-scoped native discovery uses the protected `describe_inference` RPC
+with an explicit `query_kind="directory"`. Core looks up the actual peer/parent,
+validates scope/input correlation, intersects fresh listings with the original
+caller's narrowed targets/domains and current grants, and excludes ancestry/self
+identity across versions. One independent monotonic query slot remains owned
+through guarded physical delivery; cancellation, completion and revocation
+withdraw it. Metadata is bounded to4096 offers/8MiB. The mirrored RPC reserves32
+metadata slots independently of32 ordinary roots and96 media operations. This
+read-only metadata seam grants no permissions and implements no routing.
+
+The native7 discovery candidate omits observed runtime generations outside the
+original caller's current exact grants before constructing a scoped directory.
+Other permitted destinations remain visible; guarded delivery still repeats
+caller, policy, parent and owner checks. An empty eligible directory is valid.

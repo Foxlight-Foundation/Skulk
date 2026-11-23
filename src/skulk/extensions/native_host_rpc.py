@@ -46,12 +46,22 @@ type Handler = Callable[["Peer", RequestFrame, bytes], Awaitable[Reply]]
 _STREAM_OPERATIONS = frozenset({"stream_ready", "stream_input", "stream_next"})
 
 
-def _at_capacity(operation: Operation, total: int, media: int) -> bool:
+def _at_capacity(
+    operation: Operation, total: int, media: int, discovery: int = 0
+) -> bool:
     # The ordinary lane admits at most32 roots/metadata operations. Every active
     # stream needs independent readiness/input/output RPCs while its control root
-    # remains pending. Reserve three bounded media slots per possible root so
+    # remains pending. Read-only discovery also needs one separate bounded slot
+    # per root; otherwise all admitted roots could wait on a saturated lane.
+    # Reserve three bounded media slots per possible root so
     # admitted roots cannot consume the capacity needed to finish themselves.
-    return media >= 96 if operation in _STREAM_OPERATIONS else total - media >= 32
+    if operation == "describe_inference":
+        return discovery >= 32
+    return (
+        media >= 96
+        if operation in _STREAM_OPERATIONS
+        else total - media - discovery >= 32
+    )
 
 
 class _DeliveryWithdrawnError(Exception):
@@ -77,6 +87,8 @@ class Peer:
         self._handlers: dict[int, asyncio.Task[None]] = {}
         self._pending_media: set[int] = set()
         self._handler_media: set[int] = set()
+        self._pending_discovery: set[int] = set()
+        self._handler_discovery: set[int] = set()
         self._closed = False
         self.pump = asyncio.create_task(self._read())
 
@@ -101,7 +113,12 @@ class Peer:
         if not math.isfinite(cleanup_seconds) or cleanup_seconds <= 0:
             raise ValueError("native host cleanup resource bound refused")
         if (
-            _at_capacity(operation, len(self._pending), len(self._pending_media))
+            _at_capacity(
+                operation,
+                len(self._pending),
+                len(self._pending_media),
+                len(self._pending_discovery),
+            )
             or self._sequence >= 2**53 - 1
         ):
             raise ValueError("native host request capacity unavailable")
@@ -111,6 +128,8 @@ class Peer:
         self._pending[identifier] = future
         if operation in _STREAM_OPERATIONS:
             self._pending_media.add(identifier)
+        if operation == "describe_inference":
+            self._pending_discovery.add(identifier)
         written = False
         transferred = False
 
@@ -154,6 +173,7 @@ class Peer:
                 cleanup.result()
             self._pending.pop(identifier, None)
             self._pending_media.discard(identifier)
+            self._pending_discovery.discard(identifier)
             if future.done() and not future.cancelled():
                 error = future.exception()
                 if error is None and not transferred:
@@ -257,6 +277,7 @@ class Peer:
             value.release()
             self._handlers.pop(frame.request_id, None)
             self._handler_media.discard(frame.request_id)
+            self._handler_discovery.discard(frame.request_id)
 
     async def _read(self) -> None:
         try:
@@ -274,6 +295,7 @@ class Peer:
                                 frame.operation,
                                 len(self._handlers),
                                 len(self._handler_media),
+                                len(self._handler_discovery),
                             )
                         ):
                             raise ValueError(
@@ -282,6 +304,8 @@ class Peer:
                         self._incoming = frame.request_id
                         if frame.operation in _STREAM_OPERATIONS:
                             self._handler_media.add(frame.request_id)
+                        if frame.operation == "describe_inference":
+                            self._handler_discovery.add(frame.request_id)
                         self._handlers[frame.request_id] = asyncio.create_task(
                             self._handle(value, frame)
                         )
@@ -322,6 +346,7 @@ class Peer:
         if self._handlers.get(identifier) is task:
             self._handlers.pop(identifier, None)
             self._handler_media.discard(identifier)
+            self._handler_discovery.discard(identifier)
         if not task.cancelled() and task.exception() is not None:
             self._fence()
 
