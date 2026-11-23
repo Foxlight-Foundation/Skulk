@@ -45,15 +45,16 @@ _NOT_YET_PORTED = frozenset(
 )
 
 # Takes the lock, then hands the terminal over to the program it is given.
-_HANDS_OVER = (
+_TAKES_THE_LOCK = (
     "import os, sys\n"
     "from pathlib import Path\n"
     "from skulk.utils.owned_process import hand_over\n"
     "from skulk.utils.runtime_files import RuntimeLock\n"
     "lock = RuntimeLock(Path(sys.argv[1]), 'installer.lock')\n"
     "os.set_inheritable(lock.descriptor, True)\n"
-    "hand_over([sys.executable, '-I', '-c', sys.argv[2], *sys.argv[3:]], lock=lock.path)\n"
 )
+_THEN_HANDS_OVER = "hand_over([sys.executable, '-I', '-c', sys.argv[2], *sys.argv[3:]], lock=lock.path)\n"
+_HANDS_OVER = _TAKES_THE_LOCK + _THEN_HANDS_OVER
 # Says it is ready, echoes one line of input on each output stream, and exits
 # with a code of its own.
 _CONVERSES = (
@@ -553,6 +554,53 @@ def test_handing_over_on_windows_ends_what_the_program_left_running(root: Path) 
     time.sleep(0.3)
     assert (root / "child.log").stat().st_size == before
     RuntimeLock(root, "installer.lock").close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows copies the streams")
+@pytest.mark.parametrize("closed", [1, 2])
+def test_a_closed_output_stream_on_windows_reaches_the_program_as_the_null_device(
+    root: Path, closed: int
+) -> None:
+    """A copy of standard input must not land in the closed stream's place.
+
+    A copied descriptor takes the lowest free number, which is the closed
+    stream's own, so the stream would then look open and the program would be
+    given a second, read-only standard input to write its output to.
+    """
+    other = 3 - closed
+    program = (
+        "import os, stat, sys\n"
+        f"device = stat.S_ISCHR(os.fstat({closed}).st_mode)\n"
+        "try:\n"
+        f"    os.write({closed}, b'discarded')\n"
+        "    written = True\n"
+        "except OSError:\n"
+        "    written = False\n"
+        "line = sys.stdin.readline().strip()\n"
+        f"os.write({other}, f'{{device}} {{written}} {{line}}'.encode())\n"
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            # Closed last, so that nothing this process opens takes its place.
+            _TAKES_THE_LOCK + f"os.close({closed})\n" + _THEN_HANDS_OVER,
+            str(root),
+            program,
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+    try:
+        streams = process.communicate(b"typed\n", timeout=30)
+        assert streams[other - 1] == b"True True typed"
+        assert streams[closed - 1] == b""
+        assert process.returncode == 0
+    finally:
+        process.kill()
+        process.wait()
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows exit codes are 32 bits")

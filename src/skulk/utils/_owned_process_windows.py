@@ -624,17 +624,42 @@ async def start(arguments: Sequence[str], *, cwd: Path, lock: Path) -> JobChild:
     return JobChild(pid, reader, transport, exit_code, job)
 
 
-def _own_standard_stream(descriptor: int, flags: int) -> int:
-    """A private copy of one of this process's standard streams, to pass on.
-
-    A process started without one, or with one already closed, gets the null
-    device in its place, as a POSIX program does when its parent closed the
-    stream before starting it.
-    """
+def _is_open(descriptor: int) -> bool:
+    """Whether this process has that descriptor open."""
     try:
-        return os.dup(descriptor)
+        os.fstat(descriptor)
     except OSError:
-        return os.open(os.devnull, flags)
+        return False
+    return True
+
+
+def _own_standard_streams() -> list[int]:
+    """Private copies of this process's standard input, output and error.
+
+    A stream this process was started without, or has closed, is the null
+    device in the copy, as a POSIX program finds it when its parent closed the
+    stream before starting it.
+
+    Which streams are open is settled before the first copy is made. A copy
+    takes the lowest free descriptor number, which is the number of a closed
+    standard stream, so asking afterwards would find a copy of standard input
+    there and hand the program a read-only handle to write its output to.
+    """
+    wanted = ((0, os.O_RDONLY), (1, os.O_WRONLY), (2, os.O_WRONLY))
+    is_open = [_is_open(descriptor) for descriptor, _ in wanted]
+    copies: list[int] = []
+    try:
+        for (descriptor, flags), present in zip(wanted, is_open, strict=True):
+            if present:
+                with contextlib.suppress(OSError):
+                    copies.append(os.dup(descriptor))
+                    continue
+            copies.append(os.open(os.devnull, flags))
+    except BaseException:
+        for copy in copies:
+            os.close(copy)
+        raise
+    return copies
 
 
 def _wait_until_finished(members: list[int]) -> None:
@@ -670,11 +695,7 @@ def run_in_place(arguments: Sequence[str], *, lock: Path) -> int:
     """
     job = _new_job()
     try:
-        copies = [
-            _own_standard_stream(0, os.O_RDONLY),
-            _own_standard_stream(1, os.O_WRONLY),
-            _own_standard_stream(2, os.O_WRONLY),
-        ]
+        copies = _own_standard_streams()
         ignored: dict[int, object] = {}
         try:
             fence = hold_children_fence(lock)
