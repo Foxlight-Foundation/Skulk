@@ -18,7 +18,9 @@ The data endpoint speaks one pinned chat dialect, version 1:
   a delta carries ``content`` and may carry ``reasoning_content``; the final
   event before ``[DONE]`` carries ``usage`` with an empty ``choices`` list.
 * A refusal is an HTTP error whose JSON body is ``{"error": {"message",
-  "type"}}``. Type ``context_length_exceeded`` on a 400 is a context overflow.
+  "type", "code"}}``. A 400 whose ``code`` or ``type`` is
+  ``context_length_exceeded`` is a context overflow. OpenAI puts that name in
+  ``code`` beside the type ``invalid_request_error``; both places are read.
 
 The dialect carries no tools, images or per-token log probabilities, so a
 request asking for one is answered with a clear error instead of a degraded
@@ -197,7 +199,11 @@ def raise_for_engine_status(response: httpx.Response) -> None:
     if isinstance(detail, dict):
         fields = cast("dict[str, object]", detail)
         message = str(fields.get("message") or "")
-        kind = str(fields.get("type") or "")
+        kind = (
+            "context_length_exceeded"
+            if "context_length_exceeded" in (fields.get("code"), fields.get("type"))
+            else ""
+        )
     else:
         message = detail if isinstance(detail, str) else response.text
     message = " ".join(message.split())[:300]

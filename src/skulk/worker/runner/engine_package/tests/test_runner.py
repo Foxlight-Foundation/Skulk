@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import cast
 
+import httpx
 import psutil
 import pytest
 
@@ -46,6 +47,7 @@ from skulk.worker.runner.engine_package import request as request_module
 from skulk.worker.runner.engine_package.runner import (
     Runner,
     chat_request_body,
+    raise_for_engine_status,
     response_id,
     unsupported_request_reason,
 )
@@ -416,6 +418,35 @@ def test_cancel_reaches_the_engine_through_the_adapter(
         isinstance(chunk, TokenChunk) and chunk.finish_reason is None
         for chunk in harness.chunks()
     )
+
+
+@pytest.mark.parametrize(
+    ("error", "overflow"),
+    [
+        ({"message": "too long", "type": "context_length_exceeded"}, True),
+        (
+            {
+                "message": "too long",
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+                "param": "messages",
+            },
+            True,
+        ),
+        ({"message": "bad field", "type": "invalid_request_error", "code": None}, False),
+    ],
+)
+def test_a_context_overflow_is_read_from_the_code_or_the_type(
+    error: dict[str, object], overflow: bool
+) -> None:
+    """OpenAI names the overflow in ``code``; the first dialect draft used ``type``."""
+    response = httpx.Response(400, json={"error": error})
+
+    with pytest.raises(RuntimeError) as raised:
+        raise_for_engine_status(response)
+
+    assert str(raised.value).startswith(CONTEXT_LENGTH_EXCEEDED_PREFIX) is overflow
+    assert str(error["message"]) in str(raised.value)
 
 
 def test_a_context_overflow_keeps_the_api_sentinel(
