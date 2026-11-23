@@ -2802,18 +2802,18 @@ an issued generation's pinned binary. Ordinary selection refuses changes between
 legacy, native transport and native calls interpretations, even when state/schema
 labels match. Such changes require explicit qualified state migration. Call-format
 startup alone does not advertise native invocation or delegation capacity.
-The PyInstaller native hook includes all four cohort receipts and the selected
+The PyInstaller native hook includes all five cohort receipts and the selected
 reader metadata/licenses, refusing a missing receipt during the build.
 
 Runtime envelope 5 and release envelope 3 independently select the published
-0.7.0rc3 or 0.7.0rc4 inference cohort: portable2/managed2/handshake2/transport2/composition3/
+0.7.0rc3, 0.7.0rc4 or 0.7.0rc5 inference cohort: portable2/managed2/handshake2/transport2/composition3/
 calls2. Their signature/digest domains are `skulk.runtime/5\0` and
 `skulk.release/3\0`. Staging validates the installed binary's complete thirteen
 profile inventory, exact manifest identity and calls2 framing. Native inference
 registration retains full descriptor identities; it does not imply readiness.
 Old issued runtime closures and signing bytes remain unchanged. Selection also
 fences transitions into this interpretation, regardless of equal state labels.
-The frozen reader carries all four cohort receipts, retaining both issued inference closures.
+The frozen reader carries all five cohort receipts, retaining all three issued inference closures.
 
 `inference_callers.py` owns original client authentication and credential custody;
 `inference_enrollment.py` verifies exact signed, persisted destinations without
