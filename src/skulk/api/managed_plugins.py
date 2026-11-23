@@ -54,6 +54,10 @@ from skulk.extensions.runtime_download import (
     SourceStatus,
     SourceUpdate,
 )
+from skulk.extensions.runtime_integrity import (
+    RuntimePathTooLongError,
+    path_refusal_sentence,
+)
 from skulk.extensions.runtime_manager import (
     CatalogInstall,
     CatalogInstallation,
@@ -217,6 +221,10 @@ def create_managed_plugins_router(
             raise HTTPException(
                 status_code=409,
                 detail=catalog_refusal_sentence(refused.code, refused.status),
+            ) from None
+        except RuntimePathTooLongError as refused:
+            raise HTTPException(
+                status_code=409, detail=path_refusal_sentence(refused.excess)
             ) from None
         except ValueError:
             raise HTTPException(

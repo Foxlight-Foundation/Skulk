@@ -24,6 +24,7 @@ from skulk.extensions.runtime_download import (
     SourceStatus,
 )
 from skulk.extensions.runtime_files import read_private
+from skulk.extensions.runtime_integrity import path_refusal_sentence
 from skulk.extensions.runtime_manager import OperationRequest, manager_request
 from skulk.extensions.tests.test_managed_services import connect, manager_fixture
 from skulk.extensions.tests.test_runtime_install import artifacts
@@ -227,14 +228,26 @@ async def test_http_scopes_lifecycle_status_and_api_loss(
             assert reviewed.status_code == 200
             review = ReleaseReview.model_validate_json(reviewed.content)
             install_url = prefix + "/installations/managed.fixture/install"
+            install_body = {
+                "operation_id": "3" * 32,
+                "runtime_digest": review.runtime_digest,
+                "expected_source_revision": review.source_revision,
+            }
+            # An installation folder too deep for Windows is refused by name,
+            # with the request and before anything is journaled.
+            with monkeypatch.context() as limited:
+                limited.setattr(
+                    "skulk.extensions.runtime_install.runtime_path_excess",
+                    lambda *_: 7,
+                )
+                too_long = await client.post(
+                    install_url, headers=bearer, json=install_body
+                )
+            assert too_long.status_code == 409
+            assert too_long.json() == {"detail": path_refusal_sentence(7)}
+            assert downloads.current() is None
             installed = await client.post(
-                install_url,
-                headers=bearer,
-                json={
-                    "operation_id": "3" * 32,
-                    "runtime_digest": review.runtime_digest,
-                    "expected_source_revision": review.source_revision,
-                },
+                install_url, headers=bearer, json=install_body
             )
             assert installed.status_code == 200
             assert (
@@ -246,6 +259,17 @@ async def test_http_scopes_lifecycle_status_and_api_loss(
             interrupted = downloads.current()
             assert interrupted is not None and interrupted.state == "recovery_required"
             recovery_url = install_url + "/" + "3" * 32 + "/recover"
+            with monkeypatch.context() as limited:
+                limited.setattr(
+                    "skulk.extensions.runtime_install.runtime_path_excess",
+                    lambda *_: 7,
+                )
+                too_long = await client.post(
+                    recovery_url, headers=bearer, json={"expected_source_revision": 1}
+                )
+            assert too_long.status_code == 409
+            assert too_long.json() == {"detail": path_refusal_sentence(7)}
+            assert downloads.current() == interrupted
             refused_recovery = await client.post(
                 recovery_url, headers=bearer, json={"expected_source_revision": 2}
             )

@@ -14,20 +14,30 @@ platform families lay one out differently:
 
 Who owns a member and who can change it is asked through
 :mod:`skulk.utils.runtime_files`, which has a side for each platform.
+
+Windows also limits how long a path may be unless the machine has long paths
+switched on. :func:`runtime_path_excess` says whether a runtime's files would
+fit below a generation folder, so the installer can refuse before it writes
+any of them.
 """
 
 import base64
+import functools
 import hashlib
+import io
+import json
 import os
 import platform
 import re
 import stat
 import sys
+import zipfile
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from skulk.extensions.runtime_artifacts import Digest, canonical_json
 from skulk.extensions.runtime_files import (
@@ -125,6 +135,284 @@ def environment_command(runtime: Path) -> tuple[str, ...]:
         "--copies" if sys.platform == "win32" else "--symlinks",
         str(runtime),
     )
+
+
+# Windows without long paths refuses to create a directory whose path is 248
+# characters or longer, and a file whose path is 260 or longer. Measured with
+# ``venv`` on such a machine: it builds with its deepest directory at 247 and
+# fails at 248. A compiled file (``.pyc``) whose path is too long is skipped
+# without an error, so compiled files are not counted.
+_DIRECTORY_LIMIT: Final = 247
+_FILE_LIMIT: Final = 259
+_SITE: Final = "Lib/site-packages/"
+# pip writes the metadata files it generates under a temporary name beside
+# the final one, then renames: the final name, eight random characters and
+# ``.tmp`` (``adjacent_tmp_file`` in pip 26.3, which Python 3.13 bundles).
+_TEMPORARY: Final = "x" * 8 + ".tmp"
+# What a generation holds whatever is installed into it: the installer's own
+# record, the environment's folders and interpreter, and the longest name
+# adoption gives a file it is replacing.
+_FIXED_PATHS: Final = (
+    "installer-evidence.log",
+    "runtime/Lib/site-packages/",
+    "runtime/Scripts/pythonw.exe",
+    "runtime/.pyvenv.cfg.rebase-" + "0" * 32,
+)
+
+PATH_TOO_LONG: Final = "runtime_path_too_long"
+"""Manager error naming an installation whose folder path is too long."""
+
+_EXCESS_BOUND: Final = 32767
+
+
+class RuntimePathTooLongError(ValueError):
+    """A runtime whose files would not fit below its installation's folder.
+
+    Carries one number, how many characters too long the deepest path would
+    be, so the manager, the guided installer and the plugin routes can say
+    what to change without disclosing any path.
+    """
+
+    def __init__(self, excess: int) -> None:
+        super().__init__(
+            f"the runtime needs a path {excess} characters longer than this machine allows"
+        )
+        self.excess = excess
+
+
+def path_refusal_sentence(excess: int) -> str:
+    """The one sentence every surface uses for an installation path that is too long.
+
+    Args:
+        excess: How many characters too long the deepest path would be.
+
+    Returns:
+        What happened and the two ways to fix it.
+    """
+    characters = "1 character" if excess == 1 else f"{excess} characters"
+    return (
+        f"This plugin's files need a path {characters} longer than Windows allows on "
+        "this machine. Switch on long paths in Windows, or keep Skulk's files in a "
+        "folder with a shorter path, then install again."
+    )
+
+
+def path_refusal_payload(refused: RuntimePathTooLongError) -> bytes:
+    """Encode the refusal as a fixed vocabulary: a code and one integer."""
+    return (
+        json.dumps({"error": PATH_TOO_LONG, "excess": refused.excess}, sort_keys=True)
+        + "\n"
+    ).encode()
+
+
+def path_refusal(response: Mapping[str, JsonValue]) -> RuntimePathTooLongError | None:
+    """Rebuild the refusal from the manager's fixed vocabulary, or nothing.
+
+    Args:
+        response: A manager response.
+
+    Returns:
+        The refusal when the response names one with a usable number;
+        ``None`` for anything else, which stays undisclosed.
+    """
+    excess = response.get("excess")
+    if (
+        response.get("error") != PATH_TOO_LONG
+        or not isinstance(excess, int)
+        or isinstance(excess, bool)
+        or not 0 < excess <= _EXCESS_BOUND
+    ):
+        return None
+    return RuntimePathTooLongError(excess)
+
+
+def _paths_are_limited() -> bool:
+    """Whether this process, and the programs it starts, are held to the short limit.
+
+    Windows applies the short limit unless the machine has long paths switched
+    on and the program says it can use them, which Python's does.
+    """
+    if sys.platform != "win32":
+        return False
+    import ctypes
+
+    try:
+        enabled = ctypes.WinDLL("ntdll").RtlAreLongPathsEnabled
+    except (AttributeError, OSError):
+        return True
+    enabled.restype = ctypes.c_ubyte
+    enabled.argtypes = ()
+    return not enabled()
+
+
+def _placed(member: str) -> str:
+    """Where ``pip`` puts one member of a wheel, below a Windows environment."""
+    head, _, rest = member.partition("/")
+    if head.endswith(".data"):
+        scheme, _, inner = rest.partition("/")
+        if scheme in ("purelib", "platlib"):
+            return _SITE + inner
+        if scheme == "scripts":
+            return "Scripts/" + inner
+        if scheme == "data":
+            return inner
+    # Headers go elsewhere under a shorter name; counting them here can only
+    # refuse a little early, never let a path through that does not fit.
+    return _SITE + member
+
+
+def _depth(paths: Iterable[str]) -> tuple[int, int]:
+    """The longest directory and the longest file among ``/``-separated paths.
+
+    A path ending in ``/`` is a directory. Every other path is a file, and the
+    directory that holds it is counted too.
+    """
+    directory = file = 0
+    for path in paths:
+        if path.endswith("/"):
+            directory = max(directory, _units(path) - 1)
+        else:
+            file = max(file, _units(path))
+            directory = max(directory, _units(path.rpartition("/")[0]))
+    return directory, file
+
+
+def _units(text: str) -> int:
+    """The length of a path as Windows counts it: in UTF-16 code units.
+
+    A character outside the Basic Multilingual Plane, an emoji for one, is
+    one character to Python and two units to Windows.
+    """
+    if text.isascii():
+        return len(text)
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def _launchers(archive: zipfile.ZipFile) -> list[str]:
+    """The program files ``pip`` generates in ``Scripts`` for a wheel's entry points.
+
+    They are not members of the wheel: ``pip`` writes ``<name>.exe`` for each
+    name under ``console_scripts`` and ``gui_scripts``. Read as data, within
+    a bound; a declaration this cannot read is ``pip``'s to report.
+    """
+    found: list[str] = []
+    for item in archive.infolist():
+        head, _, name = item.filename.partition("/")
+        if (
+            not head.endswith(".dist-info")
+            or name != "entry_points.txt"
+            or item.file_size > 65536
+        ):
+            continue
+        try:
+            text = archive.read(item).decode("utf-8")
+        except (UnicodeDecodeError, OSError, RuntimeError, zipfile.BadZipFile):
+            continue
+        section = None
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1].strip()
+            elif section in ("console_scripts", "gui_scripts") and "=" in line:
+                found.append("Scripts/" + line.partition("=")[0].strip() + ".exe")
+    return found
+
+
+def _wheel_depth(archive: zipfile.ZipFile, *, direct: bool) -> tuple[int, int]:
+    """How deep one wheel's files go below a generation folder.
+
+    Besides the wheel's members, ``pip`` generates ``INSTALLER`` in the
+    wheel's metadata folder, and writes it under a longer temporary name
+    first. ``RECORD`` is written the same way and is shorter.
+
+    Args:
+        archive: The wheel.
+        direct: Whether ``pip`` installs it from a file named on its command
+            line, in which case it generates ``direct_url.json`` as well.
+    """
+    members = archive.namelist()
+    placed = [_placed(member) for member in members]
+    generated = ("INSTALLER", "direct_url.json") if direct else ("INSTALLER",)
+    placed += sorted(
+        _SITE + head + "/" + name + _TEMPORARY
+        for head in {member.partition("/")[0] for member in members}
+        if head.endswith(".dist-info")
+        for name in generated
+    )
+    placed += _launchers(archive)
+    return _depth("runtime/" + path for path in placed)
+
+
+@functools.cache
+def _pip_depth() -> tuple[int, int]:
+    """How deep the ``pip`` that ``venv`` puts in every runtime goes.
+
+    ``venv`` installs the wheel that ships inside the standard library's
+    ``ensurepip``. A base without one counts as nothing; ``venv`` then
+    reports its own failure.
+    """
+    import ensurepip
+
+    try:
+        bundled = sorted(
+            Path(ensurepip.__file__).parent.joinpath("_bundled").glob("pip-*.whl")
+        )
+        if not bundled:
+            return 0, 0
+        with zipfile.ZipFile(bundled[-1]) as archive:
+            return _wheel_depth(archive, direct=False)
+    except (OSError, zipfile.BadZipFile):
+        return 0, 0
+
+
+def _generation_depth(
+    artifacts: Iterable[str], wheels: Iterable[bytes]
+) -> tuple[int, int]:
+    """The longest directory and file a runtime puts below its generation folder."""
+    depths = [
+        _depth(_FIXED_PATHS),
+        _depth("artifacts/" + name for name in artifacts),
+        _pip_depth(),
+    ]
+    for content in wheels:
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                depths.append(_wheel_depth(archive, direct=True))
+        except zipfile.BadZipFile:
+            # Not this check's refusal: ``pip`` reports an unreadable wheel.
+            continue
+    return max(depth[0] for depth in depths), max(depth[1] for depth in depths)
+
+
+def runtime_path_excess(
+    generation: Path, artifacts: Iterable[str] = (), wheels: Iterable[bytes] = ()
+) -> int:
+    """How many characters too long a runtime's deepest path would be.
+
+    Counts the environment ``venv`` builds, the ``pip`` it installs there, the
+    retained artifacts, every file of the given wheels, the metadata ``pip``
+    generates for each (under the temporary names it writes them by) and the
+    program files it generates for their entry points. Lengths are in UTF-16 code
+    units, as Windows counts them. Compiled files are not counted: Python
+    skips one whose path is too long.
+
+    Args:
+        generation: The generation folder the runtime would be installed in.
+        artifacts: The names of the artifact files kept beside the runtime.
+        wheels: The contents of the wheels installed into it, when they are
+            at hand. Without them the answer covers everything else.
+
+    Returns:
+        Zero when everything fits, and always zero where no such limit
+        applies: on POSIX, and on Windows with long paths switched on.
+    """
+    if not _paths_are_limited():
+        return 0
+    directory, file = _generation_depth(artifacts, wheels)
+    below = _units(str(generation)) + 1
+    return max(0, below + directory - _DIRECTORY_LIMIT, below + file - _FILE_LIMIT)
 
 
 def _interpreter_names() -> frozenset[str]:
