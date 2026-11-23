@@ -28,6 +28,7 @@ from skulk.shared.types.commands import (
     PlaceInstance,
 )
 from skulk.shared.types.common import ModelId, NodeId
+from skulk.shared.types.engine_packages import NodeEnginePackage
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import NodeResources
@@ -796,6 +797,70 @@ def test_preview_names_the_engine_a_placement_installs() -> None:
         )
         is None
     )
+
+
+def test_preview_quotes_the_size_the_installing_node_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A node that keeps no package list still quotes the size the installer reported."""
+    import skulk.engines.on_demand as on_demand_module
+
+    api = _build_api()
+    installer = NodeId("installer-node")
+    build = "d" * 64
+    other_build = "e" * 64
+
+    def offer(
+        digest: str, size: int | None, tag: str = "tensorfold-rocm"
+    ) -> NodeEnginePackage:
+        return NodeEnginePackage(
+            engine_id="foxlight.tensorfold",
+            lane=tag.rpartition("-")[2],
+            backend_tag=tag,
+            status="offered",
+            build=digest,
+            download_bytes=size,
+        )
+
+    api._telemetry_view.apply(  # pyright: ignore[reportPrivateUsage]
+        NodeTelemetry(
+            node_id=installer,
+            info=NodeResources(
+                backends=frozenset({"tensorfold-rocm"}),
+                on_demand_backends=frozenset({"tensorfold-rocm"}),
+                installable_engine_builds={"tensorfold-rocm": build},
+                engine_packages=(
+                    offer(build, 1500 * 1024**2, "tensorfold-cuda"),
+                    offer(other_build, None),
+                    offer(build, 612 * 1024**2),
+                ),
+            ),
+        )
+    )
+
+    def kept_list_size(digest: str | None) -> int:
+        return 7 * 1024**2 if digest == other_build else 0
+
+    monkeypatch.setattr(
+        on_demand_module, "engine_package_download_bytes", kept_list_size
+    )
+
+    def quoted(digest: str) -> int:
+        notice = api._engine_install_for_instance(  # pyright: ignore[reportPrivateUsage]
+            _single_node_instance(
+                str(installer),
+                resolved_backend="tensorfold-rocm",
+                resolved_engine_build=digest,
+            )
+        )
+        assert notice is not None
+        return notice.approximate_download_bytes
+
+    # The size is the one reported for this tag and this build, not another
+    # lane's; a report without a size falls back to this node's kept list.
+    assert quoted(build) == 612 * 1024**2
+    assert quoted(other_build) == 7 * 1024**2
+    assert quoted("f" * 64) == 0
 
 
 def test_preview_names_the_engine_package_a_placement_installs(

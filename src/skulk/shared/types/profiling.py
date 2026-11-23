@@ -430,7 +430,8 @@ class NodeResources(CamelCaseModel):
             "One entry per engine package lane this node holds or may "
             "install, for the cluster's engines report (GET /v1/engines). "
             "Placement does not read it: it admits and stamps from backends, "
-            "engine_builds and installable_engine_builds."
+            "engine_builds and installable_engine_builds. A placement preview "
+            "quotes an offered build's download size from it."
         ),
     )
 

@@ -5172,13 +5172,28 @@ class API:
                 continue
             package = package_engine_of(backend)
             if package is not None and backend in resources.on_demand_backends:
-                # The size comes from this node's own kept package list; a
-                # build it does not list is announced without a size.
+                # The installing node's own report of the build it offers is
+                # the first source: this node may keep no package list (it may
+                # not install packages itself) or an older one. Failing that,
+                # this node's kept list; a build neither names is announced
+                # without a size.
+                build = shard.resolved_engine_build if shard is not None else None
+                reported = next(
+                    (
+                        offer.download_bytes
+                        for offer in resources.engine_packages
+                        if offer.status == "offered"
+                        and offer.backend_tag == backend
+                        and offer.build == build
+                        and offer.download_bytes
+                    ),
+                    None,
+                )
                 sizes[package] = max(
                     sizes.get(package, 0),
-                    engine_package_download_bytes(
-                        shard.resolved_engine_build if shard is not None else None
-                    ),
+                    reported
+                    if reported is not None
+                    else engine_package_download_bytes(build),
                 )
                 extension_only[package] = False
                 installing.setdefault(package, []).append(str(node_id))
