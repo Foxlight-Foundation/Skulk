@@ -26,6 +26,15 @@ lock checks: the lock cannot be taken again until the child has ended. The
 job ends the rest of the tree in the same operation as the child, though
 Windows does not promise the order within it.
 
+A long-running program that has state of its own to put away is started with
+:func:`start_supervised` instead. It is given one end of a *lifetime pipe* and
+this process keeps the other. Closing this end, which also happens when this
+process dies, is the request to shut down: the child reads end of input and
+ends itself in good order. Such a child is not ended by the system when this
+process dies, on either platform; it holds the lock's fence until it has
+gone. A child that does not go when asked is ended with its whole tree, as
+any owned child is.
+
 A terminal command that ends by running an installed program in its own place
 uses :func:`hand_over`. POSIX replaces the process. Windows cannot, so there
 the program runs as an owned child on the same terminal and this process
@@ -37,7 +46,7 @@ import contextlib
 import os
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import NoReturn, Protocol, final
 
@@ -89,6 +98,18 @@ class OwnedProcess(Protocol):
         ...
 
 
+class SupervisedProcess(OwnedProcess, Protocol):
+    """An owned child that is asked to shut down before it is made to."""
+
+    def release(self) -> None:
+        """Ask the child to shut down: close this process's end of its lifetime pipe.
+
+        The child reads end of input. Quiet when already released. ``close``
+        releases too.
+        """
+        ...
+
+
 def isolated_environment() -> dict[str, str]:
     """The fixed environment an owned child starts with.
 
@@ -107,10 +128,13 @@ if sys.platform != "win32":
     class _SessionChild:
         """A child that leads its own session and holds the lock's descriptor."""
 
-        def __init__(self, process: asyncio.subprocess.Process) -> None:
+        def __init__(
+            self, process: asyncio.subprocess.Process, lifetime: int | None = None
+        ) -> None:
             self._process = process
             assert process.stdout is not None
             self.stdout = process.stdout
+            self._lifetime = lifetime
 
         @property
         def pid(self) -> int:
@@ -132,8 +156,14 @@ if sys.platform != "win32":
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(self._process.pid, signal.SIGKILL)
 
+        def release(self) -> None:
+            if self._lifetime is not None:
+                os.close(self._lifetime)
+                self._lifetime = None
+
         async def close(self) -> None:
-            """Nothing to release: the session ends with its last member."""
+            """Nothing but the lifetime pipe: the session ends with its last member."""
+            self.release()
 
 
 async def start_owned(
@@ -168,6 +198,65 @@ async def start_owned(
             env=isolated_environment(),
         )
     )
+
+
+async def start_supervised(
+    arguments: Callable[[int | None], Sequence[str]], *, cwd: Path, lock: RuntimeLock
+) -> SupervisedProcess:
+    """Start a long-running program that is told when this process is done with it.
+
+    The child gets :func:`isolated_environment`, one combined output stream,
+    and the reading end of a lifetime pipe. This process keeps the writing
+    end, which no other child of it can inherit. When that end closes, by
+    ``release`` or because this process died, the child reads end of input.
+
+    How the child receives its end differs, so the caller builds the command
+    line from what it is told:
+
+    - POSIX: an inherited descriptor, whose number is passed to ``arguments``.
+      The child has no standard input, leads a new session and inherits the
+      lock's descriptor, exactly as before this function existed.
+    - Windows: its standard input, and ``arguments`` is passed ``None``. The
+      child is a member of a job that can end its whole tree, and holds the
+      lock's children fence.
+
+    Unlike :func:`start_owned`, the system does not end the child when this
+    process dies. It is expected to end itself at end of input, and the lock
+    cannot be taken again until it has.
+
+    Args:
+        arguments: Given the descriptor number the child will find its end of
+            the pipe at, or ``None`` when that is its standard input; returns
+            the program and its arguments.
+        cwd: The directory the program starts in.
+        lock: The held lock that fences that directory.
+
+    Returns:
+        The started child. The caller calls ``release``, waits, calls ``kill``
+        when it gives up waiting, and then awaits ``close``.
+    """
+    if sys.platform == "win32":
+        return await _windows.start(
+            arguments(None), cwd=cwd, lock=lock.path, supervised=True
+        )
+    reader, writer = os.pipe()
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *arguments(reader),
+            cwd=cwd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+            pass_fds=(reader, lock.descriptor),
+            env=isolated_environment(),
+        )
+    except BaseException:
+        os.close(writer)
+        raise
+    finally:
+        os.close(reader)
+    return _SessionChild(process, writer)
 
 
 def hand_over(arguments: Sequence[str], *, lock: Path) -> NoReturn:

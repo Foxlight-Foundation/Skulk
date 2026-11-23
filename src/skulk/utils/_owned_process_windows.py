@@ -270,27 +270,33 @@ def isolated_environment() -> dict[str, str]:
     }
 
 
-def _new_job() -> int:
-    """Create a job that ends its processes when its last handle closes."""
+def _new_job(*, kill_on_close: bool = True) -> int:
+    """Create a job, by default one that ends its processes when its last handle closes.
+
+    Without *kill on close* the job only groups the tree, so that it can be
+    ended as one; its processes go on when this process's handle closes.
+    """
     job = _create_job(None, None)
     if not job:
         raise _failure("could not create a job")
     try:
-        _set_limits(job, admit_new_members=True)
+        _set_limits(job, admit_new_members=True, kill_on_close=kill_on_close)
     except BaseException:
         _close_handle(job)
         raise
     return job
 
 
-def _set_limits(job: int, *, admit_new_members: bool) -> None:
-    """Keep *kill on close*; optionally stop the job taking any new process."""
-    basic = _BasicLimits(LimitFlags=_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+def _set_limits(
+    job: int, *, admit_new_members: bool, kill_on_close: bool = True
+) -> None:
+    """Set *kill on close* or not; optionally stop the job taking any new process."""
+    closing = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE if kill_on_close else 0
+    basic = _BasicLimits(LimitFlags=closing)
     if not admit_new_members:
         # With a member present, a limit of one refuses every further one.
         basic = _BasicLimits(
-            LimitFlags=_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            | _JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+            LimitFlags=closing | _JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
             ActiveProcessLimit=1,
         )
     limits = _ExtendedLimits(BasicLimitInformation=basic)
@@ -519,6 +525,7 @@ class JobChild:
         transport: asyncio.ReadTransport,
         exit_code: asyncio.Future[int],
         job: int,
+        lifetime: int | None = None,
     ) -> None:
         """Bind what :func:`start` created; use that function, not this one."""
         self.pid = pid
@@ -527,6 +534,7 @@ class JobChild:
         self._exit_code = exit_code
         self._job: int | None = job
         self._ended: list[int] = []
+        self._lifetime = lifetime
 
     @property
     def returncode(self) -> int | None:
@@ -540,6 +548,15 @@ class JobChild:
         """Wait for the child to end; return its exit code."""
         return await asyncio.shield(self._exit_code)
 
+    def release(self) -> None:
+        """Close this process's end of the child's lifetime pipe, when it has one.
+
+        The child, whose standard input is the other end, reads end of input.
+        """
+        if self._lifetime is not None:
+            os.close(self._lifetime)
+            self._lifetime = None
+
     def kill(self) -> None:
         """End every process in the job; quiet when none is left."""
         if self._job is not None:
@@ -552,6 +569,7 @@ class JobChild:
         long that takes, so nothing of theirs is still open in the directory
         the caller goes on to use.
         """
+        self.release()
         self._transport.close()
         if self._job is None:
             return
@@ -562,7 +580,9 @@ class JobChild:
         self._job = None
 
 
-async def start(arguments: Sequence[str], *, cwd: Path, lock: Path) -> JobChild:
+async def start(
+    arguments: Sequence[str], *, cwd: Path, lock: Path, supervised: bool = False
+) -> JobChild:
     """Start a program as a member of a new job, with its output as a stream.
 
     Args:
@@ -570,6 +590,10 @@ async def start(arguments: Sequence[str], *, cwd: Path, lock: Path) -> JobChild:
         cwd: The directory the program starts in.
         lock: The path of the lock that fences ``cwd``. The child holds that
             lock's children fence open, alone, for as long as it runs.
+        supervised: Give the child the reading end of a lifetime pipe as its
+            standard input, and do not have Windows end it when this process
+            dies: it ends itself at end of input. Otherwise the child has no
+            input and its job is *kill on close*.
 
     Raises:
         ValueError: The lock's children fence is not an owner-only file.
@@ -577,25 +601,34 @@ async def start(arguments: Sequence[str], *, cwd: Path, lock: Path) -> JobChild:
             holds the fence.
     """
     loop = asyncio.get_running_loop()
-    job = _new_job()
+    job = _new_job(kill_on_close=not supervised)
+    lifetime: int | None = None
     try:
         # The reading end is overlapped, as the event loop requires; the
         # writing end is the plain handle a child expects for its output.
         read_end, write_end = windows_utils.pipe(overlapped=(True, False))
         try:
             fence = hold_children_fence(lock)
-            empty_input = os.open(os.devnull, os.O_RDONLY)
             try:
-                process, pid = _create_in_job(
-                    arguments,
-                    cwd,
-                    job,
-                    (msvcrt.get_osfhandle(empty_input), write_end),
-                    msvcrt.get_osfhandle(fence),
-                    console=False,
-                )
+                if supervised:
+                    # Neither end is inheritable as created. The child is
+                    # handed the reading end by name; the writing end stays
+                    # here and reaches no other program this process starts.
+                    child_input, lifetime = os.pipe()
+                else:
+                    child_input = os.open(os.devnull, os.O_RDONLY)
+                try:
+                    process, pid = _create_in_job(
+                        arguments,
+                        cwd,
+                        job,
+                        (msvcrt.get_osfhandle(child_input), write_end),
+                        msvcrt.get_osfhandle(fence),
+                        console=False,
+                    )
+                finally:
+                    os.close(child_input)
             finally:
-                os.close(empty_input)
                 # From here the child's copy is the only one.
                 os.close(fence)
         except BaseException:
@@ -619,9 +652,11 @@ async def start(arguments: Sequence[str], *, cwd: Path, lock: Path) -> JobChild:
             await asyncio.shield(_until_finished(_end_all(job)))
             raise
     except BaseException:
+        if lifetime is not None:
+            os.close(lifetime)
         _close_handle(job)
         raise
-    return JobChild(pid, reader, transport, exit_code, job)
+    return JobChild(pid, reader, transport, exit_code, job, lifetime)
 
 
 def _is_open(descriptor: int) -> bool:

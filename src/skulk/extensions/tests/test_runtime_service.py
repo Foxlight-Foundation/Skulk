@@ -1,27 +1,54 @@
 """Actual isolated generic owner launch, trust refusal and bounded process lifetime."""
 
 import asyncio
+import dataclasses
+import json
+import os
+import subprocess
+import sys
+import time
 import zipfile
 from pathlib import Path
 
+import psutil
 import pytest
 
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
 from skulk.extensions.runtime_selection import RuntimeSelector
-from skulk.extensions.runtime_service import RuntimeService, RuntimeServiceStatus
+from skulk.extensions.runtime_service import (
+    RuntimeService,
+    RuntimeServiceStatus,
+    lifetime_arguments,
+)
 from skulk.extensions.tests.test_runtime_install import artifacts
 
-OWNER_SOURCE = """import argparse,fcntl,os,signal,time
+# How the stand-in owner waits for the end of its launcher: at the place the
+# launcher named on its command line.
+OWNER_WAITS = (
+    "(sys.stdin.buffer if a.lifetime_stdin else os.fdopen(a.lifetime_fd,'rb')).read()"
+)
+# A stand-in for a plugin's owner, in one source for every platform. It takes
+# the supervisor lock as a real owner does, says it has started, and ends when
+# its launcher's end of the lifetime pipe closes.
+OWNER_SOURCE = f"""import argparse,os,sys,time
 p=argparse.ArgumentParser()
 p.add_argument('--root');p.add_argument('--lifetime-fd',type=int)
+p.add_argument('--lifetime-stdin',action='store_true')
 a=p.parse_args()
-f=os.open(a.root+'/supervisor.lock',os.O_CREAT|os.O_RDWR,0o600)
-fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
-signal.signal(signal.SIGTERM,lambda *args:None)
+f=os.open(os.path.join(a.root,'supervisor.lock'),os.O_CREAT|os.O_RDWR,0o600)
+if sys.platform=='win32':
+    import msvcrt
+    msvcrt.locking(f,msvcrt.LK_NBLCK,1)
+else:
+    import fcntl,signal
+    fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    signal.signal(signal.SIGTERM,lambda *args:None)
 print('sensitive fixture output',flush=True)
-os.read(a.lifetime_fd,1)
+{OWNER_WAITS}
 os.close(f)
 """
+# What ending a whole tree leaves as the owner's exit code.
+KILLED = 1 if sys.platform == "win32" else -9
 
 
 async def installed(
@@ -207,7 +234,7 @@ async def test_owner_ignoring_shutdown_is_killed_within_bound(
     selector = await installed(
         tmp_path,
         monkeypatch,
-        OWNER_SOURCE.replace("os.read(a.lifetime_fd,1)", "time.sleep(60)"),
+        OWNER_SOURCE.replace(OWNER_WAITS, "time.sleep(60)"),
     )
     monkeypatch.setattr("skulk.extensions.runtime_service._SHUTDOWN_SECONDS", 0.05)
     service = RuntimeService(selector.root)
@@ -219,8 +246,166 @@ async def test_owner_ignoring_shutdown_is_killed_within_bound(
         stopped.set()
         async with asyncio.timeout(5):
             assert await task
-    assert service.process is not None and service.process.returncode == -9
+    assert service.process is not None and service.process.returncode == KILLED
     RuntimeLock(selector.root, "supervisor.lock").close()
+
+
+def test_the_owner_is_told_where_its_end_of_the_lifetime_pipe_is() -> None:
+    """A descriptor number where descriptors are inherited; standard input otherwise."""
+    assert lifetime_arguments(7) == ("--lifetime-fd", "7")
+    assert lifetime_arguments(None) == ("--lifetime-stdin",)
+
+
+async def test_an_owner_starts_and_stops_again_and_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each lifetime ends in order and leaves nothing that stops the next."""
+    selector = await installed(tmp_path, monkeypatch)
+    for _ in range(3):
+        stopped = asyncio.Event()
+        service = RuntimeService(selector.root)
+        task = asyncio.create_task(service.serve(stopped))
+        try:
+            await running(service)
+        finally:
+            stopped.set()
+            async with asyncio.timeout(10):
+                assert await task
+        assert service.process is not None and service.process.returncode == 0
+        assert status(selector.root).state == "stopped"
+    RuntimeLock(selector.root, "service.lock").close()
+    RuntimeLock(selector.root, "supervisor.lock").close()
+
+
+async def test_an_owner_built_without_the_lifetime_argument_ends_the_lifetime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An owner that does not know where its launcher put the pipe never runs on."""
+    selector = await installed(
+        tmp_path,
+        monkeypatch,
+        "import argparse,time\n"
+        "p=argparse.ArgumentParser();p.add_argument('--root')\n"
+        "p.parse_args()\n"
+        "time.sleep(60)\n",
+    )
+    service = RuntimeService(selector.root)
+    async with asyncio.timeout(30):
+        assert not await service.serve(asyncio.Event())
+    assert status(selector.root).error_code == "owner_exited"
+    assert service.process is not None and service.process.returncode == 2
+    RuntimeLock(selector.root, "service.lock").close()
+
+
+# A launcher in a process of its own, so that it can be ended without warning.
+# It serves the installation it is given until then.
+_LAUNCHER = (
+    "import asyncio, json, sys\n"
+    "from pathlib import Path\n"
+    "from skulk.extensions import runtime_install\n"
+    "from skulk.extensions.runtime_artifacts import QualifiedHost\n"
+    "from skulk.extensions.runtime_service import RuntimeService\n"
+    "host = QualifiedHost(**json.loads(sys.argv[2]))\n"
+    "runtime_install.measure_host = lambda: host\n"
+    "asyncio.run(RuntimeService(Path(sys.argv[1])).serve(asyncio.Event()))\n"
+)
+
+
+def _gone(identifier: int) -> bool:
+    try:
+        return psutil.Process(identifier).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+async def test_a_launcher_that_dies_leaves_an_owner_that_shuts_itself_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner is asked, not ended: it puts its things away with no launcher alive.
+
+    Until it has gone it keeps the service fence, so no second launcher can
+    start an owner beside it. Afterwards the next launcher starts cleanly.
+    """
+    source = OWNER_SOURCE.replace(
+        "print('sensitive fixture output',flush=True)",
+        "open(os.path.join(a.root,'owner-started'),'w').write(str(os.getpid()))\n"
+        "print('sensitive fixture output',flush=True)",
+    ).replace(
+        "os.close(f)",
+        # Shutting down takes a moment, and is seen to finish.
+        "time.sleep(1.5)\n"
+        "open(os.path.join(a.root,'owner-put-away'),'w').write('done')\n"
+        "os.close(f)",
+    )
+    metadata, trust, host = artifacts(tmp_path / "source", owner_source=source)
+    monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
+    selector = RuntimeSelector(tmp_path / "installed")
+    write_private(
+        selector.root / "publisher-trust.json", trust.model_dump_json().encode()
+    )
+    staged = await selector.installer.stage(metadata, tmp_path / "source")
+    await selector.activate(staged.runtime_digest, expected_revision=0)
+    started = selector.root / "owner-started"
+    put_away = selector.root / "owner-put-away"
+
+    launcher = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _LAUNCHER,
+            str(selector.root),
+            json.dumps(dataclasses.asdict(host)),
+        ],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+    owner = 0
+    try:
+        async with asyncio.timeout(60):
+            while not started.exists() or not started.read_text():
+                assert launcher.poll() is None, "the launcher ended early"
+                await asyncio.sleep(0.05)
+        owner = int(started.read_text())
+        assert status(selector.root).state == "running"
+
+        launcher.kill()
+        launcher.wait()
+        ended = time.monotonic()
+        # Still running, still fenced, and not yet done putting away.
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(selector.root, "service.lock")
+        assert not _gone(owner) and not put_away.exists()
+        assert time.monotonic() - ended < 1.0, "too slow to have seen the owner"
+
+        async with asyncio.timeout(30):
+            while not _gone(owner):
+                await asyncio.sleep(0.05)
+        assert put_away.read_text() == "done"
+    finally:
+        launcher.kill()
+        launcher.wait()
+        if owner and not _gone(owner):
+            psutil.Process(owner).kill()
+
+    # Nothing of the lost lifetime stands in the way of the next one.
+    async with asyncio.timeout(10):
+        while True:
+            try:
+                RuntimeLock(selector.root, "service.lock").close()
+                break
+            except BlockingIOError:
+                await asyncio.sleep(0.05)
+    put_away.unlink()
+    stopped = asyncio.Event()
+    service = RuntimeService(selector.root)
+    task = asyncio.create_task(service.serve(stopped))
+    try:
+        await running(service)
+    finally:
+        stopped.set()
+        async with asyncio.timeout(15):
+            assert await task
+    assert put_away.read_text() == "done"
+    assert status(selector.root).state == "stopped"
 
 
 def test_owner_bootstrap_follows_the_bundle_shape(tmp_path: Path) -> None:

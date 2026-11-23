@@ -1,10 +1,21 @@
-"""Fixed nonroot launcher for a verified managed runtime, separate from inference."""
+"""Fixed nonroot launcher for a verified managed runtime, separate from inference.
+
+The owner is started through :func:`skulk.utils.owned_process.start_supervised`
+and holds one end of a lifetime pipe. Closing the launcher's end, which also
+happens when the launcher dies, asks the owner to shut down. Where the owner
+finds its end is the one thing that differs by platform, and the launcher says
+so on the command line:
+
+- POSIX: ``--lifetime-fd <number>``, an inherited descriptor.
+- Windows: ``--lifetime-stdin``, the owner's standard input. A descriptor
+  number means nothing to a Windows child. The argument is explicit so that an
+  owner started by hand never mistakes a closed or redirected standard input
+  for the end of a launcher. An owner has to be built to accept it; one that
+  is not exits at once and the lifetime is reported as ``owner_exited``.
+"""
 
 import argparse
 import asyncio
-import contextlib
-import os
-import signal
 import sys
 import time
 import zipfile
@@ -18,7 +29,10 @@ from skulk.extensions.native_host_binding import provision_native_host
 from skulk.extensions.runtime_artifacts import Digest
 from skulk.extensions.runtime_files import RuntimeLock, write_private
 from skulk.extensions.runtime_install import finish_runtime_work
+from skulk.extensions.runtime_integrity import runtime_interpreter
 from skulk.extensions.runtime_selection import RuntimeSelection, RuntimeSelector
+from skulk.utils.owned_process import SupervisedProcess, start_supervised
+from skulk.utils.stop_signals import stop_on_signal
 
 _BOOTSTRAP = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module('__owner__',run_name='__main__')"
 # A bundle with no owner shim is launched from the signed wheels installed in
@@ -29,6 +43,21 @@ _LAUNCHER_BOOTSTRAP = (
     "found=[e for e in entry_points(group='skulk.capability_runtime') if e.name=='owner'];"
     "sys.exit('no owner launcher in the runtime') if not found else sys.exit(found[0].load()())"
 )
+
+
+def lifetime_arguments(descriptor: int | None) -> tuple[str, ...]:
+    """Tell the owner where its end of the lifetime pipe is.
+
+    Args:
+        descriptor: The number of the inherited descriptor, or ``None`` when
+            the owner's standard input is its end of the pipe.
+
+    Returns:
+        The arguments the owner's command line ends with.
+    """
+    if descriptor is None:
+        return ("--lifetime-stdin",)
+    return ("--lifetime-fd", str(descriptor))
 
 
 def owner_bootstrap(artifact: Path) -> str:
@@ -88,9 +117,8 @@ class RuntimeService:
         self.selector = RuntimeSelector(root)
         self.root = self.selector.root
         self.instance = uuid4().hex
-        self.process: asyncio.subprocess.Process | None = None
+        self.process: SupervisedProcess | None = None
         self.selection: RuntimeSelection | None = None
-        self.writer: int | None = None
         self.output_bytes = 0
         self.drains: list[asyncio.Task[None]] = []
 
@@ -126,56 +154,49 @@ class RuntimeService:
         assert self.selection is not None
         generation = self.root / "generations" / self.selection.runtime_digest
         provision_native_host(self.root, self.selection.runtime_digest, self.instance)
-        reader, self.writer = os.pipe()
-        try:
-            # The owner inherits the service fence, but only the read end of its
-            # lifetime pipe. Abrupt launcher death therefore asks it to shut down
-            # before another launcher can acquire this service's ownership.
-            self.process = await asyncio.create_subprocess_exec(
-                str(generation / "runtime/bin/python"),
-                "-I",
-                "-B",
-                "-c",
-                owner_bootstrap(generation / "artifacts/bundle.pyz"),
-                str(generation / "artifacts/bundle.pyz"),
-                "--root",
-                str(self.root),
-                "--lifetime-fd",
-                str(reader),
-                pass_fds=(reader, lock.descriptor),
-                start_new_session=True,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=self.root,
-                env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-            )
-            assert self.process.stdout is not None
-            self.drains.append(asyncio.create_task(self._drain(self.process.stdout)))
-        finally:
-            os.close(reader)
+        bundle = generation / "artifacts" / "bundle.pyz"
+        command = (
+            str(runtime_interpreter(generation / "runtime")),
+            "-I",
+            "-B",
+            "-c",
+            owner_bootstrap(bundle),
+            str(bundle),
+            "--root",
+            str(self.root),
+        )
+        # The owner holds the service fence, but only the read end of its
+        # lifetime pipe. Abrupt launcher death therefore asks it to shut down
+        # before another launcher can acquire this service's ownership.
+        self.process = await start_supervised(
+            lambda descriptor: (*command, *lifetime_arguments(descriptor)),
+            cwd=self.root,
+            lock=lock,
+        )
+        self.drains.append(asyncio.create_task(self._drain(self.process.stdout)))
 
     async def _close(self) -> None:
-        if self.writer is not None:
-            os.close(self.writer)
-            self.writer = None
         process = self.process
         if process is not None:
             # Pipe EOF is the managed owner's graceful shutdown request. Sending
             # SIGTERM as well can race its final interpreter shutdown and turn a
             # successful teardown into a signal failure after handlers reset.
+            process.release()
             try:
                 async with asyncio.timeout(_SHUTDOWN_SECONDS):
                     await process.wait()
             except TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
+                process.kill()
                 await process.wait()
         # A descendant can keep stdout open after its owner exits. Its pipe must
         # not prevent bounded shutdown or cause us to retain any output payload.
         for drain in self.drains:
             drain.cancel()
         await asyncio.gather(*self.drains, return_exceptions=True)
+        if process is not None:
+            # On Windows this ends what the owner left running and waits until
+            # none of it is left; on POSIX the check below finds a survivor.
+            await process.close()
         # Children inherit the owner's fence. Do not report stopped or allow a
         # replacement if an old child survived the bounded owner teardown.
         RuntimeLock(self.root, "supervisor.lock").close()
@@ -289,14 +310,8 @@ class RuntimeService:
 
 async def _run(root: Path) -> bool:
     stopped = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(shutdown_signal, stopped.set)
-    try:
+    with stop_on_signal(stopped):
         return await RuntimeService(root).serve(stopped)
-    finally:
-        for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
-            loop.remove_signal_handler(shutdown_signal)
 
 
 def main() -> None:

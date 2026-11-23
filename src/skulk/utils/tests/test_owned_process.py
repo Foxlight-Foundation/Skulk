@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -15,7 +16,12 @@ import psutil
 import pytest
 
 import skulk.extensions
-from skulk.utils.owned_process import hand_over, isolated_environment, start_owned
+from skulk.utils.owned_process import (
+    hand_over,
+    isolated_environment,
+    start_owned,
+    start_supervised,
+)
 from skulk.utils.runtime_files import RuntimeLock, private_directory, read_private
 
 # What only the process seam may do: start a child in its own session, hand it
@@ -40,9 +46,7 @@ _DIRECT_PROCESS_CONTROL = frozenset(
 # Plugin-hosting modules that still start, stop or replace processes
 # themselves, so cannot run on Windows. Remove a module when it is ported; add
 # none.
-_NOT_YET_PORTED = frozenset(
-    {"runtime_service.py", "service_bootstrap.py", "service_snapshot.py"}
-)
+_NOT_YET_PORTED = frozenset({"service_bootstrap.py", "service_snapshot.py"})
 
 # Takes the lock, then hands the terminal over to the program it is given.
 _TAKES_THE_LOCK = (
@@ -87,6 +91,35 @@ _TREE = (
     "sys.argv = ['-c', 'child.log']\n"
     "exec(writer)\n"
 )
+
+
+# A long-running program that shuts itself down when asked. It says it is
+# ready, waits for the end of its lifetime pipe at the place it is told, takes
+# as long over putting things away as it is told, leaves a file to show it
+# finished, and exits with a code of its own.
+_SUPERVISED = (
+    "import os, sys, time\n"
+    "end, pause = sys.argv[1], float(sys.argv[2])\n"
+    "print('ready', os.getpid(), flush=True)\n"
+    "(sys.stdin.buffer if end == 'stdin' else os.fdopen(int(end), 'rb')).read()\n"
+    "time.sleep(pause)\n"
+    "open('put-away', 'w').close()\n"
+    "raise SystemExit(4)\n"
+)
+
+
+def _supervised(
+    source: str, pause: float = 0.0
+) -> Callable[[int | None], tuple[str, ...]]:
+    """The command line of a supervised program, built from where its pipe is."""
+
+    def arguments(descriptor: int | None) -> tuple[str, ...]:
+        # Standard input on Windows, an inherited descriptor everywhere else.
+        assert (descriptor is None) == (sys.platform == "win32")
+        end = "stdin" if descriptor is None else str(descriptor)
+        return (sys.executable, "-I", "-c", source, end, str(pause))
+
+    return arguments
 
 
 @pytest.fixture
@@ -614,6 +647,140 @@ def test_a_windows_exit_code_above_the_signed_range_passes_through(root: Path) -
     finally:
         process.kill()
         process.wait()
+
+
+async def test_a_supervised_child_shuts_itself_down_when_released(root: Path) -> None:
+    lock = RuntimeLock(root, "service.lock")
+    try:
+        child = await start_supervised(_supervised(_SUPERVISED), cwd=root, lock=lock)
+        try:
+            assert (await child.stdout.readline()).split()[0] == b"ready"
+            # It is waiting, not ending by itself.
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(child.wait()), 0.3)
+            assert not (root / "put-away").exists()
+            child.release()
+            assert await asyncio.wait_for(child.wait(), 10) == 4
+            assert (root / "put-away").exists()
+            # Releasing what is released is quiet.
+            child.release()
+        finally:
+            await child.close()
+    finally:
+        lock.close()
+    RuntimeLock(root, "service.lock").close()
+
+
+async def test_no_other_program_inherits_the_end_that_asks_for_shutdown(
+    root: Path,
+) -> None:
+    """A bystander started later must not keep the child's lifetime pipe open."""
+    lock = RuntimeLock(root, "service.lock")
+    try:
+        child = await start_supervised(_supervised(_SUPERVISED), cwd=root, lock=lock)
+        bystander = subprocess.Popen(
+            [sys.executable, "-I", "-c", "import time; time.sleep(120)"],
+            close_fds=False,
+        )
+        try:
+            assert (await child.stdout.readline()).split()[0] == b"ready"
+            child.release()
+            assert await asyncio.wait_for(child.wait(), 10) == 4
+            assert bystander.poll() is None
+        finally:
+            bystander.kill()
+            bystander.wait()
+            await child.close()
+    finally:
+        lock.close()
+
+
+async def test_a_supervised_child_that_does_not_go_is_ended_with_its_tree(
+    root: Path,
+) -> None:
+    lock = RuntimeLock(root, "service.lock")
+    try:
+        # A tree that never reads its lifetime pipe.
+        child = await start_supervised(
+            lambda _: (sys.executable, "-I", "-c", _TREE), cwd=root, lock=lock
+        )
+        try:
+            grandchild = int(await child.stdout.readline())
+            await asyncio.to_thread(_wait_until_both_write, root)
+            child.release()
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(child.wait()), 0.5)
+            child.kill()
+            await asyncio.wait_for(child.wait(), 10)
+            await asyncio.to_thread(_wait_until_gone, [child.pid, grandchild])
+            await asyncio.to_thread(_assert_writing_has_stopped, root)
+        finally:
+            await child.close()
+        (root / "child.log").unlink()
+        (root / "grandchild.log").unlink()
+    finally:
+        lock.close()
+
+
+def test_a_supervised_child_is_asked_not_ended_when_its_parent_dies(root: Path) -> None:
+    """The parent dies without warning; the child reads end of input and finishes.
+
+    The system does not end it, on either platform, and nobody can take the
+    lock until it has gone.
+    """
+    parent_script = (
+        "import asyncio, os, sys\n"
+        "from pathlib import Path\n"
+        "from skulk.utils.owned_process import start_supervised\n"
+        "from skulk.utils.runtime_files import RuntimeLock\n"
+        "async def main():\n"
+        "    root = Path(sys.argv[1])\n"
+        "    lock = RuntimeLock(root, 'service.lock')\n"
+        "    child = await start_supervised(lambda end: (sys.executable, '-I', '-c',"
+        " sys.argv[2], 'stdin' if end is None else str(end), '1.5'),"
+        " cwd=root, lock=lock)\n"
+        "    print((await child.stdout.readline()).split()[1].decode(), flush=True)\n"
+        "    sys.stdin.read()\n"
+        "    os._exit(0)\n"
+        "asyncio.run(main())\n"
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-c", parent_script, str(root), _SUPERVISED],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+    child = 0
+    try:
+        assert parent.stdout is not None and parent.stdin is not None
+        child = int(parent.stdout.readline())
+        assert _running(child)
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(root, "service.lock")
+
+        parent.stdin.close()
+        assert parent.wait(10) == 0
+        # The parent is gone; the child is putting things away and is fenced.
+        assert _running(child) and not (root / "put-away").exists()
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(root, "service.lock")
+
+        _wait_until_gone([child])
+        assert (root / "put-away").exists()
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                RuntimeLock(root, "service.lock").close()
+                break
+            except BlockingIOError:
+                assert time.monotonic() < deadline
+                time.sleep(0.05)
+    finally:
+        parent.kill()
+        parent.wait()
+        with contextlib.suppress(psutil.NoSuchProcess):
+            if child:
+                psutil.Process(child).kill()
 
 
 def test_only_the_seam_starts_or_stops_a_process_tree() -> None:
