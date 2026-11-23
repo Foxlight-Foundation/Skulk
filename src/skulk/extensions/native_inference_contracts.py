@@ -23,11 +23,19 @@ from pydantic import (
     model_validator,
 )
 
-INFERENCE_KERNEL_VERSION = "0.7.0rc5"
-INFERENCE_KERNEL_SOURCE = "52a9349252d896c5b0d73af0aa45a746295a4f76"
+INFERENCE_KERNEL_VERSION = "0.7.0rc7"
+INFERENCE_KERNEL_SOURCE = "511a5c248b65845919089c2c86c37cdcef122d50"
 # Reader compatibility never rewrites an issued application's signed closure.
-INFERENCE_READER_VERSIONS = ("0.7.0rc3", "0.7.0rc4", INFERENCE_KERNEL_VERSION)
+INFERENCE_READER_VERSIONS = (
+    "0.7.0rc3",
+    "0.7.0rc4",
+    "0.7.0rc5",
+    INFERENCE_KERNEL_VERSION,
+)
 INFERENCE_COHORT_SHA256 = (
+    "d0b616e5b73111904cbfbc071ce2ad7f0b111624ba02ed5e7649ce6a8ec02de3"
+)
+_ISSUED_AUTHOR_COHORT_SHA256 = (
     "fb6ca9e81f80cebd2cb6da735b30f888dc49f8ee6f38d57abc544e9362906f51"
 )
 _ISSUED_STREAM_COHORT_SHA256 = (
@@ -342,9 +350,14 @@ def inference_cohort(version: str = INFERENCE_KERNEL_VERSION) -> dict[str, JsonV
             "native-inference-stream-cohort.json",
             _ISSUED_STREAM_COHORT_SHA256,
         )
-    elif version == INFERENCE_KERNEL_VERSION:
+    elif version == "0.7.0rc5":
         filename, digest = (
             "native-author-cohort.json",
+            _ISSUED_AUTHOR_COHORT_SHA256,
+        )
+    elif version == INFERENCE_KERNEL_VERSION:
+        filename, digest = (
+            "native-discovery-cohort.json",
             INFERENCE_COHORT_SHA256,
         )
     else:
@@ -355,9 +368,26 @@ def inference_cohort(version: str = INFERENCE_KERNEL_VERSION) -> dict[str, JsonV
     return _OBJECT.validate_json(data)
 
 
+def inference_profile_readers(
+    version: str = INFERENCE_KERNEL_VERSION,
+) -> tuple[tuple[str, str], ...]:
+    """Return the exact getter inventory for an issued binary's installed version.
+
+    Older signed runtimes retain thirteen identities; discovery7 adds its own
+    separately qualified getter. Unknown binaries supply no compatible default.
+    """
+    if version not in INFERENCE_READER_VERSIONS:
+        raise ValueError("unqualified native inference reader version")
+    return INFERENCE_PROFILE_READERS + (
+        (("skulk.discovery/1", "discovery_profile_digest"),)
+        if version == "0.7.0rc7"
+        else ()
+    )
+
+
 @lru_cache(maxsize=1)
 def public_inference_kernel() -> InferenceKernel:
-    """Require the published binary and all thirteen exact semantic identities.
+    """Require every selected binary identity, including optional discovery1.
 
     This permits the new reader to understand unchanged older profiles. It does
     not replace any old application's signed wheel closure or activate a caller.
@@ -385,9 +415,12 @@ def public_inference_kernel() -> InferenceKernel:
             if name in expected:
                 raise ValueError("duplicate native inference profile")
             expected[name] = entry["profile_digest"]
-        if set(expected) != {name for name, _ in INFERENCE_PROFILE_READERS}:
+        readers = inference_profile_readers(
+            importlib.metadata.version("skulk-capability-kernel")
+        )
+        if set(expected) != {name for name, _ in readers}:
             raise ValueError("native inference profile inventory differs")
-        for name, attribute in INFERENCE_PROFILE_READERS:
+        for name, attribute in readers:
             reader = cast(object, getattr(kernel, attribute))
             if (
                 not callable(reader)
@@ -443,13 +476,14 @@ class _Contract(BaseModel):
 class InferenceProfiles(_Contract):
     """Exact signed execution cohort, separately selected from issued runtimes."""
 
-    version: Literal["0.7.0rc3", "0.7.0rc4", "0.7.0rc5"] = Field(
+    version: Literal["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7"] = Field(
         description="Published native ABI package version."
     )
     source_commit: Literal[
         "c8f869ba525d6fdcff64e90cd3c14954eaad34da",
         "3431a3b220f854512d3bb10003e095e00585c443",
         "52a9349252d896c5b0d73af0aa45a746295a4f76",
+        "511a5c248b65845919089c2c86c37cdcef122d50",
     ] = Field(description="Immutable public source selected by the closure.")
     portable: Literal[
         "7996ed84e821ddacfb48e00b99a5886948fd20e43bc2c7993c5ed98217834033"
@@ -478,7 +512,7 @@ class InferenceProfiles(_Contract):
         return self
 
     @classmethod
-    @lru_cache(maxsize=3)
+    @lru_cache(maxsize=4)
     def qualified(cls, version: str = INFERENCE_KERNEL_VERSION) -> "InferenceProfiles":
         """Supply publisher defaults; signed parsing requires every field."""
         receipt = inference_cohort(version)
