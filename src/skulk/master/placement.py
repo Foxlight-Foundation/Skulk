@@ -31,6 +31,7 @@ from skulk.shared.backends import (
     engine_of,
     engine_supports_multi_node,
     expand_engine_backends,
+    memory_settings_key,
     package_engine_of,
     platform_compatible_backends,
     resolve_node_backend,
@@ -658,10 +659,14 @@ def _stamp_llama_server_settings(
     for node_id, runner_id in assignments.node_to_runner.items():
         shard = shards[runner_id]
         resources = resources_by_node.get(node_id)
-        engine = engine_of(shard.resolved_backend or "")
-        if engine is not None:
+        backend = shard.resolved_backend or ""
+        # A package shard is stamped too, so reservations and the worker's
+        # load guard count the memory its build declares.
+        if engine_of(backend) is not None or package_engine_of(backend) is not None:
             settings = (
-                resources.engine_memory_settings.get(engine, EngineMemorySettings())
+                resources.engine_memory_settings.get(
+                    memory_settings_key(backend), EngineMemorySettings()
+                )
                 if resources is not None
                 else EngineMemorySettings()
             )

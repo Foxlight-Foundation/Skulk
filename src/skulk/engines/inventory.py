@@ -88,6 +88,14 @@ class EnginePackageInventory:
         """Each offered backend tag's build identity (its manifest digest)."""
         return {tag: installed.digest for tag, installed in self.active.items()}
 
+    @property
+    def overhead_bytes(self) -> dict[str, int]:
+        """Each offered backend tag's declared memory beyond weight bytes."""
+        return {
+            tag: installed.claims.conservative_overhead_bytes
+            for tag, installed in self.active.items()
+        }
+
 
 def _valid_engine_id(name: str) -> bool:
     try:
@@ -217,16 +225,32 @@ def read_engine_package_inventory(
     return EnginePackageInventory(active=active, unusable=tuple(unusable))
 
 
+@final
+@dataclass(frozen=True)
+class EnginePackageReport:
+    """What a node says about its installed engine packages.
+
+    Attributes:
+        builds: Each offered backend tag's build identity.
+        overhead_bytes: Each offered backend tag's declared memory beyond
+            weight bytes, from its signed manifest.
+        problems: One short line per lane whose active generation cannot be
+            offered (engine ID, lane and the refusal code; no path).
+    """
+
+    builds: dict[str, str]
+    overhead_bytes: dict[str, int]
+    problems: tuple[str, ...]
+
+
 def node_engine_package_report(
     *, root: Path = ENGINE_PACKAGES_DIR
-) -> tuple[dict[str, str], tuple[str, ...]]:
+) -> EnginePackageReport:
     """What a node says about its engine packages when it gathers its facts.
 
-    Returns each offered backend tag's build identity, and one short line per
-    lane whose active generation cannot be offered (engine ID, lane and the
-    refusal code; no path). A packages folder that cannot be read is one such
-    line and offers nothing: a problem with an optional package must never
-    stop a node from starting or change what its built-in engines report.
+    A packages folder that cannot be read is one problem line and offers
+    nothing: a problem with an optional package must never stop a node from
+    starting or change what its built-in engines report.
     """
     try:
         inventory = read_engine_package_inventory(root=root)
@@ -235,12 +259,18 @@ def node_engine_package_report(
             f"Installed engine packages could not be read and none is offered: "
             f"{type(error).__name__}"
         )
-        return {}, ("the engine packages folder could not be read",)
+        return EnginePackageReport(
+            {}, {}, ("the engine packages folder could not be read",)
+        )
     problems = tuple(
         f"{entry.engine_id} ({entry.lane}): {entry.reason}"
         for entry in inventory.unusable[:_MAX_REPORTED_PROBLEMS]
     )
-    return dict(sorted(inventory.builds.items())), problems
+    return EnginePackageReport(
+        dict(sorted(inventory.builds.items())),
+        dict(sorted(inventory.overhead_bytes.items())),
+        problems,
+    )
 
 
 def installed_engine_for_backend(

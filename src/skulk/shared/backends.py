@@ -508,6 +508,18 @@ def package_engine_of(tag: str) -> str | None:
     return name
 
 
+def memory_settings_key(tag: str) -> str:
+    """Key of a backend's entry in a node's advertised engine memory settings.
+
+    A built-in engine has one entry for all its compute lanes, keyed by the
+    engine name. An engine package has one per backend tag, because each lane
+    is a separate signed build that declares its own memory need.
+    """
+    if package_engine_of(tag) is not None:
+        return tag
+    return tag.split(_TAG_SEPARATOR, 1)[0]
+
+
 def _engine_name_of(tag: str) -> str | None:
     """The engine a tag selects, built in or packaged."""
     return engine_of(tag) or package_engine_of(tag)

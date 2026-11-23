@@ -442,6 +442,18 @@ def test_a_manifest_other_than_the_one_listed_is_not_installed(
     assert _failed_step(store, strix, listed) == "the manifest check"
 
 
+def test_a_list_and_manifest_that_disagree_about_memory_install_nothing(
+    store: _Store, strix: NodeFacts
+) -> None:
+    """A launch is admitted on the list's figure, so the manifest must state the same."""
+    store.entries[0]["conservative_overhead_bytes"] = 1024**3
+    store.publish_list()
+
+    with pytest.raises(EnginePackageInstallError, match="different memory needs"):
+        store.install(strix, store.digest)
+    assert _failed_step(store, strix, store.digest) == "the manifest check"
+
+
 def test_a_missing_manifest_or_file_installs_nothing(
     store: _Store, strix: NodeFacts
 ) -> None:

@@ -5,6 +5,16 @@ import pytest
 from skulk.master.placement import PlacementError, place_instance
 from skulk.master.tests.conftest import create_node_memory, create_node_network
 from skulk.master.tests.test_placement import place_instance_command
+from skulk.shared.models.engine_memory_settings import (
+    EngineMemorySettings,
+    engine_package_memory_settings,
+    node_engine_memory_settings,
+)
+from skulk.shared.models.memory_estimate import (
+    backend_offloads_to_vram,
+    estimate_weight_runtime_bytes,
+    shard_preallocates_kv_upfront,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
@@ -291,3 +301,105 @@ def _sized_card_for(declared: str) -> ModelCard:
         tasks=[ModelTask.TextGeneration],
         placement=PlacementCardConfig(compatible_backends=frozenset({declared})),
     )
+
+
+def _package_node(overhead_bytes: int) -> NodeResources:
+    """A node holding the package, advertising the memory its build declares."""
+    return NodeResources(
+        backends=frozenset({PACKAGE_TAG}),
+        engine_builds={PACKAGE_TAG: PACKAGE_BUILD},
+        engine_memory_settings={
+            PACKAGE_TAG: engine_package_memory_settings(overhead_bytes)
+        },
+    )
+
+
+def _place_sized(resources: NodeResources, *, memory_gb: float) -> ShardMetadata:
+    topology = Topology()
+    topology.add_node(NODE)
+    placements = place_instance(
+        place_instance_command(_sized_card((PACKAGE_TAG,))),
+        topology,
+        {},
+        {NODE: create_node_memory(Memory.from_gb(memory_gb).in_bytes)},
+        {NODE: create_node_network()},
+        node_resources={NODE: resources},
+    )
+    instance = next(iter(placements.values()))
+    return next(iter(instance.shard_assignments.runner_to_shard.values()))
+
+
+def test_a_package_placement_is_stamped_with_the_memory_its_build_declares() -> None:
+    """Reservations and the worker's load guard read the figure from the shard."""
+    overhead = Memory.from_gb(2).in_bytes
+
+    shard = _place_sized(_package_node(overhead), memory_gb=16)
+
+    assert shard.memory_settings == EngineMemorySettings(
+        package_overhead_bytes=overhead
+    )
+    assert estimate_weight_runtime_bytes(
+        shard.model_card,
+        1.0,
+        resolved_backend=shard.resolved_backend,
+        memory_settings=shard.memory_settings,
+    ) == Memory.from_gb(4) + Memory.from_bytes(overhead)
+
+
+def test_a_launch_is_refused_when_weights_plus_the_declared_memory_do_not_fit() -> None:
+    """Four gigabytes of weights fit eight; with six more declared they do not."""
+    _place_sized(_package_node(Memory.from_gb(1).in_bytes), memory_gb=8)
+
+    with pytest.raises(PlacementError, match="node-a needs"):
+        _place_sized(_package_node(Memory.from_gb(6).in_bytes), memory_gb=8)
+
+
+def test_a_small_declared_memory_admits_what_the_built_in_multiplier_refused() -> None:
+    """The declared figure replaces the multiplier tuned for built-in engines.
+
+    Four gigabytes of weights need 5.45 under the built-in rule (1.3 times
+    the weights plus the floor) and 4.5 with half a gigabyte declared.
+    """
+    undeclared = NodeResources(
+        backends=frozenset({PACKAGE_TAG}),
+        engine_builds={PACKAGE_TAG: PACKAGE_BUILD},
+    )
+    with pytest.raises(PlacementError):
+        _place_sized(undeclared, memory_gb=5)
+
+    shard = _place_sized(_package_node(Memory.from_gb(0.5).in_bytes), memory_gb=5)
+
+    assert shard.resolved_backend == PACKAGE_TAG
+
+
+def test_a_package_window_is_committed_at_load_and_its_lane_names_the_pool() -> None:
+    shard = _place_sized(_package_node(Memory.from_gb(1).in_bytes), memory_gb=16)
+
+    assert shard_preallocates_kv_upfront(shard)
+    assert backend_offloads_to_vram("tensorfold-rocm")
+    assert backend_offloads_to_vram("tensorfold-cuda")
+    assert backend_offloads_to_vram("tensorfold-vulkan")
+    assert not backend_offloads_to_vram("tensorfold-cpu")
+    assert not backend_offloads_to_vram("tensorfold-metal")
+    assert not backend_offloads_to_vram("tensorfold")
+
+
+def test_built_in_engines_keep_their_memory_rule_and_their_report() -> None:
+    """No package, no difference: same estimate, same serialized settings."""
+    card = _sized_card()
+    plain = EngineMemorySettings()
+
+    assert estimate_weight_runtime_bytes(
+        card, 1.0, resolved_backend="llama_cpp-vulkan", memory_settings=plain
+    ) == estimate_weight_runtime_bytes(card, 1.0, resolved_backend="llama_cpp-vulkan")
+    assert "packageOverheadBytes" not in plain.model_dump(by_alias=True)
+    assert "package_overhead_bytes" not in plain.model_dump()
+    assert EngineMemorySettings.model_validate(plain.model_dump()) == plain
+    declared = engine_package_memory_settings(7)
+    assert EngineMemorySettings.model_validate(declared.model_dump()) == declared
+    assert node_engine_memory_settings(
+        ["llama_cpp", "llama_cpp-vulkan", "mlx"], {}, {}
+    ) == {"llama_cpp": plain, "mlx": plain}
+    assert node_engine_memory_settings(
+        ["llama_cpp-vulkan", PACKAGE_TAG], {PACKAGE_TAG: 7}, {}
+    ) == {"llama_cpp": plain, PACKAGE_TAG: declared}

@@ -334,6 +334,11 @@ class NodeFacts(CamelCaseModel):
         description="Backend tag to build identity for each engine package this node does not hold but may install when a model needs it, from the package list it last verified. Empty when nothing fits, the node is offline, installs are turned off, or engine packages are turned off.",
     )
 
+    engine_package_overhead_bytes: dict[str, int] = Field(
+        default_factory=dict,
+        description="Backend tag to the memory each installed or installable engine package build declares beyond a model's weight bytes, from its signed manifest or the signed package list. Admission counts it until the build has answered with its own estimate.",
+    )
+
     engine_package_problems: tuple[str, ...] = Field(
         default=(),
         description="One short line per installed engine package lane whose active generation cannot be offered: engine ID, lane and the refusal code.",

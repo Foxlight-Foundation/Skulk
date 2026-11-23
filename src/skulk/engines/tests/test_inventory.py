@@ -6,6 +6,7 @@ import pytest
 
 from skulk.engines import inventory as inventory_module
 from skulk.engines.inventory import (
+    EnginePackageReport,
     installed_engine_for_backend,
     node_engine_package_report,
     read_engine_package_inventory,
@@ -222,14 +223,18 @@ def test_the_node_report_names_builds_and_problems_without_paths(
     damaged = install_test_package(tmp_path, packages, lane="cuda")
     damaged.adapter.unlink()
 
-    builds, problems = node_engine_package_report(root=packages)
+    report = node_engine_package_report(root=packages)
 
-    assert builds == {"tensorfold-rocm": good.digest}
-    assert problems == ("foxlight.tensorfold (cuda): installation_damaged",)
-    assert str(tmp_path) not in "".join(problems)
+    assert report.builds == {"tensorfold-rocm": good.digest}
+    # The memory the held build's signed manifest declares, for admission.
+    assert report.overhead_bytes == {
+        "tensorfold-rocm": good.claims.conservative_overhead_bytes
+    }
+    assert report.problems == ("foxlight.tensorfold (cuda): installation_damaged",)
+    assert str(tmp_path) not in "".join(report.problems)
     # No packages, and packages turned off, give the same empty report.
     nothing = node_engine_package_report(root=tmp_path / "absent")
-    assert nothing == ({}, ())
+    assert nothing == EnginePackageReport({}, {}, ())
     monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, "1")
     assert node_engine_package_report(root=packages) == nothing
 
@@ -244,7 +249,8 @@ def test_an_unreadable_packages_folder_offers_nothing_and_does_not_raise(
 
     monkeypatch.setattr(inventory_module, "read_engine_package_inventory", unreadable)
 
-    builds, problems = node_engine_package_report(root=tmp_path)
+    report = node_engine_package_report(root=tmp_path)
 
-    assert builds == {}
-    assert problems == ("the engine packages folder could not be read",)
+    assert report.builds == {}
+    assert report.overhead_bytes == {}
+    assert report.problems == ("the engine packages folder could not be read",)

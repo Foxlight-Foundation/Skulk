@@ -7,6 +7,7 @@ from typing import Final, final
 from loguru import logger
 from pydantic import Field
 
+from skulk.shared.backends import memory_settings_key
 from skulk.shared.models.engine_memory_settings import EngineMemorySettings
 from skulk.shared.models.llama_server_settings import LlamaServerSettings
 from skulk.shared.models.memory_estimate import (
@@ -15,6 +16,7 @@ from skulk.shared.models.memory_estimate import (
     UMA_GPU_OS_HEADROOM,
     amd_unified_memory_limit,
     backend_offloads_to_vram,
+    declared_package_overhead,
     estimate_music_workspace,
     estimate_recurrent_cache_bytes,
     estimate_shard_footprint,
@@ -936,8 +938,9 @@ def filter_cycles_by_memory(
         for node_id, share in node_shares.items():
             backend = (resolved_backends or {}).get(node_id)
             settings = (llama_server_settings or {}).get(node_id)
-            engine = (backend or "").split("-", 1)[0]
-            policy = (engine_memory_settings or {}).get(node_id, {}).get(engine)
+            policy = (engine_memory_settings or {}).get(node_id, {}).get(
+                memory_settings_key(backend or "")
+            )
             if "TextGeneration" not in model_card.tasks:
                 policy = EngineMemorySettings()
             overhead_factor = memory_overhead_factor(
@@ -986,11 +989,17 @@ def filter_cycles_by_memory(
                 else 0.0
             )
             kv_share = share * node_kv_ratio
+            # An engine package's declared overhead replaces the multiplier
+            # and floor, exactly as in ``estimate_weight_runtime_bytes``.
+            package_overhead = declared_package_overhead(policy)
             required_with_overhead = (
-                share * overhead_factor
+                (
+                    share + package_overhead
+                    if package_overhead is not None
+                    else share * overhead_factor + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+                )
                 + kv_share
                 + recurrent_share
-                + PLACEMENT_MEMORY_OVERHEAD_FLOOR
                 + estimate_music_workspace(model_card, resolved_backend=backend)
                 + fixed_memory_by_node.get(node_id, Memory())
             )

@@ -488,6 +488,16 @@ def install_engine_package_on_demand(
                 "the manifest check",
                 "the store served a manifest that is not the build the placement names",
             )
+        if (
+            package.claims.conservative_overhead_bytes
+            != entry.conservative_overhead_bytes
+        ):
+            # The launch was admitted on the list's figure.
+            raise EnginePackageInstallError(
+                "the manifest check",
+                "the package list and the manifest state different memory needs "
+                "for this build",
+            )
         check_engine_host(package, host)
     except EnginePackageRefusedError as refused:
         raise EnginePackageInstallError(

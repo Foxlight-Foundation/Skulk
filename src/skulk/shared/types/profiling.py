@@ -20,7 +20,7 @@ from pydantic import (
 
 from skulk.shared.models.engine_memory_settings import (
     EngineMemorySettings,
-    observe_engine_memory_settings,
+    node_engine_memory_settings,
 )
 from skulk.shared.models.llama_server_settings import (
     LlamaServerSettings,
@@ -384,7 +384,7 @@ class NodeResources(CamelCaseModel):
     )
     engine_memory_settings: dict[str, EngineMemorySettings] = Field(
         default_factory=dict,
-        description="Effective engine/cache controls, independent of artifact weight quantization, used by placement and runner guards.",
+        description="Effective engine/cache controls, independent of artifact weight quantization, used by placement and runner guards. Keyed by engine name; an engine package has one entry per backend tag, carrying the memory its build declares.",
     )
     llama_server_settings: LlamaServerSettings | None = Field(
         default=None,
@@ -589,12 +589,9 @@ class NodeResources(CamelCaseModel):
                 )
                 else None
             ),
-            engine_memory_settings={
-                engine: observe_engine_memory_settings(os.environ, engine=engine)
-                for engine in {
-                    backend.split("-", 1)[0] for backend in derivation.backends
-                }
-            },
+            engine_memory_settings=node_engine_memory_settings(
+                derivation.backends, facts.engine_package_overhead_bytes, os.environ
+            ),
             hardware_classes=hardware_class_inventory(facts),
             participation=participation,
             api_available=api_available,

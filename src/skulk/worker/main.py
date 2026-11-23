@@ -78,7 +78,10 @@ from skulk.shared.constants import (
     SKULK_VIDEO_OUTPUT_DIR,
 )
 from skulk.shared.log_summaries import summarize_task_for_log
-from skulk.shared.models.engine_memory_settings import observe_engine_memory_settings
+from skulk.shared.models.engine_memory_settings import (
+    backend_engine_memory_settings,
+    observe_engine_memory_settings,
+)
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     LOAD_FIT_TOLERANCE,
@@ -1962,12 +1965,26 @@ class Worker:
             if shard.separation_policy != policy:
                 return "Native separation policy differs from placement; refresh resources and replan this configuration"
         if shard.memory_settings is not None and shard.resolved_backend is not None:
-            actual = observe_engine_memory_settings(
-                os.environ,
-                engine=shard.resolved_backend.split("-", 1)[0]
-                if "TextGeneration" in shard.model_card.tasks
-                else "non_text",
-            )
+            if package_engine_of(shard.resolved_backend) is not None:
+                from skulk.facts import known_node_facts
+
+                # The same figure this node advertised: the memory the
+                # package build it holds (or was offered) declares. With no
+                # facts gathered yet nothing vouches for the stamped figure,
+                # so the comparison below refuses.
+                facts = known_node_facts()
+                actual = backend_engine_memory_settings(
+                    shard.resolved_backend,
+                    facts.engine_package_overhead_bytes if facts is not None else {},
+                    os.environ,
+                )
+            else:
+                actual = observe_engine_memory_settings(
+                    os.environ,
+                    engine=shard.resolved_backend.split("-", 1)[0]
+                    if "TextGeneration" in shard.model_card.tasks
+                    else "non_text",
+                )
             if actual.configuration_error is not None:
                 return f"Engine cache configuration is invalid: {actual.configuration_error}"
             if actual != shard.memory_settings:

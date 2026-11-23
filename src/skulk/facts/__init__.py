@@ -30,6 +30,7 @@ __all__ = [
     "engine_build_inventory",
     "gather_node_facts",
     "hardware_class_inventory",
+    "known_node_facts",
     "refresh_node_facts",
 ]
 
@@ -88,7 +89,7 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
     probe, which tests drive with an injected environment.
     """
     from skulk.engines.inventory import node_engine_package_report
-    from skulk.engines.on_demand import installable_engine_package_builds
+    from skulk.engines.on_demand import engine_package_offers
     from skulk.provisioning.comfy import comfy_on_demand_variants
     from skulk.provisioning.comfy_extension import comfy_extension_inventory
     from skulk.provisioning.mlx_video import installable_video_builds
@@ -116,16 +117,26 @@ def _with_install_eligibility(facts: NodeFacts) -> NodeFacts:
         facts = gather_node_facts()
     image_builds = installable_image_builds(facts, classes, offline=offline_mode())
     extension_offers, extension_installed = comfy_extension_inventory(facts, offline=offline_mode())
-    package_builds, package_problems = node_engine_package_report()
+    packages = node_engine_package_report()
     # Read from the package list this node last verified and kept; no network.
-    installable_packages = installable_engine_package_builds(
-        facts.model_copy(update={"engine_package_builds": package_builds}),
+    package_offers = engine_package_offers(
+        facts.model_copy(update={"engine_package_builds": packages.builds}),
         offline=offline_mode(),
     )
     return facts.model_copy(update={
-        "engine_package_builds": package_builds,
-        "engine_package_installable_builds": installable_packages,
-        "engine_package_problems": package_problems,
+        "engine_package_builds": packages.builds,
+        "engine_package_installable_builds": {
+            tag: entry.manifest_digest for tag, entry in sorted(package_offers.items())
+        },
+        # A tag is either held or offered, never both, so the two cannot clash.
+        "engine_package_overhead_bytes": {
+            **{
+                tag: entry.conservative_overhead_bytes
+                for tag, entry in sorted(package_offers.items())
+            },
+            **packages.overhead_bytes,
+        },
+        "engine_package_problems": packages.problems,
         "comfy_on_demand_variants": variants,
         "comfy_extension_installable_builds": extension_offers,
         "comfy_extension_installed_builds": extension_installed,
@@ -147,6 +158,15 @@ def current_node_facts() -> NodeFacts:
             _derivation = derive_node_backends(_facts)
             _log_derivation(_facts, _derivation)
         return _facts
+
+
+def known_node_facts() -> NodeFacts | None:
+    """The facts snapshot already gathered, or ``None``; never probes or waits.
+
+    For readers on the event loop. ``current_node_facts`` holds the snapshot
+    lock while a refresh probes the host, which can take seconds.
+    """
+    return _facts
 
 
 def current_backend_derivation() -> BackendDerivation:
