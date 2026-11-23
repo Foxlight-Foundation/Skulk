@@ -53,6 +53,20 @@ def has_root_authority() -> bool:
     return os.geteuid() == 0
 
 
+def has_borrowed_identity() -> bool:
+    """Whether this process acts as one account on behalf of another.
+
+    On POSIX that is a set-user-ID program: its effective user differs from
+    the user who started it. Code that runs installed plugins refuses to start
+    that way, so a plugin is never run with an identity its user was only lent.
+    A Windows process has one identity for its whole life, so there it is
+    never the case.
+    """
+    if sys.platform == "win32":
+        return False
+    return os.geteuid() != os.getuid()
+
+
 def writable_only_by(info: os.stat_result, user_id: int) -> bool:
     """Whether no account other than ``user_id``, or root, can change a file.
 

@@ -199,6 +199,12 @@ jobs:
         run: uv run --no-sync python -c "import skulk.main"
 
       - name: Run the Windows tests
+        # This runner is an administrator, which the plugin installer refuses
+        # as it refuses root. Tests that install a plugin (in
+        # test_runtime_integrity.py and test_local_setup.py) are therefore
+        # skipped here until this job has a step that runs without
+        # administrator rights; they run on a Windows machine as an ordinary
+        # user before each change to them merges.
         shell: bash
         env:
           SKULK_TESTS: "1"
@@ -215,6 +221,7 @@ jobs:
           src/skulk/utils/tests/test_owned_process.py
           src/skulk/extensions/tests/test_runtime_manager_platforms.py
           src/skulk/extensions/tests/test_runtime_integrity.py
+          src/skulk/extensions/tests/test_local_setup.py
           src/skulk/extensions/tests/test_runtime_catalog.py
           src/skulk/extensions/tests/test_capability_store.py
 

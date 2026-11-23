@@ -50,10 +50,12 @@ import sys
 assert sys.platform == "win32"
 
 import asyncio
+import contextlib
 import ctypes
 import ctypes.wintypes as wt
 import msvcrt
 import os
+import signal
 import subprocess
 import tempfile
 from asyncio import windows_utils
@@ -301,21 +303,27 @@ def _set_limits(job: int, *, admit_new_members: bool) -> None:
         raise _failure("could not configure a job")
 
 
-def _create_in_job(
-    arguments: Sequence[str], cwd: Path, job: int, output: int, fence: int
+def _create_in_job(  # noqa: PLR0913 - one CreateProcessW call, spelled out
+    arguments: Sequence[str],
+    cwd: Path,
+    job: int,
+    standard: tuple[int, ...],
+    fence: int,
+    *,
+    console: bool,
 ) -> tuple[int, int]:
     """Create the process as a member of ``job``; return its handle and identifier.
 
-    The child inherits exactly three handles: an empty input, ``output`` for
-    both of its output streams, and ``fence``, which it only holds.
+    The child inherits exactly the handles named here: ``standard``, which is
+    its input, its output and, when a third is given, its error output (the
+    output serves for both otherwise), and ``fence``, which it only holds.
+    With ``console`` the child shares this process's console; without, it
+    gets none and no window.
     """
-    descriptor = os.open(os.devnull, os.O_RDONLY)
     try:
-        empty_input = msvcrt.get_osfhandle(descriptor)
-        os.set_handle_inheritable(empty_input, True)
-        os.set_handle_inheritable(output, True)
-        os.set_handle_inheritable(fence, True)
-        inherited = (wt.HANDLE * 3)(empty_input, output, fence)
+        for handle in (*standard, fence):
+            os.set_handle_inheritable(handle, True)
+        inherited = (wt.HANDLE * (len(standard) + 1))(*standard, fence)
         jobs = (wt.HANDLE * 1)(job)
         size = ctypes.c_size_t()
         # The first call reports the size the list needs and is expected to fail.
@@ -346,9 +354,9 @@ def _create_in_job(
                 StartupInfo=_StartupInformation(
                     cb=ctypes.sizeof(_ExtendedStartupInformation),
                     dwFlags=_STARTF_USESTDHANDLES,
-                    hStdInput=empty_input,
-                    hStdOutput=output,
-                    hStdError=output,
+                    hStdInput=standard[0],
+                    hStdOutput=standard[1],
+                    hStdError=standard[-1],
                 ),
                 lpAttributeList=ctypes.addressof(attributes),
             )
@@ -366,7 +374,7 @@ def _create_in_job(
                 True,
                 _EXTENDED_STARTUPINFO_PRESENT
                 | _CREATE_UNICODE_ENVIRONMENT
-                | _CREATE_NO_WINDOW,
+                | (0 if console else _CREATE_NO_WINDOW),
                 # Every entry ends with a terminator and the buffer adds the
                 # one that ends the block. A character outside the Basic
                 # Multilingual Plane takes two units here, which this handles.
@@ -379,7 +387,10 @@ def _create_in_job(
         finally:
             _delete_attributes(attributes)
     finally:
-        os.close(descriptor)
+        # Nothing this process starts by other means may inherit them.
+        for handle in (*standard, fence):
+            with contextlib.suppress(OSError):
+                os.set_handle_inheritable(handle, False)
     information = started.raw
     process = int.from_bytes(information[:_POINTER_BYTES], sys.byteorder)
     thread = int.from_bytes(
@@ -573,11 +584,18 @@ async def start(arguments: Sequence[str], *, cwd: Path, lock: Path) -> JobChild:
         read_end, write_end = windows_utils.pipe(overlapped=(True, False))
         try:
             fence = hold_children_fence(lock)
+            empty_input = os.open(os.devnull, os.O_RDONLY)
             try:
                 process, pid = _create_in_job(
-                    arguments, cwd, job, write_end, msvcrt.get_osfhandle(fence)
+                    arguments,
+                    cwd,
+                    job,
+                    (msvcrt.get_osfhandle(empty_input), write_end),
+                    msvcrt.get_osfhandle(fence),
+                    console=False,
                 )
             finally:
+                os.close(empty_input)
                 # From here the child's copy is the only one.
                 os.close(fence)
         except BaseException:
@@ -604,3 +622,109 @@ async def start(arguments: Sequence[str], *, cwd: Path, lock: Path) -> JobChild:
         _close_handle(job)
         raise
     return JobChild(pid, reader, transport, exit_code, job)
+
+
+def _is_open(descriptor: int) -> bool:
+    """Whether this process has that descriptor open."""
+    try:
+        os.fstat(descriptor)
+    except OSError:
+        return False
+    return True
+
+
+def _own_standard_streams() -> list[int]:
+    """Private copies of this process's standard input, output and error.
+
+    A stream this process was started without, or has closed, is the null
+    device in the copy, as a POSIX program finds it when its parent closed the
+    stream before starting it.
+
+    Which streams are open is settled before the first copy is made. A copy
+    takes the lowest free descriptor number, which is the number of a closed
+    standard stream, so asking afterwards would find a copy of standard input
+    there and hand the program a read-only handle to write its output to.
+    """
+    wanted = ((0, os.O_RDONLY), (1, os.O_WRONLY), (2, os.O_WRONLY))
+    is_open = [_is_open(descriptor) for descriptor, _ in wanted]
+    copies: list[int] = []
+    try:
+        for (descriptor, flags), present in zip(wanted, is_open, strict=True):
+            if present:
+                with contextlib.suppress(OSError):
+                    copies.append(os.dup(descriptor))
+                    continue
+            copies.append(os.open(os.devnull, flags))
+    except BaseException:
+        for copy in copies:
+            os.close(copy)
+        raise
+    return copies
+
+
+def _wait_until_finished(members: list[int]) -> None:
+    """Block until every ended process has finished; close each handle."""
+    for handle in members:
+        _wait_for_handle(handle, _INFINITE)
+        _close_handle(handle)
+
+
+def run_in_place(arguments: Sequence[str], *, lock: Path) -> int:
+    """Run a program in this process's place and return its exit code.
+
+    The program gets this process's own standard input, output and error, with
+    nothing in between, and its console and working directory. It is a member
+    of a new job and holds the lock's children fence, like any owned child, so
+    it cannot outlive this process or the lock this process goes on holding.
+
+    While the program runs, this process ignores Ctrl-C and Ctrl-Break: both
+    reach every program on the console, and what they mean is the running
+    program's to decide. When the program ends, whatever it left running in
+    its job is ended and waited for before this returns.
+
+    Args:
+        arguments: The program and its arguments.
+        lock: The path of the lock this process holds.
+
+    Returns:
+        The program's exit code, as Windows reports it.
+
+    Raises:
+        ValueError: The lock's children fence is not an owner-only file.
+        OSError: The program could not be started.
+    """
+    job = _new_job()
+    try:
+        copies = _own_standard_streams()
+        ignored: dict[int, object] = {}
+        try:
+            fence = hold_children_fence(lock)
+            try:
+                # From before the program exists, so no interrupt can end
+                # this process and leave the program without its owner.
+                for number in (signal.SIGINT, signal.SIGBREAK):
+                    with contextlib.suppress(ValueError):
+                        ignored[number] = signal.signal(number, signal.SIG_IGN)
+                process, _ = _create_in_job(
+                    arguments,
+                    Path.cwd(),
+                    job,
+                    tuple(msvcrt.get_osfhandle(copy) for copy in copies),
+                    msvcrt.get_osfhandle(fence),
+                    console=True,
+                )
+            finally:
+                os.close(fence)
+                for copy in copies:
+                    os.close(copy)
+            try:
+                code = _await_exit(process)
+            finally:
+                _close_handle(process)
+                _wait_until_finished(_end_all(job))
+        finally:
+            for number, previous in ignored.items():
+                signal.signal(number, previous)  # pyright: ignore[reportArgumentType]
+    finally:
+        _close_handle(job)
+    return code

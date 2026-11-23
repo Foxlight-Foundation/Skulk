@@ -1,7 +1,6 @@
 """Local setup resolves an installed ID and executes only verified publisher bytes."""
 
 import asyncio
-import os
 import sqlite3
 import sys
 import zipfile
@@ -18,14 +17,22 @@ from skulk.extensions.runtime_files import (
     read_private,
     write_private,
 )
+from skulk.extensions.runtime_integrity import runtime_interpreter
 from skulk.extensions.runtime_selection import RuntimeSelector
 from skulk.extensions.tests.test_runtime_install import artifacts
+from skulk.utils.runtime_files import has_root_authority
+
+# The installer refuses an administrator, as it refuses root.
+installs = pytest.mark.skipif(
+    has_root_authority(), reason="the installer refuses root authority"
+)
 
 
 class ExecutedError(Exception):
     """Stop the test at the process replacement boundary after checking arguments."""
 
 
+@installs
 @pytest.mark.parametrize("action", ["setup", "manage"])
 @pytest.mark.parametrize(
     "fault",
@@ -116,14 +123,15 @@ async def test_local_setup_verifies_before_process_replacement(
         )
     executed = False
 
-    def replace_process(
-        path: str, arguments: tuple[str, ...], environment: dict[str, str]
-    ) -> NoReturn:
+    def replace_process(arguments: tuple[str, ...], *, lock: Path) -> NoReturn:
         nonlocal executed
         executed = True
-        assert path == str(
-            root / "generations" / staged.runtime_digest / "runtime/bin/python"
+        assert arguments[0] == str(
+            runtime_interpreter(
+                root / "generations" / staged.runtime_digest / "runtime"
+            )
         )
+        assert lock == selector.installer.installer / "installer.lock"
         assert arguments[1:4] == ("-I", "-B", "-c")
         if fault == "launcher":
             assert "entry_points(group='skulk.capability_runtime')" in arguments[4]
@@ -132,12 +140,11 @@ async def test_local_setup_verifies_before_process_replacement(
         else:
             assert f"run_module('__{action}__'" in arguments[4]
         assert arguments[-2:] == ("--example-input", "$(inert)")
-        assert "PYTHONPATH" not in environment
         with pytest.raises(BlockingIOError):
             RuntimeLock(selector.installer.installer)
         raise ExecutedError
 
-    monkeypatch.setattr(os, "execve", replace_process)
+    monkeypatch.setattr("skulk.extensions.local_setup.hand_over", replace_process)
     held = None
     if fault in ("contention", "busy", "selection_changed", "cancelled"):
         held = RuntimeLock(selector.installer.installer)
@@ -200,23 +207,37 @@ async def test_local_setup_refuses_paths_before_discovery(identifier: str) -> No
         await setup_installed_plugin(identifier, ())
 
 
+@installs
 @pytest.mark.parametrize("action", ["setup", "manage"])
 async def test_setup_exec_keeps_terminal_io_and_generation_fence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: Literal["setup", "manage"]
 ) -> None:
-    """Execute a real signed offline entrypoint and check inherited lock ownership."""
+    """Run a real signed offline entrypoint and check that the lock is held for it.
+
+    On POSIX the entrypoint holds the lock itself, by the inherited descriptor.
+    On Windows the process that started it holds the lock and waits. Either
+    way the entrypoint must find the lock taken, on the very byte range the
+    platform's lock uses.
+    """
     manager = tmp_path / "service"
     private_directory(manager)
     root = manager / "installations/managed.example"
     config = tmp_path / "config"
     source = tmp_path / "source"
-    entrypoint = """import fcntl,sys
+    entrypoint = """import os,sys
 from pathlib import Path
 root=Path(sys.prefix).parents[2]
-with (root/'installer/installer.lock').open('rb') as stream:
-    try: fcntl.flock(stream.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
-    except BlockingIOError: pass
-    else: raise RuntimeError('generation fence lost on exec')
+stream=os.open(root/'installer/installer.lock',os.O_RDWR)
+try:
+    if sys.platform=='win32':
+        import msvcrt
+        os.lseek(stream,0x7FFFFFFFFFFFFFFF,os.SEEK_SET)
+        msvcrt.locking(stream,msvcrt.LK_NBLCK,1)
+    else:
+        import fcntl
+        fcntl.flock(stream,fcntl.LOCK_EX|fcntl.LOCK_NB)
+except OSError: pass
+else: raise RuntimeError('generation fence lost on exec')
 print('entrypoint-ready',flush=True)
 print('setup:'+input(),flush=True)
 """
@@ -273,8 +294,8 @@ service_setup.main()
         async with asyncio.timeout(20):
             output, errors = await process.communicate()
         assert process.returncode == 0, errors.decode()
-        assert readiness == b"entrypoint-ready\n"
-        assert output == b"setup:ordinary input\n"
+        assert readiness.rstrip(b"\r\n") == b"entrypoint-ready"
+        assert output.rstrip(b"\r\n") == b"setup:ordinary input"
     finally:
         if process.returncode is None:
             process.kill()

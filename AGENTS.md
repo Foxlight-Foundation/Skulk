@@ -260,8 +260,8 @@ a file or opens one link-safely by calling the operating system itself: it uses
 `is_private_directory`, `open_private`, `sync_directory`, `examine`,
 `open_unfollowed` and `create_file` from the same module, and a guard in
 `utils/tests/test_runtime_files_platforms.py` lists the modules not yet moved
-(`local_setup.py` and the `service_*` modules). Take a module off that list
-when it is ported; add none.
+(the `service_*` modules). Take a module off that list when it is ported; add
+none.
 An installed runtime is laid out differently per platform, and only
 `extensions/runtime_integrity.py` knows how: `runtime_interpreter()` gives the
 environment's interpreter (`runtime/bin/python`, or `runtime\Scripts\python.exe`
@@ -300,9 +300,28 @@ file lock belongs to one process and is freed a moment before the job is ended,
 so the child also holds `<lock>.children` open with no sharing and
 `RuntimeLock` refuses a new holder while it is held. Releasing a child waits,
 with no time limit, until every process of its tree has finished and let go of
-its files. `utils/tests/test_owned_process.py` lists the
-modules that still start process trees themselves (`runtime_service.py`,
+its files. A terminal command that ends by running an installed program in
+its own place (`setup-plugin`, `manage-plugin` in `extensions/local_setup.py`)
+calls `hand_over(arguments, lock=)`, which does not return. POSIX replaces the
+process with `os.execve` and the program inherits the lock's descriptor.
+Windows can do neither, so there the program runs as an owned child with this
+process's own standard streams and console, holding the children fence, while
+this process keeps the lock, ignores Ctrl-C and Ctrl-Break (they reach every
+program on the console and are the running program's to interpret), waits,
+ends what the program left running and exits with its exit code.
+`has_borrowed_identity()` in `utils/runtime_files.py` is the one test for a
+set-user-ID process; it is always false on Windows.
+`utils/tests/test_owned_process.py` lists the modules that still start, stop
+or replace processes themselves (`runtime_service.py`, `service_bootstrap.py`,
 `service_snapshot.py`).
+A Windows path is limited to 259 characters unless the machine has long paths
+switched on (off by default). An installed runtime needs 184 of them below its
+installation's root: `generations\<64 characters>\runtime\`, then up to 98 for
+the files of the `pip` that `venv` puts in every runtime. An installation root
+longer than 75 characters therefore cannot be installed into on a default
+Windows machine, and the failure is `venv` exiting with an error. The plugin
+tests get a short temporary directory on Windows for this reason
+(`extensions/tests/conftest.py`).
 
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`, dark = the operator design system's Den palette); components never branch on the theme name. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field (scene crown + shooting stars, mesh retired); default builds ship a CSS-only night gradient with the mesh.
