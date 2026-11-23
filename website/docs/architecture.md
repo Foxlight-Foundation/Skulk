@@ -4987,6 +4987,18 @@ Successfully verified results retain installed-path order, and no directory
 cache substitutes for current policy/runtime checks. Discovery reads signed
 envelopes using the normal installer's512KiB metadata bound.
 
+Invocation-scoped inference discovery is a read-only query on the protected
+Core/owner connection. Core resolves the actual active parent from that peer,
+then intersects fresh observations with the parent context's exact targets,
+processing domains, ancestry and the original caller's current credentials and
+policy. An application cannot supply a replacement caller or borrow the owner's
+permissions. Discovery excludes the executor and its ancestors across version
+aliases and returns no grants. It has its own monotonic sequence and one pending
+query per parent, held through guarded physical response delivery. Completion,
+revocation or cancellation withdraws the observation. A separate bounded lane
+allows discovery to progress when all ordinary root and media slots are occupied.
+This is native managed-target metadata; it performs no model selection or routing.
+
 Threaded metadata verification retains separate ownership after an observer
 times out: at most one in-flight task per installation and64 across the host.
 Repeated scans may join only the same binding and exact metadata bytes. The
