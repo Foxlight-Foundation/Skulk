@@ -1403,7 +1403,14 @@ SYSTEM only; the client refuses a pipe served by another account, and a pipe
 has no half-close. There is one transport per platform and no fallback. The
 `Windows management node` CI job installs from the lock on Windows, imports
 `skulk.main` and runs the Windows tests; add a test file to that job when it
-has something only Windows can check.
+has something only Windows can check. The job's runner is an administrator,
+which the plugin installer refuses as it refuses root, so a test that installs
+a plugin is skipped in the job's first test step. Such a test file goes in the
+second, which runs through `scripts/run_as_ordinary_windows_user.py`: the same
+account with its rights reduced to an ordinary user's (the token
+`runas /trustlevel:0x20000` makes). That step fails if the rights were not
+reduced. The runner has long paths switched on, so neither step checks the
+259-character path limit described below.
 Owner-only runtime state (`utils/runtime_files.py`: `private_directory`,
 `read_private`, `write_private`, `remove_private`, `RuntimeLock`) has a Windows
 side in `utils/_runtime_files_windows.py`, built on the model-preservation

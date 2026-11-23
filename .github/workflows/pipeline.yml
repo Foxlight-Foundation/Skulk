@@ -200,11 +200,8 @@ jobs:
 
       - name: Run the Windows tests
         # This runner is an administrator, which the plugin installer refuses
-        # as it refuses root. Tests that install a plugin (in
-        # test_runtime_integrity.py and test_local_setup.py) are therefore
-        # skipped here until this job has a step that runs without
-        # administrator rights; they run on a Windows machine as an ordinary
-        # user before each change to them merges.
+        # as it refuses root, so a test that installs a plugin would be
+        # skipped here. Those tests run in the next step.
         shell: bash
         env:
           SKULK_TESTS: "1"
@@ -220,10 +217,37 @@ jobs:
           src/skulk/utils/tests/test_windows_account.py
           src/skulk/utils/tests/test_owned_process.py
           src/skulk/extensions/tests/test_runtime_manager_platforms.py
-          src/skulk/extensions/tests/test_runtime_integrity.py
-          src/skulk/extensions/tests/test_local_setup.py
           src/skulk/extensions/tests/test_runtime_catalog.py
           src/skulk/extensions/tests/test_capability_store.py
+
+      - name: Run the plugin installer tests as an ordinary user
+        # scripts/run_as_ordinary_windows_user.py starts a command with this
+        # account's rights reduced to an ordinary user's, which is the account
+        # the installer accepts. The first command fails the step if the
+        # rights were not reduced: every installing test would then be
+        # skipped, and the step would pass having checked nothing.
+        #
+        # The slow tests are included: one of them copies a standalone Python,
+        # installs through it, moves it and starts the adopted environment,
+        # which nothing else in CI does on Windows.
+        #
+        # This runner has long paths switched on, which a Windows machine does
+        # not by default, so the 259-character path limit is not checked here.
+        shell: bash
+        env:
+          SKULK_TESTS: "1"
+        run: |
+          ordinary="uv run --no-sync python scripts/run_as_ordinary_windows_user.py python"
+          $ordinary -c "import sys; from skulk.utils.runtime_files import has_root_authority; sys.exit(has_root_authority())"
+          $ordinary -m pytest -m "slow or not slow" --import-mode=importlib \
+            --basetemp="$RUNNER_TEMP/u" \
+            src/skulk/utils/tests/test_runtime_files_platforms.py \
+            src/skulk/utils/tests/test_owned_process.py \
+            src/skulk/extensions/tests/test_runtime_integrity.py \
+            src/skulk/extensions/tests/test_runtime_install.py \
+            src/skulk/extensions/tests/test_runtime_download.py \
+            src/skulk/extensions/tests/test_runtime_selection.py \
+            src/skulk/extensions/tests/test_local_setup.py
 
   test:
     name: Test
