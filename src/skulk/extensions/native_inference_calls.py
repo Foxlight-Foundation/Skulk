@@ -610,10 +610,16 @@ class NativeInferenceCalls:
             parent.discovering = claimed = True
             parent.children.add(current)
             directory = await self.directory.directory(streaming=True)
+            authorization = self.callers.authorize(
+                parent.caller, parent.listing.grant()
+            )
+            # A descriptor target can survive a runtime upgrade. Observe only
+            # exact enrolled generations; delivery still repeats authorization.
             selected = tuple(
                 listing
                 for listing in directory
                 if len(ancestry) < 8
+                and listing.grant() in authorization.access.grants
                 and listing.target.model_dump(mode="json") in allowed
                 and listing.target.processing_domain in domains
                 and all(

@@ -7,6 +7,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+- Admit the issued native7 inference/discovery cohort while retaining older signed closures; installed probes check each version's exact profile inventory, and scoped discovery omits unenrolled runtime generations while preserving other exact-granted destinations.
+
 ### SDK 1 candidate composition
 
 - Add protected invocation-scoped directory queries under the original caller's
