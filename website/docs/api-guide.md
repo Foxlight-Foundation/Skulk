@@ -3327,9 +3327,13 @@ model loads. The `InstallEngine` task's `engine` is the package's engine name
 and its `approximateDownloadBytes` is `0`. A node that is offline, has engine
 installs turned off (`SKULK_NO_ENGINE_AUTOPROVISION=1`), does not run models,
 or has engine packages turned off (`SKULK_ENGINE_PACKAGES_DISABLE=1`) offers
-no package this way. A node installs builds from the store's `stable` channel;
-`SKULK_ENGINE_PACKAGE_CHANNEL=candidate` at launch makes it also install
-builds that have not been promoted.
+no package this way. A node installs released builds (the store's `stable`
+channel). The cluster setting `engines.package_channel` in `GET /config` and
+`PUT /config` chooses this: `stable` is the default, and `candidate` makes
+every node also install builds that are still being tested. It is a setting
+and not a launch switch, so it works the same in a packaged Skulk. A node
+applies a change the next time it renews its package list (hourly) or
+restarts, and a package a node already holds is never replaced by it.
 
 A compatible Comfy renderer update can also be prepared through this flow while
 the base engine is already installed. The notice then quotes the small published

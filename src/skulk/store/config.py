@@ -524,6 +524,8 @@ class SkulkConfig(FrozenModel):
             ``None`` means the mode is off.
         restart_recovery: Restart recovery settings. ``None`` means the
             defaults: models come back after a restart.
+        engines: Engine package settings. ``None`` means the defaults: nodes
+            install released engine builds only.
         model_trust: Deprecated persisted compatibility state from the retired
             secondary repository-code approval ceremony. Current execution
             authorization does not consult it.
@@ -540,6 +542,7 @@ class SkulkConfig(FrozenModel):
     telemetry: "TelemetryConfig | None" = None
     intelligent_fabric: "IntelligentFabricConfig | None" = None
     restart_recovery: "RestartRecoveryConfig | None" = None
+    engines: "EnginesConfig | None" = None
     model_trust: "ModelTrustConfig | None" = None
     hf_token: str | None = None
 
@@ -634,6 +637,43 @@ class RestartRecoveryConfig(FrozenModel):
     """
 
     enabled: bool = True
+
+
+EnginePackageChannel = Literal["stable", "candidate"]
+"""Which published engine builds a cluster installs: released builds only, or
+also builds still being tested."""
+
+
+@final
+class EnginesConfig(FrozenModel):
+    """Engine package settings (cluster-synced).
+
+    Attributes:
+        package_channel: Which published builds of an engine package the
+            cluster's nodes install when a model needs one. ``stable`` (the
+            default) means released builds only. ``candidate`` means a node
+            also installs builds that are still being tested. It is a setting
+            and not a launch switch because a packaged Skulk has no launch
+            environment a person can change. A node applies a change the next
+            time it renews its package list (hourly) or restarts, and a
+            package a node already holds is never replaced by this setting.
+    """
+
+    package_channel: EnginePackageChannel = "stable"
+
+
+def engine_package_channel(config: "SkulkConfig | None") -> EnginePackageChannel:
+    """Return the engine package channel from a loaded config.
+
+    Args:
+        config: The loaded ``skulk.yaml``, or ``None`` when none exists.
+
+    Returns:
+        ``engines.package_channel``, or ``stable`` when the section is absent.
+    """
+    if config is None or config.engines is None:
+        return "stable"
+    return config.engines.package_channel
 
 
 @final

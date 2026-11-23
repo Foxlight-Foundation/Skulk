@@ -23,11 +23,14 @@ import platform
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Final, final
 
 import httpx
+import yaml
+from loguru import logger
+from pydantic import ValidationError
 
 from skulk.engines.protocol import PROTOCOL_VERSIONS_SUPPORTED
 from skulk.extensions.capability_store import (
@@ -64,11 +67,11 @@ from skulk.provisioning.llama_server import AUTOPROVISION_OPT_OUT_ENV
 from skulk.shared.backends import engine_packages_disabled
 from skulk.shared.types.node_facts import NodeFacts
 from skulk.shared.version import get_skulk_version
-
-ENGINE_PACKAGE_CHANNEL_ENV: Final = "SKULK_ENGINE_PACKAGE_CHANNEL"
-"""Set to ``candidate`` to make a node also install package builds that have
-not been promoted to ``stable``. Unset, or any other value, follows ``stable``
-only. A launch switch for test segments; it is not a fleet setting."""
+from skulk.store.config import (
+    SkulkConfig,
+    engine_package_channel,
+    load_skulk_config,
+)
 
 _MANIFEST_NAME: Final = "manifest.json"
 _FETCH_SECONDS: Final = 8.0
@@ -91,11 +94,28 @@ class EnginePackageInstallError(Exception):
 
 
 def followed_channels(
-    environ: Mapping[str, str] | None = None,
+    read_settings: Callable[[], SkulkConfig | None] = load_skulk_config,
 ) -> frozenset[EngineChannel]:
-    """The package channels this node installs from."""
-    env = os.environ if environ is None else environ
-    if env.get(ENGINE_PACKAGE_CHANNEL_ENV, "").strip().lower() == "candidate":
+    """The package channels this node installs from, read from Settings.
+
+    The choice is the cluster setting ``engines.package_channel``. It is read
+    from the node's saved settings and never from the launch environment,
+    because a packaged Skulk has no environment a person can change. Settings
+    that cannot be read mean released builds only: a node must not start
+    installing builds that are still being tested because a file is damaged.
+
+    Args:
+        read_settings: Reads the node's saved settings, for tests.
+
+    Returns:
+        ``stable`` alone, or ``stable`` and ``candidate``.
+    """
+    try:
+        config = read_settings()
+    except (ValidationError, yaml.YAMLError, OSError) as error:
+        logger.debug(f"Engine packages: Settings could not be read ({error})")
+        return frozenset({"stable"})
+    if engine_package_channel(config) == "candidate":
         return frozenset({"stable", "candidate"})
     return frozenset({"stable"})
 
@@ -189,6 +209,7 @@ def engine_package_offers(
     *,
     offline: bool,
     environ: Mapping[str, str] | None = None,
+    channels: frozenset[EngineChannel] | None = None,
     trust_client: StoreTrustClient | None = None,
     index_client: EngineIndexClient | None = None,
     platform_name: str | None = None,
@@ -206,6 +227,7 @@ def engine_package_offers(
         offline: The node must not reach the network, so it can install
             nothing and offers nothing.
         environ: Environment to read switches from; the process's by default.
+        channels: The channels to offer from; the cluster setting by default.
         trust_client: Engine trust reader, for tests.
         index_client: Package list reader, for tests.
         platform_name: Artifact family, for tests.
@@ -232,7 +254,9 @@ def engine_package_offers(
     return {
         tag: entry
         for tag, entry in installable_engine_packages(
-            index, host, channels=followed_channels(environ)
+            index,
+            host,
+            channels=channels if channels is not None else followed_channels(),
         ).items()
         if tag not in facts.engine_package_builds
         and not (packaged and entry.adapter_python_requires is not None)

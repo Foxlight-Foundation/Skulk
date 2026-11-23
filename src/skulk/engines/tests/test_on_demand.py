@@ -14,7 +14,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from skulk.engines.inventory import read_engine_package_inventory
 from skulk.engines.on_demand import (
-    ENGINE_PACKAGE_CHANNEL_ENV,
     EnginePackageInstallError,
     engine_host_of,
     engine_package_download_bytes,
@@ -31,6 +30,7 @@ from skulk.extensions.tests.store_repository import StoreRepository, trust_docum
 from skulk.facts.testing import NVIDIA_A40, make_facts
 from skulk.provisioning.engine_index import (
     ENGINE_INDEX_SIGNATURE_DOMAIN,
+    EngineChannel,
     EngineIndexClient,
 )
 from skulk.provisioning.engine_trust import ENGINE_TRUST_TARGET, engine_trust_client
@@ -43,6 +43,7 @@ from skulk.provisioning.tests.engine_package_fixtures import (
 )
 from skulk.shared.backends import ENGINE_PACKAGES_DISABLE_ENV
 from skulk.shared.types.node_facts import GpuDeviceFact, NodeFacts
+from skulk.store.config import SkulkConfig
 
 STORE = "https://store.invalid/engines/"
 PLATFORM = "linux-glibc-x86_64"
@@ -193,6 +194,7 @@ class _Store:
         *,
         offline: bool = False,
         environ: dict[str, str] | None = None,
+        channels: frozenset[EngineChannel] = frozenset({"stable"}),
     ) -> dict[str, str]:
         return {
             tag: entry.manifest_digest
@@ -200,6 +202,7 @@ class _Store:
                 facts,
                 offline=offline,
                 environ=environ if environ is not None else {},
+                channels=channels,
                 trust_client=self.trust,
                 index_client=self.index,
                 platform_name=PLATFORM,
@@ -328,10 +331,44 @@ def test_a_candidate_build_is_offered_only_when_the_node_follows_candidates(
     store.refresh()
 
     assert store.offers(strix) == {TAG: store.digest}
-    assert store.offers(strix, environ={ENGINE_PACKAGE_CHANNEL_ENV: "candidate"}) == {
+    assert store.offers(strix, channels=frozenset({"stable", "candidate"})) == {
         TAG: candidate
     }
-    assert followed_channels({}) == {"stable"}
+
+
+def test_the_candidate_choice_is_a_cluster_setting() -> None:
+    def following(channel: str) -> SkulkConfig:
+        return SkulkConfig.model_validate({"engines": {"package_channel": channel}})
+
+    assert followed_channels(lambda: None) == {"stable"}
+    assert followed_channels(lambda: SkulkConfig()) == {"stable"}
+    assert followed_channels(lambda: following("stable")) == {"stable"}
+    assert followed_channels(lambda: following("candidate")) == {
+        "stable",
+        "candidate",
+    }
+
+
+def test_the_launch_environment_cannot_choose_candidate_builds(
+    store: _Store, strix: NodeFacts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A packaged Skulk has no launch environment a person can change, so the
+    # choice must not depend on one.
+    _ = store.publish_package(generation=2, channel="candidate")
+    store.refresh()
+    monkeypatch.setenv("SKULK_ENGINE_PACKAGE_CHANNEL", "candidate")
+
+    assert store.offers(
+        strix, environ={"SKULK_ENGINE_PACKAGE_CHANNEL": "candidate"}
+    ) == {TAG: store.digest}
+    assert followed_channels(lambda: None) == {"stable"}
+
+
+def test_settings_that_cannot_be_read_mean_released_builds_only() -> None:
+    def damaged() -> SkulkConfig | None:
+        raise OSError("settings file is unreadable")
+
+    assert followed_channels(damaged) == {"stable"}
 
 
 def test_a_published_build_is_found_by_its_identity_for_its_size(
