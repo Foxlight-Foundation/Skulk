@@ -299,6 +299,7 @@ def _native_coexistence_gpu_limit(
     node: NodeId,
     resources: NodeResources | None,
     instances: Mapping[InstanceId, Instance],
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> int:
     """Bound ordinary GPU placement by the native owner's actual device zero.
 
@@ -344,6 +345,7 @@ def _native_coexistence_gpu_limit(
                     node, resources, instances,
                     target_device=probe.device,
                     node_is_unified=capacity.device_memory_kind == "unified",
+                    package_needs=package_needs,
                 ),
             )
         except ValueError:
@@ -463,7 +465,7 @@ def reserve_instance_vram(
     for node_id in native_nodes:
         if node_id in usable:
             usable[node_id] = min(usable[node_id], Memory.from_bytes(
-                _native_coexistence_gpu_limit(node_id, (node_resources or {}).get(node_id), current_instances)
+                _native_coexistence_gpu_limit(node_id, (node_resources or {}).get(node_id), current_instances, package_needs)
             ))
     for node_id in invalid_nodes:
         if node_id in usable:

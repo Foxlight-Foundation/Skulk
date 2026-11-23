@@ -113,7 +113,7 @@ from skulk.shared.types.worker.instances import (
     MlxRingInstance,
     instance_meta_of,
 )
-from skulk.shared.types.worker.runners import ShardAssignments
+from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import (
     RpcDonorShardMetadata,
     Sharding,
@@ -260,6 +260,7 @@ def add_instance_to_placements(
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     native_music_commitments: Mapping[InstanceId, Instance] | None = None,
     model_engine_orders: Mapping[ModelId, Sequence[str]] | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> Mapping[InstanceId, Instance]:
     """Validate and add one caller-specified exact instance placement.
 
@@ -275,6 +276,9 @@ def add_instance_to_placements(
         node_resources: Advertised engines used to resolve unstamped exact shards.
         native_music_commitments: Complete deduplicated pending and committed
             native-admission owners; generic node_memory is already reserved.
+        package_needs: What an engine package said a placed load takes, by
+            runner (``State.engine_package_needs``). Native music admission
+            reads raw observations, so it charges these itself.
         model_engine_orders: Each person-set engine order by model name. It
             ranks the engine for a shard that names none; a stamped shard
             keeps the engine it names.
@@ -357,6 +361,7 @@ def add_instance_to_placements(
                     explicit_backend=shard.resolved_backend,
                     node_is_unified=node_id in (unified_memory_gpu_nodes or ()) or None,
                     engine_order=_engine_order(shard.model_card, model_engine_orders, launch_order),
+                    package_needs=package_needs,
                 )
                 build = "ace_step@sha256:" + assessment.policy.payload_sha256
                 if shard.resolved_engine_build is not None and shard.resolved_engine_build != build:
@@ -587,6 +592,7 @@ def _assess_native_music_node(
     explicit_backend: str | None = None,
     node_is_unified: bool | None = None,
     engine_order: tuple[str, ...] | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> NativeMusicPlacementAssessment:
     """Choose a genuinely ready native lane with complete shared fit policy.
 
@@ -612,6 +618,7 @@ def _assess_native_music_node(
             assessed = assess_native_music_placement(
                 card, backend, node, resources, commitments,
                 now_unix_ms=int(time.time() * 1000), node_is_unified=node_is_unified,
+                package_needs=package_needs,
             )
         except ValueError as error:
             reasons.append(str(error))
@@ -1248,6 +1255,7 @@ def place_instance(
     node_install_ids: Mapping[NodeId, UUID] | None = None,
     native_music_commitments: Mapping[InstanceId, Instance] | None = None,
     model_engine_orders: Mapping[ModelId, Sequence[str]] | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> dict[InstanceId, Instance]:
     # One order ranks this placement's engines everywhere below: an order given
     # for this launch, then the person's order for the model, then the card's
@@ -1611,6 +1619,7 @@ def place_instance(
                     current_instances if native_music_commitments is None else native_music_commitments,
                     node_is_unified=node in (unified_memory_gpu_nodes or ()) or None,
                     engine_order=backend_preference,
+                    package_needs=package_needs,
                 )
             except PlacementInfoPendingError as error:
                 memory_diagnostics.pending_info_node_ids.append(node)

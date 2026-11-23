@@ -5346,6 +5346,7 @@ class Worker:
                         assessment = assess_native_music_placement(
                             shard.model_card, backend, self.node_id, observed, self.state.instances,
                             now_unix_ms=int(time.time() * 1000), excluded_instance=bound.instance,
+                            package_needs=self.state.engine_package_needs,
                         )
                         if assessment.policy != policy:
                             raise ValueError("Native music placement policy differs from current card/library math")

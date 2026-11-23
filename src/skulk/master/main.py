@@ -1819,6 +1819,7 @@ class Master:
             model_engine_orders=self._model_engine_orders,
             served_context_default=self._served_context_default(),
             native_music_commitments=self._native_music_placement_commitments(command, self.state.instances),
+            package_needs=self.state.engine_package_needs,
         )
 
     def _create_requested_instance(
@@ -1846,6 +1847,7 @@ class Master:
             model_engine_orders=self._model_engine_orders,
             node_resources=resources,
             native_music_commitments=self._native_music_placement_commitments(command, self.state.instances),
+            package_needs=self.state.engine_package_needs,
         )
 
     def _record_runner_loaded_transitions(
@@ -2355,6 +2357,7 @@ class Master:
             model_engine_orders=self._model_engine_orders,
             served_context_default=self._served_context_default(),
             native_music_commitments=self._native_music_placement_commitments(command, current_instances),
+            package_needs=self.state.engine_package_needs,
         )
 
     async def _execute_approved_steward_action(
@@ -4442,6 +4445,7 @@ class Master:
                                         model_engine_orders=self._model_engine_orders,
                                         served_context_default=self._served_context_default(),
                                         native_music_commitments=self._native_music_placement_commitments(replace_command, after_delete),
+                                        package_needs=self.state.engine_package_needs,
                                     )
                                     logger.warning(
                                         "Re-placing "
@@ -4510,6 +4514,7 @@ class Master:
                                             model_engine_orders=self._model_engine_orders,
                                             served_context_default=self._served_context_default(),
                                             native_music_commitments=self._native_music_placement_commitments(fallback, after_delete),
+                                            package_needs=self.state.engine_package_needs,
                                         )
                                         for new_id in final_placement:
                                             if new_id not in after_delete:
@@ -4985,6 +4990,7 @@ class Master:
                     model_engine_orders=self._model_engine_orders,
                     served_context_default=self._served_context_default(),
                     native_music_commitments=self._native_music_placement_commitments(replace_command, after_delete),
+                    package_needs=self.state.engine_package_needs,
                 )
                 self._download_failure_lineage[
                     InstanceId(str(replace_command.command_id))
@@ -5216,6 +5222,7 @@ class Master:
             model_engine_orders=self._model_engine_orders,
             served_context_default=self._served_context_default(),
             native_music_commitments=self._native_music_placement_commitments(command, current_instances),
+            package_needs=self.state.engine_package_needs,
         )
 
     def _steward_replacement_memory_inputs(
