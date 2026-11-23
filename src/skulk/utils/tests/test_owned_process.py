@@ -155,6 +155,30 @@ async def test_a_program_that_cannot_be_started_is_an_error(root: Path) -> None:
         lock.close()
 
 
+async def test_the_lock_is_not_free_while_a_child_still_runs(root: Path) -> None:
+    """Letting go of the lock does not free it: the child holds it too.
+
+    This is what an abrupt end of the owner looks like to anyone else. POSIX
+    gives the child the lock's descriptor; Windows gives it a file the lock
+    checks.
+    """
+    lock = RuntimeLock(root, "installer.lock")
+    child = await start_owned(
+        (sys.executable, "-I", "-c", "import time; time.sleep(120)"),
+        cwd=root,
+        lock=lock,
+    )
+    try:
+        lock.close()
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(root, "installer.lock")
+        child.kill()
+        await asyncio.wait_for(child.wait(), 10)
+    finally:
+        await child.close()
+    RuntimeLock(root, "installer.lock").close()
+
+
 async def test_stopping_a_child_stops_everything_it_started(root: Path) -> None:
     lock = RuntimeLock(root, "installer.lock")
     try:
@@ -256,9 +280,10 @@ async def test_a_temporary_directory_with_any_character_in_its_name_is_passed_on
 def test_a_tree_never_writes_once_another_process_holds_the_lock(root: Path) -> None:
     """The owner dies without warning while a competitor waits for its lock.
 
-    POSIX keeps the lock held by the orphaned child for as long as it runs.
-    Windows ends the orphans with the owner. Either way, from the moment the
-    competitor has the lock, no member of this tree writes again.
+    Both platforms keep the lock from the competitor for as long as the
+    orphaned child runs. Windows ends the orphans with the owner; on POSIX
+    the test has to. From the moment the competitor has the lock, no member
+    of this tree writes again.
     """
     owner_script = (
         "import asyncio, os, sys\n"

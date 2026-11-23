@@ -20,9 +20,10 @@ a second failure.
 
 On Windows the tree runs inside a Job Object that the operating system
 destroys, with every process in it, when this process's handle to it closes
-(:mod:`skulk.utils._owned_process_windows`); a file lock there belongs to one
-process and cannot be inherited. There the second guarantee covers the whole
-tree.
+(:mod:`skulk.utils._owned_process_windows`). A file lock there belongs to one
+process and cannot be inherited, so the child instead holds a file that the
+lock checks: the lock cannot be taken again until the child has ended, and the
+job ends the rest of the tree with it.
 """
 
 import asyncio
@@ -38,6 +39,7 @@ from skulk.utils.runtime_files import RuntimeLock
 
 if sys.platform == "win32":
     from skulk.utils import _owned_process_windows as _windows
+    from skulk.utils._runtime_files_windows import children_fence
 
 
 class OwnedProcess(Protocol):
@@ -70,11 +72,8 @@ class OwnedProcess(Protocol):
         """Release what the platform holds for the tree; call after waiting.
 
         On Windows this ends any member still running and returns only when
-        none is left, so nothing of theirs is still open in the directory.
-        On POSIX there is nothing to release.
-
-        Raises:
-            OSError: On Windows, a member was still there after a bounded wait.
+        none is left, however long that takes, so nothing of theirs is still
+        open in the directory. On POSIX there is nothing to release.
         """
         ...
 
@@ -140,7 +139,7 @@ async def start_owned(
         calling ``kill`` first when it gives up on the child.
     """
     if sys.platform == "win32":
-        return await _windows.start(arguments, cwd=cwd)
+        return await _windows.start(arguments, cwd=cwd, fence=children_fence(lock.path))
     return _SessionChild(
         await asyncio.create_subprocess_exec(
             *arguments,

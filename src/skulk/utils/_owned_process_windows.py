@@ -26,12 +26,14 @@ early to show that, so a handle is taken on every member before it is ended
 and those handles are what is waited on (``_end_all``).
 
 A file lock on Windows belongs to one process and is not shared with a child,
-so the directory's lock is not passed down as it is on POSIX. The job gives
-the same result by a different route: when this process dies, its lock is
-released and its tree is ended in the same teardown. Those two steps are not
-one atomic step. Another process that takes the lock in the instant between
-them could start while the old tree is being ended; the old tree runs no more
-code from that point, so it cannot write behind the new holder.
+so the directory's lock cannot be passed down as it is on POSIX. The job alone
+does not make up for that: when this process dies, Windows frees its lock and
+ends its job in two separate steps, and for a millisecond or two in between
+the lock is free while the tree still runs (measured: about 1 run in 130 saw a
+late write). So the child is also started holding the lock's *children fence*
+open with no sharing (:func:`skulk.utils._runtime_files_windows.children_fence`).
+The lock refuses a new holder while that file is held, which is until the
+child has ended. By then the job has ended the rest of the tree with it.
 """
 
 import sys
@@ -64,11 +66,16 @@ _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _CREATE_NO_WINDOW = 0x08000000
 _STARTF_USESTDHANDLES = 0x00000100
+_GENERIC_READ = 0x80000000
+_OPEN_ALWAYS = 4
+_FILE_ATTRIBUTE_NORMAL = 0x80
 _INFINITE = 0xFFFFFFFF
 _ERROR_ACCESS_DENIED = 5
-# How long ended processes get to finish letting go of what they held.
-_DRAIN_SECONDS = 10.0
-_DRAIN_POLL_SECONDS = 0.005
+# How often to look whether ended processes have finished: quickly at first,
+# because it normally takes a few milliseconds, then at a slower pace.
+_FINISH_POLL_SECONDS = 0.005
+_FINISH_SLOW_POLL_SECONDS = 0.05
+_FINISH_QUICK_POLLS = 200
 
 
 class _BasicLimits(ctypes.Structure):
@@ -164,6 +171,16 @@ _kernel32.QueryInformationJobObject.argtypes = (
     wt.LPVOID,
 )
 _kernel32.QueryInformationJobObject.restype = wt.BOOL
+_kernel32.CreateFileW.argtypes = (
+    wt.LPCWSTR,
+    wt.DWORD,
+    wt.DWORD,
+    wt.LPVOID,
+    wt.DWORD,
+    wt.DWORD,
+    wt.HANDLE,
+)
+_kernel32.CreateFileW.restype = wt.HANDLE
 _kernel32.OpenProcess.argtypes = (wt.DWORD, wt.BOOL, wt.DWORD)
 _kernel32.OpenProcess.restype = wt.HANDLE
 _kernel32.IsProcessInJob.argtypes = (wt.HANDLE, wt.HANDLE, ctypes.POINTER(wt.BOOL))
@@ -217,6 +234,10 @@ _set_job_information: Callable[[int, int, object, int], int] = (
 _query_job: Callable[[int, int, object, int, None], int] = (
     _kernel32.QueryInformationJobObject
 )
+_create_file: Callable[[str, int, int, None, int, int, None], int | None] = (
+    _kernel32.CreateFileW
+)
+_INVALID_HANDLE = wt.HANDLE(-1).value
 _open_process: Callable[[int, bool, int], int | None] = _kernel32.OpenProcess
 _is_in_job: Callable[[int, int, object], int] = _kernel32.IsProcessInJob
 _terminate_job: Callable[[int, int], int] = _kernel32.TerminateJobObject
@@ -286,20 +307,31 @@ def _set_limits(job: int, *, admit_new_members: bool) -> None:
         raise _failure("could not configure a job")
 
 
+def _hold_alone(path: Path) -> int:
+    """Open ``path`` so that nobody else can open it while the handle lives."""
+    handle = _create_file(
+        str(path), _GENERIC_READ, 0, None, _OPEN_ALWAYS, _FILE_ATTRIBUTE_NORMAL, None
+    )
+    if not handle or handle == _INVALID_HANDLE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return handle
+
+
 def _create_in_job(
-    arguments: Sequence[str], cwd: Path, job: int, output: int
+    arguments: Sequence[str], cwd: Path, job: int, output: int, fence: int
 ) -> tuple[int, int]:
     """Create the process as a member of ``job``; return its handle and identifier.
 
-    The child inherits exactly two handles: an empty input and ``output`` for
-    both of its output streams.
+    The child inherits exactly three handles: an empty input, ``output`` for
+    both of its output streams, and ``fence``, which it only holds.
     """
     descriptor = os.open(os.devnull, os.O_RDONLY)
     try:
         empty_input = msvcrt.get_osfhandle(descriptor)
         os.set_handle_inheritable(empty_input, True)
         os.set_handle_inheritable(output, True)
-        inherited = (wt.HANDLE * 2)(empty_input, output)
+        os.set_handle_inheritable(fence, True)
+        inherited = (wt.HANDLE * 3)(empty_input, output, fence)
         jobs = (wt.HANDLE * 1)(job)
         size = ctypes.c_size_t()
         # The first call reports the size the list needs and is expected to fail.
@@ -446,12 +478,14 @@ def _end_all(job: int) -> list[int]:
     return members
 
 
-async def _still_running(members: list[int]) -> list[int]:
-    """Wait for ended processes to finish; return the handles of any that have not.
+async def _until_finished(members: list[int]) -> None:
+    """Wait until every ended process has finished, closing each handle as it does.
 
-    The handles of those that finished are closed.
+    There is no time limit, on purpose. Returning early would let the caller
+    go on, and release its directory lock, while a process of the old tree
+    still had files open there. POSIX waits for a killed child the same way.
     """
-    deadline = asyncio.get_running_loop().time() + _DRAIN_SECONDS
+    polls = 0
     while True:
         unfinished: list[int] = []
         for handle in members:
@@ -460,9 +494,14 @@ async def _still_running(members: list[int]) -> list[int]:
             else:
                 unfinished.append(handle)
         members = unfinished
-        if not members or asyncio.get_running_loop().time() >= deadline:
-            return members
-        await asyncio.sleep(_DRAIN_POLL_SECONDS)
+        if not members:
+            return
+        polls += 1
+        await asyncio.sleep(
+            _FINISH_POLL_SECONDS
+            if polls < _FINISH_QUICK_POLLS
+            else _FINISH_SLOW_POLL_SECONDS
+        )
 
 
 def _await_exit(process: int) -> int:
@@ -514,27 +553,33 @@ class JobChild:
     async def close(self) -> None:
         """End what is left of the tree, wait until it is gone, then release it.
 
-        Returns only when every process of the tree has finished, so nothing
-        of theirs is still open in the directory the caller goes on to use.
-
-        Raises:
-            OSError: A process had not finished after the wait. The job is
-                kept, so the tree still cannot outlive this process, and the
-                call can be repeated.
+        Returns only when every process of the tree has finished, however
+        long that takes, so nothing of theirs is still open in the directory
+        the caller goes on to use.
         """
         self._transport.close()
         if self._job is None:
             return
         self._ended.extend(_end_all(self._job))
-        self._ended = await _still_running(self._ended)
-        if self._ended:
-            raise OSError("a child process tree did not end")
+        members, self._ended = self._ended, []
+        await _until_finished(members)
         _close_handle(self._job)
         self._job = None
 
 
-async def start(arguments: Sequence[str], *, cwd: Path) -> JobChild:
-    """Start a program as a member of a new job, with its output as a stream."""
+async def start(arguments: Sequence[str], *, cwd: Path, fence: Path) -> JobChild:
+    """Start a program as a member of a new job, with its output as a stream.
+
+    Args:
+        arguments: The program and its arguments.
+        cwd: The directory the program starts in.
+        fence: The lock's children fence, which the child holds open, alone,
+            for as long as it runs.
+
+    Raises:
+        OSError: The program could not be started, or an earlier child still
+            holds the fence.
+    """
     loop = asyncio.get_running_loop()
     job = _new_job()
     try:
@@ -542,7 +587,12 @@ async def start(arguments: Sequence[str], *, cwd: Path) -> JobChild:
         # writing end is the plain handle a child expects for its output.
         read_end, write_end = windows_utils.pipe(overlapped=(True, False))
         try:
-            process, pid = _create_in_job(arguments, cwd, job, write_end)
+            held = _hold_alone(fence)
+            try:
+                process, pid = _create_in_job(arguments, cwd, job, write_end, held)
+            finally:
+                # From here the child's copy is the only one.
+                _close_handle(held)
         except BaseException:
             _close_handle(read_end)
             raise
@@ -561,8 +611,7 @@ async def start(arguments: Sequence[str], *, cwd: Path) -> JobChild:
         except BaseException:
             # The child is already running: do not leave it, or anything of
             # its still open, behind the error.
-            for handle in await asyncio.shield(_still_running(_end_all(job))):
-                _close_handle(handle)
+            await asyncio.shield(_until_finished(_end_all(job)))
             raise
     except BaseException:
         _close_handle(job)
