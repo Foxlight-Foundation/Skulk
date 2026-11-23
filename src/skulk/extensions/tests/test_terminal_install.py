@@ -1189,6 +1189,22 @@ async def test_the_terminal_names_a_protocol_refusal_from_its_vocabulary() -> No
     assert "choose a catalog published for it" in catalog_protocol
 
 
+async def test_the_terminal_names_a_path_that_is_too_long() -> None:
+    """The installer says what to change about the folder, and names no path."""
+    from skulk.extensions.runtime_integrity import path_refusal_sentence
+
+    output: list[str] = []
+
+    async def request(_: ManagerRequest) -> dict[str, JsonValue]:
+        return {"error": "runtime_path_too_long", "excess": 9}
+
+    terminal = TerminalInstaller(request, lambda _: "", lambda _: "", output.append)
+    with pytest.raises(ValueError, match="manager request incomplete"):
+        await terminal.run("managed." + "a" * 32)
+    assert path_refusal_sentence(9) in output
+    assert "9 characters longer than Windows allows" in path_refusal_sentence(9)
+
+
 async def test_the_terminal_names_a_catalog_refusal() -> None:
     """A catalog read the host refused says why, not that the manager refused."""
     from skulk.extensions.runtime_catalog import catalog_refusal_sentence

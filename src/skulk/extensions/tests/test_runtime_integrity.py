@@ -1,5 +1,6 @@
 """Installed-file mutations are refused without importing the private runtime."""
 
+import io
 import json
 import os
 import platform
@@ -7,10 +8,12 @@ import shutil
 import stat
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from typing import cast
 
 import pytest
+from pydantic import JsonValue, TypeAdapter
 
 from skulk.extensions.runtime_files import private_directory, write_private
 from skulk.extensions.runtime_install import (
@@ -18,10 +21,18 @@ from skulk.extensions.runtime_install import (
     _without_shared_write,  # pyright: ignore[reportPrivateUsage]
 )
 from skulk.extensions.runtime_integrity import (
+    PATH_TOO_LONG,
+    RuntimePathTooLongError,
     _current_base,  # pyright: ignore[reportPrivateUsage]
+    _paths_are_limited,  # pyright: ignore[reportPrivateUsage]
+    _pip_depth,  # pyright: ignore[reportPrivateUsage]
     adopt_current_interpreter,
     environment_command,
+    path_refusal,
+    path_refusal_payload,
+    path_refusal_sentence,
     runtime_interpreter,
+    runtime_path_excess,
     seal_runtime,
     verify_installed_runtime,
 )
@@ -137,6 +148,161 @@ def test_environment_commands_follow_the_platform_layout(tmp_path: Path) -> None
     else:
         assert command[4] == "--symlinks"
         assert runtime_interpreter(runtime) == runtime / "bin" / "python"
+
+
+def _wheel(*members: str) -> bytes:
+    """A wheel with these members and nothing in them."""
+    content = io.BytesIO()
+    with zipfile.ZipFile(content, "w") as archive:
+        for member in members:
+            archive.writestr(member, b"")
+    return content.getvalue()
+
+
+def _limit_paths(monkeypatch: pytest.MonkeyPatch, pip: tuple[int, int]) -> None:
+    """Measure as a Windows machine without long paths would, with this ``pip``."""
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._paths_are_limited", lambda: True
+    )
+    monkeypatch.setattr("skulk.extensions.runtime_integrity._pip_depth", lambda: pip)
+
+
+def _generation(length: int) -> Path:
+    """A generation folder whose path is exactly this long."""
+    generation = Path("g" * length)
+    assert len(str(generation)) == length
+    return generation
+
+
+def test_no_path_is_too_long_where_paths_have_no_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POSIX, and Windows with long paths on, are never refused."""
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._paths_are_limited", lambda: False
+    )
+    deep = _wheel("package/" + "d" * 300 + "/module.py")
+    assert runtime_path_excess(_generation(900), ("bundle.pyz",), (deep,)) == 0
+    if not _WINDOWS:
+        monkeypatch.undo()
+        assert not _paths_are_limited()
+
+
+@pytest.mark.parametrize(
+    ("member", "placed"),
+    [
+        ("{long}/module.py", "runtime/Lib/site-packages/{long}/module.py"),
+        (
+            "x-1.0.data/purelib/{long}/module.py",
+            "runtime/Lib/site-packages/{long}/module.py",
+        ),
+        (
+            "x-1.0.data/platlib/{long}/native.pyd",
+            "runtime/Lib/site-packages/{long}/native.pyd",
+        ),
+        ("x-1.0.data/scripts/{long}.exe", "runtime/Scripts/{long}.exe"),
+        ("x-1.0.data/data/share/{long}.txt", "runtime/share/{long}.txt"),
+        # pip adds this file when it installs a wheel named on its command
+        # line, which is how the installer names every wheel.
+        (
+            "{long}-1.0.dist-info/WHEEL",
+            "runtime/Lib/site-packages/{long}-1.0.dist-info/direct_url.json",
+        ),
+        # Headers really go somewhere shorter; they are counted where they
+        # sit in the wheel, which can only refuse early.
+        (
+            "x-1.0.data/headers/{long}.h",
+            "runtime/Lib/site-packages/x-1.0.data/headers/{long}.h",
+        ),
+    ],
+)
+def test_a_wheel_member_is_measured_where_pip_puts_it(
+    monkeypatch: pytest.MonkeyPatch, member: str, placed: str
+) -> None:
+    """Each member counts at its installed place, not its place in the wheel."""
+    _limit_paths(monkeypatch, (0, 0))
+    # Long enough that this member is the deepest thing in the generation.
+    member, placed = member.format(long="p" * 120), placed.format(long="p" * 120)
+    directory = len(placed.rpartition("/")[0])
+    # A directory may be 247 characters long and a file 259.
+    fits = min(247 - 1 - directory, 259 - 1 - len(placed))
+    wheels = (_wheel(member),)
+    assert runtime_path_excess(_generation(fits), (), wheels) == 0
+    assert runtime_path_excess(_generation(fits + 1), (), wheels) == 1
+    assert runtime_path_excess(_generation(fits + 30), (), wheels) == 30
+
+
+def test_a_directory_is_refused_twelve_characters_before_a_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows creates no directory at 248 characters, whatever its files are named."""
+    _limit_paths(monkeypatch, (0, 0))
+    directory = "runtime/Lib/site-packages/package/" + "d" * 60
+    fits = 247 - 1 - len(directory)
+    # A short file name: the directory is what does not fit.
+    short = (_wheel("package/" + "d" * 60 + "/m.py"),)
+    assert runtime_path_excess(_generation(fits), (), short) == 0
+    assert runtime_path_excess(_generation(fits + 1), (), short) == 1
+    # A directory the wheel names without a file in it counts the same.
+    empty = (_wheel("package/" + "d" * 60 + "/"),)
+    assert runtime_path_excess(_generation(fits), (), empty) == 0
+    assert runtime_path_excess(_generation(fits + 1), (), empty) == 1
+    # A long file name: the file is what does not fit, at 260.
+    name = "/" + "m" * 40 + ".py"
+    long = (_wheel("package/" + "d" * 60 + name),)
+    fits = 259 - 1 - len(directory + name)
+    assert runtime_path_excess(_generation(fits), (), long) == 0
+    assert runtime_path_excess(_generation(fits + 1), (), long) == 1
+
+
+def test_the_measure_covers_pip_the_artifacts_and_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the wheels, what is known before a download is still counted."""
+    _limit_paths(monkeypatch, (85, 94))
+    # The deepest directory of pip decides: 247 - 1 - 85.
+    assert runtime_path_excess(_generation(161)) == 0
+    assert runtime_path_excess(_generation(162)) == 1
+    _limit_paths(monkeypatch, (0, 0))
+    artifact = "artifacts/" + "w" * 150 + ".whl"
+    fits = 259 - 1 - len(artifact)
+    assert runtime_path_excess(_generation(fits), (artifact[10:],)) == 0
+    assert runtime_path_excess(_generation(fits + 1), (artifact[10:],)) == 1
+    # With nothing installed at all, the name adoption gives a file it is
+    # replacing in the environment is the deepest path.
+    fits = 259 - 1 - len("runtime/.pyvenv.cfg.rebase-" + "0" * 32)
+    assert runtime_path_excess(_generation(fits)) == 0
+    assert runtime_path_excess(_generation(fits + 1)) == 1
+    # A wheel that cannot be read is pip's to report, not this measure's.
+    assert runtime_path_excess(_generation(100), (), (b"not a wheel",)) == 0
+
+
+def test_the_bundled_pip_is_found_and_measured() -> None:
+    """``venv`` installs the standard library's own pip; its depth is read from it."""
+    _pip_depth.cache_clear()
+    directory, file = _pip_depth()
+    if (directory, file) == (0, 0) and not _WINDOWS:
+        pytest.skip("this base interpreter ships no pip wheel")
+    assert directory > len("runtime/Lib/site-packages/pip")
+    assert file > directory
+
+
+def test_a_path_refusal_is_a_fixed_vocabulary_of_a_code_and_one_integer() -> None:
+    """The manager names the refusal with a number, never with the path."""
+    payload = TypeAdapter(dict[str, JsonValue]).validate_json(
+        path_refusal_payload(RuntimePathTooLongError(12))
+    )
+    assert payload == {"error": PATH_TOO_LONG, "excess": 12}
+    refused = path_refusal(payload)
+    assert isinstance(refused, RuntimePathTooLongError) and refused.excess == 12
+    assert "12 characters" in path_refusal_sentence(12)
+    assert "1 character longer" in path_refusal_sentence(1)
+    assert path_refusal({"error": "manager_operation_refused"}) is None
+    assert path_refusal({"error": PATH_TOO_LONG}) is None
+    for unusable in (True, 0, -3, 32768, "12", 1.5, None):
+        assert path_refusal({"error": PATH_TOO_LONG, "excess": unusable}) is None
+    # A number under another code is not this refusal.
+    assert path_refusal({"error": "manager_operation_refused", "excess": 12}) is None
 
 
 def test_desktop_metadata_does_not_unseal_a_generation(tmp_path: Path) -> None:

@@ -31,6 +31,7 @@ from skulk.extensions.runtime_download import (
     SourceStatus,
     SourceUpdate,
 )
+from skulk.extensions.runtime_integrity import path_refusal, path_refusal_sentence
 from skulk.extensions.runtime_manager import (
     PROTOCOL_UNSUPPORTED,
     CatalogInstall,
@@ -102,6 +103,7 @@ class TerminalInstaller:
         if "error" in response or "result" not in response:
             named = protocol_refusal(response)
             catalog_refused = catalog_refusal(response)
+            path_refused = path_refusal(response)
             if named is not None:
                 self.output(named)
             elif catalog_refused is not None:
@@ -110,6 +112,8 @@ class TerminalInstaller:
                         catalog_refused.code, catalog_refused.status
                     )
                 )
+            elif path_refused is not None:
+                self.output(path_refusal_sentence(path_refused.excess))
             # Neither manager errors nor rejected credential inputs belong in
             # terminal diagnostics. The resume command was printed before effects.
             raise ValueError("manager request incomplete; inspect retained status")

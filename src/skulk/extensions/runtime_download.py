@@ -929,6 +929,9 @@ class RuntimeDownloads:
             runtime = await self.installer.inspect_metadata(metadata)
             if runtime.digest != request.runtime_digest:
                 raise ValueError("reviewed release differs")
+            # Before the intent is journaled or a byte downloaded: a refusal
+            # here leaves nothing to recover.
+            self.installer.check_path_room(runtime)
             operations = self.directory / "operations"
             private_directory(operations)
             if len(tuple(islice(operations.iterdir(), 128))) >= 128:
@@ -1074,6 +1077,9 @@ class RuntimeDownloads:
             )
             if runtime.digest != prior.request.runtime_digest:
                 raise ValueError("reviewed release differs")
+            # A retry cannot make the path shorter; say so instead of failing
+            # the same way again.
+            self.installer.check_path_room(runtime)
             write_private(
                 self.directory / "attempts" / operation_id / f"{prior.attempt}.json",
                 prior.model_dump_json().encode(),

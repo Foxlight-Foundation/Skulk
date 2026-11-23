@@ -251,7 +251,7 @@ second, which runs through `scripts/run_as_ordinary_windows_user.py`: the same
 account with its rights reduced to an ordinary user's (the token
 `runas /trustlevel:0x20000` makes). That step fails if the rights were not
 reduced. The runner has long paths switched on, so neither step checks the
-259-character path limit described below.
+path-length limit described below.
 Owner-only runtime state (`utils/runtime_files.py`: `private_directory`,
 `read_private`, `write_private`, `remove_private`, `RuntimeLock`) has a Windows
 side in `utils/_runtime_files_windows.py`, built on the model-preservation
@@ -321,14 +321,29 @@ set-user-ID process; it is always false on Windows.
 `utils/tests/test_owned_process.py` lists the modules that still start, stop
 or replace processes themselves (`runtime_service.py`, `service_bootstrap.py`,
 `service_snapshot.py`).
-A Windows path is limited to 259 characters unless the machine has long paths
-switched on (off by default). An installed runtime needs 184 of them below its
-installation's root: `generations\<64 characters>\runtime\`, then up to 98 for
-the files of the `pip` that `venv` puts in every runtime. An installation root
-longer than 75 characters therefore cannot be installed into on a default
-Windows machine, and the failure is `venv` exiting with an error. The plugin
-tests get a short temporary directory on Windows for this reason
-(`extensions/tests/conftest.py`).
+Windows limits how long a path may be unless the machine has long paths
+switched on (off by default): a directory's path may be 247 characters and a
+file's 259. The deepest directory of an installed runtime lies 163 characters
+below its installation's root: `generations\<64 characters>\runtime\`, then 77
+for a folder of the `pip` that `venv` puts in every runtime (pip 26.3; another
+version may differ). An installation root longer than 84 characters therefore
+cannot be installed into on a default Windows machine: `venv` exits with an
+error. Compiled files (`.pyc`) lie deeper still, but Python skips one whose path
+is too long, so a root from about 62 characters gets a runtime with some of
+`pip`'s compiled files missing and nothing else different.
+`runtime_path_excess()` in `extensions/runtime_integrity.py` measures all of
+this from the bundled `pip` wheel and the runtime's own wheels, and returns
+zero where no limit applies. `RuntimeInstaller.check_path_room()` refuses with
+`RuntimePathTooLongError` twice: when an install or a retry is requested,
+before it is journaled or downloaded (`RuntimeDownloads.submit` and `recover`),
+and in `stage()` with every file of every wheel counted, before the generation
+folder exists. The first travels as the manager error `runtime_path_too_long`
+with one integer, and the dashboard and the terminal installer print
+`path_refusal_sentence()`; the second happens in the background and shows as
+the general `installation_failed`. The plugin tests get a short temporary
+directory on Windows for this reason (`extensions/tests/conftest.py`), and one
+of them installs at the longest root that fits and one character past it, on
+a machine without long paths only.
 
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. Styling is theme-token-driven (`dashboard-react/src/theme/theme.ts`, dark = the operator design system's Den palette); components never branch on the theme name. Building with `VITE_NIGHT_SKY=1` sets the dark palette's `scene` token to the brand valley star field (scene crown + shooting stars, mesh retired); default builds ship a CSS-only night gradient with the mesh.
