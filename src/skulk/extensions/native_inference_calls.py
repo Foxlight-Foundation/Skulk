@@ -11,7 +11,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import final
+from typing import Literal, final
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
@@ -81,6 +81,21 @@ class InferenceDestinationQuery(BaseModel):
 
 
 @final
+class InferenceDiscoveryQuery(BaseModel):
+    """Enumerate observations for one actual live parent, never a claimed caller."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    query_kind: Literal["directory"] = Field(
+        description="Explicit scoped directory form."
+    )
+    parent_call_id: Digest = Field(description="Actual call on the source role peer.")
+    parent_scope_id: Digest = Field(description="Original compiled parent scope.")
+    parent_request_sha256: Digest = Field(description="Original admitted input bytes.")
+    request_id: Digest = Field(description="Separate monotonic discovery sequence.")
+
+
+@final
 @dataclass(slots=True, repr=False)
 class _Active:
     peer: Peer
@@ -94,9 +109,12 @@ class _Active:
     caller_guard: Callable[[], None] | None = None
     children: set[asyncio.Task[object]] = field(default_factory=set)
     next_delegation: int = 1
+    next_discovery: int = 1
+    discovering: bool = False
     delegating: bool = False
     uncertain: bool = False
     execution_complete: bool = False
+    retiring: bool = False
 
 
 @final
@@ -459,6 +477,9 @@ class NativeInferenceCalls:
                 transferred = True
                 return response
         finally:
+            # Keep final response custody, but admit no new descendants or
+            # observations once execution has entered its cleanup phase.
+            active.retiring = True
             if stream is not None:
                 stream.close()
 
@@ -534,10 +555,121 @@ class NativeInferenceCalls:
         self, peer: Peer, request: RequestFrame, payload: bytes
     ) -> Reply:
         if request.operation == "describe_inference":
+            if request.parameters.get("query_kind") == "directory":
+                return await self._discover_destinations(peer, request, payload)
             return await self._describe_destination(peer, request, payload)
         if request.operation in ("stream_ready", "stream_input", "stream_next"):
             return await self._delegated_media(peer, request, payload)
         return await self._delegate(peer, request, payload)
+
+    async def _discover_destinations(
+        self, peer: Peer, request: RequestFrame, payload: bytes
+    ) -> Reply:
+        parent: _Active | None = None
+        claimed = False
+        transferred = False
+        current = asyncio.current_task()
+        assert current is not None
+        try:
+            if payload:
+                raise ValueError("native discovery query has a body")
+            query = InferenceDiscoveryQuery.model_validate(request.parameters)
+            parent = self.active.get((peer, query.parent_call_id))
+            if (
+                parent is None
+                or parent.uncertain
+                or parent.execution_complete
+                or parent.retiring
+                or parent.task.cancelling()
+                or parent.task.done()
+                or parent.delegating
+                or parent.discovering
+            ):
+                raise ValueError("native discovery parent unavailable")
+            self._permitted(parent)
+            context = _OBJECT.validate_json(parent.context.canonical())
+            allowed = TypeAdapter(list[dict[str, JsonValue]]).validate_python(
+                context["allowed_targets"], strict=True
+            )
+            domains = TypeAdapter(list[str]).validate_python(
+                context["allowed_processing_domains"], strict=True
+            )
+            ancestry = TypeAdapter(list[dict[str, JsonValue]]).validate_python(
+                context["ancestry"], strict=True
+            )
+            executor = _OBJECT.validate_python(context["executor"], strict=True)
+            if (
+                query.parent_scope_id != context["scope_id"]
+                or query.parent_request_sha256 != context["request_sha256"]
+            ):
+                raise ValueError("native discovery parent binding differs")
+            sequence = int(query.request_id, 16)
+            if not parent.next_discovery <= sequence < 2**64:
+                raise ValueError("native discovery sequence refused")
+            parent.next_discovery = sequence + 1
+            parent.discovering = claimed = True
+            parent.children.add(current)
+            directory = await self.directory.directory(streaming=True)
+            selected = tuple(
+                listing
+                for listing in directory
+                if len(ancestry) < 8
+                and listing.target.model_dump(mode="json") in allowed
+                and listing.target.processing_domain in domains
+                and all(
+                    listing.target.node_id != ancestor["node_id"]
+                    or listing.target.capability_id != ancestor["capability_id"]
+                    for ancestor in (*ancestry, executor)
+                )
+            )
+
+            def authorize() -> None:
+                assert parent is not None
+                self._permitted(parent)
+                if (
+                    self.active.get((peer, query.parent_call_id)) is not parent
+                    or parent.execution_complete
+                    or parent.retiring
+                    or parent.uncertain
+                    or parent.task.cancelling()
+                ):
+                    raise ValueError("native discovery parent changed")
+                for listing in selected:
+                    if (
+                        self.callers.authorize(parent.caller, listing.grant()).revision
+                        != parent.revision
+                    ):
+                        raise ValueError("native discovery caller policy changed")
+
+            authorize()
+            if len(selected) > 4096:
+                raise ValueError("native discovery offer bound exceeded")
+            parts: list[bytes] = []
+            size = 2
+            for listing in selected:
+                part = listing.model_dump_json().encode()
+                size += len(part) + bool(parts)
+                if size > 8 * 1024 * 1024:
+                    raise ValueError("native discovery byte bound exceeded")
+                parts.append(part)
+
+            def release() -> None:
+                assert parent is not None
+                parent.discovering = False
+                parent.children.discard(current)
+
+            # Query custody includes the guarded physical response write. A
+            # completed source parent cannot leave a queued observation alive.
+            transferred = True
+            return Reply(
+                "complete", {}, b"[" + b",".join(parts) + b"]", release, authorize
+            )
+        except (OSError, ValueError, TimeoutError):
+            return Reply("pre_dispatch", {})
+        finally:
+            if parent is not None and claimed and not transferred:
+                parent.discovering = False
+                parent.children.discard(current)
 
     async def _describe_destination(
         self, peer: Peer, request: RequestFrame, payload: bytes
@@ -551,7 +683,11 @@ class NativeInferenceCalls:
                 parent is None
                 or parent.uncertain
                 or parent.execution_complete
+                or parent.retiring
+                or parent.task.cancelling()
+                or parent.task.done()
                 or parent.delegating
+                or parent.discovering
             ):
                 raise ValueError("native descriptor parent unavailable")
             self._permitted(parent)
@@ -676,8 +812,12 @@ class NativeInferenceCalls:
             if (
                 parent is None
                 or parent.delegating
+                or parent.discovering
                 or parent.uncertain
                 or parent.execution_complete
+                or parent.retiring
+                or parent.task.cancelling()
+                or parent.task.done()
             ):
                 raise ValueError("inference parent custody unavailable")
             self._permitted(parent)

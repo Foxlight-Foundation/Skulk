@@ -3426,7 +3426,8 @@ recovery remains a separate contract and test obligation.
 - `extensions/native_host_protocol.py` and `native_host_rpc.py`: mirrored private
   Core/owner protocol; fresh mutual role admission, directional authenticated
   frames, sequence/correlation fencing, bounded request tasks and cancellation.
-  Independent32 ordinary and96 stream-operation request slots reserve readiness,
+  Independent32 ordinary,32 `describe_inference` metadata and96 stream-operation
+  request slots reserve readiness,
   input and output progress while control roots remain pending; both directions
   retain shared byte/frame accounting.
   Queued response cancellation withdraws application custody and retains leases
@@ -3463,6 +3464,18 @@ still refuse. Authority records share an explicit 128 KiB protected-storage
 bound, independent of author wire-frame limits.
 
 Native inference WebSocket: sole receive/disconnect task starts after the initial JSON; queue8 plus in-flight input uses shared byte leases, saturation cancels the root, and trusted liveness guards persist across dispatch/delegation.
+
+Invocation-scoped discovery: `describe_inference` with `query_kind="directory"`
+uses only the actual role peer and live `parent_call_id`, matching its scope and
+input hash. Core intersects fresh listings with that parent's exact allowed
+addresses/domains and current original caller grants. Executor/ancestor identity
+is `(node_id, capability_id)` across versions; depth8 yields no destinations.
+A separate positive u64 query sequence refuses replay without consuming the
+parent's effect sequence. One pending query is parent-owned through Reply release;
+its physical-write guard rechecks credential/policy, owner, parent and expiry.
+No completed/uncertain/delegating source can query. Atomic results are bounded to
+4096 offers/8MiB and return metadata only. No bearer, permission grant, routing,
+retry or authority cache is supplied by discovery.
 
 - **Native management UI:** the owner projects compiled native surface health
   against signed declarations and actual child lifetime. A ready proxy has an

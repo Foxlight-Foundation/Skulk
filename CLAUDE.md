@@ -3646,3 +3646,13 @@ diagnostics. Keep its package version distinct from either earlier branch so
 normal `uv sync` rebuilds the combined source instead of retaining a cached wheel.
 These repairs preserve network protocol `v0.0.3`; their wire-neutral entries and
 original branch versions remain in `rust/networking/WIRE_COMPAT.md`.
+
+Invocation-scoped native discovery uses the protected `describe_inference` RPC
+with an explicit `query_kind="directory"`. Core looks up the actual peer/parent,
+validates scope/input correlation, intersects fresh listings with the original
+caller's narrowed targets/domains and current grants, and excludes ancestry/self
+identity across versions. One independent monotonic query slot remains owned
+through guarded physical delivery; cancellation, completion and revocation
+withdraw it. Metadata is bounded to4096 offers/8MiB. The mirrored RPC reserves32
+metadata slots independently of32 ordinary roots and96 media operations. This
+read-only metadata seam grants no permissions and implements no routing.
