@@ -48,8 +48,8 @@ from skulk.provisioning.engine_packages import (
     verify_engine_file,
 )
 from skulk.shared.backends import (
-    ENGINE_PACKAGES_DISABLE_ENV,
     engine_packages_disabled,
+    engine_packages_off_phrase,
 )
 from skulk.shared.constants import SKULK_ENGINES_DIR
 
@@ -627,7 +627,7 @@ def install_engine_package(
         raise _refuse(
             "packages_disabled",
             "engine packages are turned off on this node "
-            f"({ENGINE_PACKAGES_DISABLE_ENV}=1)",
+            f"({engine_packages_off_phrase()})",
         )
     cancel = stop if stop is not None else threading.Event()
     claims = package.claims

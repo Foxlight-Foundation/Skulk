@@ -493,6 +493,10 @@ list, so it never competes with start-up."""
 _ENGINE_PACKAGE_LIST_REFRESH_SECONDS: Final = 3600.0
 """How often a worker asks the store for a newer package list."""
 
+_ENGINE_PACKAGE_SETTINGS_CHECK_SECONDS: Final = 60.0
+"""How often a worker re-reads its saved settings for engine packages: which
+builds the cluster follows and whether packages are on. No network access."""
+
 
 @dataclass
 class _EngineInstallJob:
@@ -4972,14 +4976,19 @@ class Worker:
                 )
 
     async def _keep_engine_package_list_fresh(self) -> None:
-        """Renew the list of installable engine packages for the node's life.
+        """Keep what this node says about engine packages true for its life.
 
-        A node offers only the packages in the list it last verified. This
-        asks the store for a newer one a minute after start and hourly after
-        that, and re-reads the node's facts only when what it would offer
-        changed. A node that may not install packages (offline, installs or
-        packages turned off) never asks. Every failure is quiet: the node
-        keeps offering what it offered before.
+        Two things can change it while the node runs. The store may publish a
+        newer package list: the node asks a minute after start and hourly
+        after that, unless it may not install packages (offline, or installs
+        or packages turned off). And Settings may change which builds the
+        cluster follows or turn packages off or on: that is read from the
+        node's saved settings every minute, with no network access, so a
+        change made in Settings takes effect without a restart.
+
+        The node's facts are read again only when the packages it holds or
+        would offer changed. Every failure is quiet: the node keeps reporting
+        what it reported before.
         """
         from skulk.engines.on_demand import (
             installable_engine_package_builds,
@@ -4991,32 +5000,45 @@ class Worker:
             current_node_facts,
             refresh_node_facts,
         )
+        from skulk.shared.backends import engine_packages_disabled
 
-        if self._offline or not on_demand_gates_pass():
-            return
-        await anyio.sleep(_ENGINE_PACKAGE_LIST_FIRST_REFRESH_SECONDS)
+        packages_off = await to_thread.run_sync(engine_packages_disabled)
+        next_list_refresh = (
+            anyio.current_time() + _ENGINE_PACKAGE_LIST_FIRST_REFRESH_SECONDS
+        )
         while True:
+            await anyio.sleep(_ENGINE_PACKAGE_SETTINGS_CHECK_SECONDS)
             try:
-                await to_thread.run_sync(
-                    lambda: refresh_engine_package_list(offline=self._offline),
-                    abandon_on_cancel=True,
-                )
+                if (
+                    anyio.current_time() >= next_list_refresh
+                    and not self._offline
+                    and await to_thread.run_sync(on_demand_gates_pass)
+                ):
+                    next_list_refresh = (
+                        anyio.current_time() + _ENGINE_PACKAGE_LIST_REFRESH_SECONDS
+                    )
+                    await to_thread.run_sync(
+                        lambda: refresh_engine_package_list(offline=self._offline),
+                        abandon_on_cancel=True,
+                    )
+                off_now = await to_thread.run_sync(engine_packages_disabled)
+                switched = off_now != packages_off
+                packages_off = off_now
                 facts = await to_thread.run_sync(current_node_facts)
                 offered = await to_thread.run_sync(
                     lambda facts=facts: installable_engine_package_builds(
                         facts, offline=self._offline
                     )
                 )
-                if offered != facts.engine_package_installable_builds:
+                if switched or offered != facts.engine_package_installable_builds:
                     await to_thread.run_sync(refresh_node_facts)
                     derivation = await to_thread.run_sync(current_backend_derivation)
                     self._on_demand_backends = derivation.on_demand_backends
                     await self._publish_fresh_node_resources()
-            except Exception as error:  # noqa: BLE001 - an optional list must never stop a worker
+            except Exception as error:  # noqa: BLE001 - optional engine packages must never stop a worker
                 logger.opt(exception=error).debug(
-                    "Engine package list refresh failed; keeping the current offers"
+                    "Engine package check failed; keeping the current report"
                 )
-            await anyio.sleep(_ENGINE_PACKAGE_LIST_REFRESH_SECONDS)
 
     async def _publish_fresh_node_resources(self) -> None:
         """Advertise this node's resources now rather than at the next poll."""

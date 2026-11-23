@@ -3326,14 +3326,22 @@ build, and the worker installs and activates exactly that build before the
 model loads. The `InstallEngine` task's `engine` is the package's engine name
 and its `approximateDownloadBytes` is `0`. A node that is offline, has engine
 installs turned off (`SKULK_NO_ENGINE_AUTOPROVISION=1`), does not run models,
-or has engine packages turned off (`SKULK_ENGINE_PACKAGES_DISABLE=1`) offers
-no package this way. A node installs released builds (the store's `stable`
-channel). The cluster setting `engines.package_channel` in `GET /config` and
-`PUT /config` chooses this: `stable` is the default, and `candidate` makes
-every node also install builds that are still being tested. It is a setting
-and not a launch switch, so it works the same in a packaged Skulk. A node
-applies a change the next time it renews its package list (hourly) or
-restarts, and a package a node already holds is never replaced by it.
+or has engine packages turned off offers no package this way.
+
+Two cluster settings in the `engines` section of `GET /config` and
+`PUT /config` govern engine packages. They are settings and not launch
+switches, so they work the same in a packaged Skulk, and a node applies a
+change within about a minute, without a restart.
+
+- `engines.package_channel`: `stable` (the default) installs released builds
+  only; `candidate` makes every node also install builds that are still being
+  tested. A package a node already holds is never replaced by this setting.
+- `engines.packages_enabled`: `true` by default. Set to `false`, every node
+  ignores the engine packages it holds: it offers none, installs none and
+  loads no model on one. Packages on disk stay there and come back when it is
+  turned on again. A model already running on a packaged engine keeps running
+  until it is stopped. `SKULK_ENGINE_PACKAGES_DISABLE=1` at launch turns
+  packages off on that one node, whatever the setting says.
 
 A compatible Comfy renderer update can also be prepared through this flow while
 the base engine is already installed. The notice then quotes the small published

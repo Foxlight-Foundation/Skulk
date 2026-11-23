@@ -654,12 +654,26 @@ class EnginesConfig(FrozenModel):
             default) means released builds only. ``candidate`` means a node
             also installs builds that are still being tested. It is a setting
             and not a launch switch because a packaged Skulk has no launch
-            environment a person can change. A node applies a change the next
-            time it renews its package list (hourly) or restarts, and a
-            package a node already holds is never replaced by this setting.
+            environment a person can change. A node applies a change within
+            about a minute, and a package a node already holds is never
+            replaced by this setting.
+        packages_enabled: Whether nodes use engine packages at all. On by
+            default.
     """
 
     package_channel: EnginePackageChannel = "stable"
+    packages_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether the cluster's nodes use engine packages at all. Turned "
+            "off, every node ignores the packages it holds: it offers none, "
+            "installs none and loads no model on one. Packages already on "
+            "disk stay there and come back when this is turned on again. A "
+            "model already running on a packaged engine keeps running until "
+            "it is stopped. SKULK_ENGINE_PACKAGES_DISABLE=1 turns packages "
+            "off on one node at launch, whatever this says."
+        ),
+    )
 
 
 def engine_package_channel(config: "SkulkConfig | None") -> EnginePackageChannel:
@@ -674,6 +688,20 @@ def engine_package_channel(config: "SkulkConfig | None") -> EnginePackageChannel
     if config is None or config.engines is None:
         return "stable"
     return config.engines.package_channel
+
+
+def engine_packages_enabled(config: "SkulkConfig | None") -> bool:
+    """Return whether a loaded config leaves engine packages turned on.
+
+    Args:
+        config: The loaded ``skulk.yaml``, or ``None`` when none exists.
+
+    Returns:
+        ``engines.packages_enabled``, or ``True`` when the section is absent.
+    """
+    if config is None or config.engines is None:
+        return True
+    return config.engines.packages_enabled
 
 
 @final

@@ -300,6 +300,7 @@ def test_engines_config_defaults_to_released_builds_only() -> None:
         EnginesConfig,
         SkulkConfig,
         engine_package_channel,
+        engine_packages_enabled,
     )
 
     assert SkulkConfig.model_validate({}).engines is None
@@ -312,6 +313,14 @@ def test_engines_config_defaults_to_released_builds_only() -> None:
     assert engine_package_channel(following) == "candidate"
     with pytest.raises(ValidationError):
         _ = SkulkConfig.model_validate({"engines": {"package_channel": "nightly"}})
+
+    assert EnginesConfig().packages_enabled
+    assert engine_packages_enabled(None)
+    assert engine_packages_enabled(SkulkConfig())
+    assert engine_packages_enabled(following)
+    turned_off = SkulkConfig.model_validate({"engines": {"packages_enabled": False}})
+    assert not engine_packages_enabled(turned_off)
+    assert engine_package_channel(turned_off) == "stable"
 
 
 def test_enabled_store_refuses_blank_host() -> None:

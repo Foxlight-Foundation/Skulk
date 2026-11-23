@@ -140,8 +140,9 @@ def read_engine_package_inventory(
     not packages. Lanes with generations but no active one are not reported;
     nothing is offered from them and nothing is wrong with them.
 
-    With engine packages turned off (``SKULK_ENGINE_PACKAGES_DISABLE=1``) the
-    root is not read and the inventory is empty, whatever is installed. Every
+    With engine packages turned off (the cluster setting
+    ``engines.packages_enabled``, or ``SKULK_ENGINE_PACKAGES_DISABLE=1`` at
+    launch) the root is not read and the inventory is empty, whatever is installed. Every
     reader of a node's packages goes through here, so the node then offers
     and runs none.
     """

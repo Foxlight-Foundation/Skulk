@@ -8,6 +8,7 @@ resolution, and the thin ``probe_node_backends`` delegation.
 """
 
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,7 @@ from skulk.shared.backends import (
     describe_backend_hardware,
     engine_of,
     engine_packages_disabled,
+    engine_packages_off_source,
     engine_supports_multi_node,
     expand_engine_backends,
     make_backend_tag,
@@ -573,6 +575,66 @@ def test_the_packages_switch_is_off_unless_set_to_one(
     for value in ("1", " 1 "):
         monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, value)
         assert engine_packages_disabled()
+
+
+def _save_settings(directory: Path, text: str) -> None:
+    _ = (directory / "skulk.yaml").write_text(text)
+
+
+def test_settings_turn_packages_off_and_on_without_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A packaged Skulk has no launch environment a person can change, so the
+    # off lever must also be a setting, and a change must not need a restart.
+    monkeypatch.delenv(ENGINE_PACKAGES_DISABLE_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert engine_packages_off_source() is None
+
+    _save_settings(tmp_path, "engines:\n  packages_enabled: false\n")
+    assert engine_packages_off_source() == "settings"
+    assert engine_packages_disabled()
+    refusal = unknown_engine_refusal("tensorfold-rocm")
+    assert refusal is not None and "turned off in Settings" in refusal
+
+    _save_settings(tmp_path, "engines:\n  packages_enabled: true\n")
+    assert not engine_packages_disabled()
+
+    _save_settings(tmp_path, "engines:\n  package_channel: candidate\n")
+    assert not engine_packages_disabled()
+
+    (tmp_path / "skulk.yaml").unlink()
+    assert not engine_packages_disabled()
+
+
+def test_the_launch_switch_turns_packages_off_whatever_settings_say(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _save_settings(tmp_path, "engines:\n  packages_enabled: true\n")
+    monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, "1")
+
+    assert engine_packages_off_source() == "launch"
+
+
+def test_settings_that_cannot_be_read_keep_the_last_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(ENGINE_PACKAGES_DISABLE_ENV, raising=False)
+    turned_off = tmp_path / "turned-off"
+    never_read = tmp_path / "never-read"
+    turned_off.mkdir()
+    never_read.mkdir()
+
+    monkeypatch.chdir(turned_off)
+    _save_settings(turned_off, "engines:\n  packages_enabled: false\n")
+    assert engine_packages_disabled()
+    _save_settings(turned_off, "engines: [damaged\n")
+    assert engine_packages_disabled()
+
+    # With no earlier answer, a damaged file must not take engines away.
+    monkeypatch.chdir(never_read)
+    _save_settings(never_read, "engines: [damaged\n")
+    assert not engine_packages_disabled()
 
 
 def test_a_refusal_says_when_packages_are_turned_off(

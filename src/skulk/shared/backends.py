@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import AbstractSet, Final, Literal
@@ -216,22 +217,94 @@ learn an engine."""
 
 
 ENGINE_PACKAGES_DISABLE_ENV: Final = "SKULK_ENGINE_PACKAGES_DISABLE"
-"""Set to ``1`` to make a node ignore installed engine packages entirely.
+"""Set to ``1`` to make one node ignore installed engine packages entirely.
 
 The node then reads no package from disk, offers no package backend, runs no
-package and installs none: it behaves as a build without engine packages. This
-is the operator's off lever if a package misbehaves on a live node. Packages
-already on disk are left where they are and come back when the variable is
-cleared."""
+package and installs none: it behaves as a build without engine packages.
+Packages already on disk are left where they are and come back when the
+variable is cleared. The cluster setting ``engines.packages_enabled`` does the
+same for every node and is the lever a packaged Skulk has, since a person
+cannot change its launch environment."""
+
+EnginePackagesOffSource = Literal["launch", "settings"]
+"""What turned engine packages off on this node."""
+
+_settings_lock: Final = threading.Lock()
+_settings_answer: tuple[tuple[str, int, int, int] | None, bool] | None = None
+"""The saved settings file as last seen (path, inode, change time, size) and
+whether it turned packages off. Reading the answer again costs one ``stat``
+until the file changes."""
+
+
+def _engine_packages_off_in_settings() -> bool:
+    """Whether the node's saved settings turn engine packages off.
+
+    Settings that cannot be read keep the last answer this process read from
+    the same file, and packages stay on when it never read one: a damaged
+    file is reported loudly elsewhere and must not also take a node's engines
+    away.
+    """
+    import yaml
+    from pydantic import ValidationError
+
+    from skulk.store.config import (
+        engine_packages_enabled,
+        load_skulk_config,
+        resolve_config_path,
+    )
+
+    global _settings_answer
+    path = resolve_config_path()
+    try:
+        status = path.stat()
+        seen = (str(path.resolve()), status.st_ino, status.st_mtime_ns, status.st_size)
+    except OSError:
+        seen = None
+    with _settings_lock:
+        known = _settings_answer
+        if known is not None and known[0] == seen:
+            return known[1]
+        if seen is None:
+            off = False
+        else:
+            try:
+                off = not engine_packages_enabled(load_skulk_config(path))
+            except (ValidationError, yaml.YAMLError, OSError):
+                # The last answer counts only for this same settings file.
+                same_file = (
+                    known is not None
+                    and known[0] is not None
+                    and known[0][0] == seen[0]
+                )
+                off = known[1] if known is not None and same_file else False
+        _settings_answer = (seen, off)
+        return off
+
+
+def engine_packages_off_source() -> EnginePackagesOffSource | None:
+    """What turned engine packages off for this process, or ``None`` when on.
+
+    Read on every call, so a runner process started by a worker gives the
+    same answer as the worker that started it, and a change made in Settings
+    is seen without a restart.
+    """
+    if os.environ.get(ENGINE_PACKAGES_DISABLE_ENV, "").strip() == "1":
+        return "launch"
+    if _engine_packages_off_in_settings():
+        return "settings"
+    return None
 
 
 def engine_packages_disabled() -> bool:
-    """Whether this process must ignore installed engine packages.
+    """Whether this process must ignore installed engine packages."""
+    return engine_packages_off_source() is not None
 
-    Read from the environment on every call, so a runner process started by a
-    worker gives the same answer as the worker that started it.
-    """
-    return os.environ.get(ENGINE_PACKAGES_DISABLE_ENV, "").strip() == "1"
+
+def engine_packages_off_phrase() -> str:
+    """How to say where packages were turned off, for a refusal message."""
+    if engine_packages_off_source() == "settings":
+        return "turned off in Settings"
+    return f"{ENGINE_PACKAGES_DISABLE_ENV}=1"
 
 
 ENGINE_LOAD_REFUSED_FAILURE_MARKER: Final = "engine-load-refused"
@@ -287,7 +360,7 @@ def unknown_engine_refusal(resolved_backend: str | None) -> str | None:
         return (
             f"{ENGINE_UNKNOWN_FAILURE_MARKER}: this node has no engine for "
             f"backend {shown!r}; it is not built into this Skulk build and "
-            f"engine packages are turned off here ({ENGINE_PACKAGES_DISABLE_ENV}=1)"
+            f"engine packages are turned off here ({engine_packages_off_phrase()})"
         )
     return (
         f"{ENGINE_UNKNOWN_FAILURE_MARKER}: this node has no engine for backend "

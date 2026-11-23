@@ -154,6 +154,29 @@ def test_packages_turned_off_report_nothing_whatever_is_installed(
     assert read_engine_package_inventory(root=packages) == before
 
 
+def test_the_cluster_setting_turns_packages_off_like_the_launch_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    packages = tmp_path / "packages"
+    node = tmp_path / "node"
+    node.mkdir()
+    good = install_test_package(tmp_path, packages)
+    tag = "tensorfold-rocm"
+    monkeypatch.delenv(ENGINE_PACKAGES_DISABLE_ENV, raising=False)
+    monkeypatch.chdir(node)
+    before = read_engine_package_inventory(root=packages)
+    assert before.builds == {tag: good.digest}
+
+    _ = (node / "skulk.yaml").write_text("engines:\n  packages_enabled: false\n")
+    turned_off = read_engine_package_inventory(root=packages)
+
+    assert turned_off.active == {} and turned_off.unusable == ()
+    assert installed_engine_for_backend(tag, good.digest, root=packages) is None
+
+    _ = (node / "skulk.yaml").write_text("engines:\n  packages_enabled: true\n")
+    assert read_engine_package_inventory(root=packages) == before
+
+
 @pytest.mark.parametrize("value", ["", "0", "true", "yes", "on", "2"])
 def test_only_the_value_one_turns_packages_off(
     value: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

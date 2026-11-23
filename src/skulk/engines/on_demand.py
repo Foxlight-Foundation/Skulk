@@ -15,7 +15,9 @@ are the only steps here that use the network, and each is a separate call.
 Every gate that stops a built-in engine from being installed on demand stops
 a package too: the node is offline, installs are turned off
 (``SKULK_NO_ENGINE_AUTOPROVISION=1``), the node does not run models, or
-engine packages are turned off (``SKULK_ENGINE_PACKAGES_DISABLE=1``).
+engine packages are turned off (the cluster setting
+``engines.packages_enabled``, or ``SKULK_ENGINE_PACKAGES_DISABLE=1`` at
+launch).
 """
 
 import os
