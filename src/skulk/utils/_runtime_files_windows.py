@@ -29,6 +29,7 @@ import contextlib
 import ctypes
 import ctypes.wintypes as wt
 import errno
+import msvcrt
 import os
 import stat
 from collections.abc import Callable
@@ -43,6 +44,7 @@ _ERROR_SHARING_VIOLATION = 32
 _GENERIC_READ = 0x80000000
 _FILE_SHARE_ALL = 0x00000007
 _OPEN_EXISTING = 3
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _kernel32.CreateFileW.argtypes = (
@@ -204,7 +206,8 @@ def _refuse_while_a_child_remains(lock: Path) -> None:
         _FILE_SHARE_ALL,
         None,
         _OPEN_EXISTING,
-        0,
+        # Whatever is at the path is opened as itself; a link is not followed.
+        _FILE_FLAG_OPEN_REPARSE_POINT,
         None,
     )
     if handle and handle != _INVALID_HANDLE:
@@ -220,6 +223,59 @@ def _refuse_while_a_child_remains(lock: Path) -> None:
             errno.EAGAIN, "a child of the lock's last holder is still running"
         )
     raise ctypes.WinError(error)
+
+
+def hold_children_fence(lock: Path) -> int:
+    """Open the lock's children fence so that nobody else can open it.
+
+    The fence is runtime state like the lock itself: it is created owner-only
+    when absent, and what is opened must be an owner-only regular file, never
+    a link and never a file made by other means. The check is made on the
+    opened file.
+
+    Args:
+        lock: The lock's own path.
+
+    Returns:
+        A descriptor on the fence, opened with no sharing; the caller closes
+        it once a child has its own copy.
+
+    Raises:
+        ValueError: What is at the fence's path is not an owner-only regular
+            file.
+        OSError: It cannot be opened; an earlier child still holding it is
+            one such case.
+    """
+    fence = children_fence(lock)
+    os.close(open_private(fence, os.O_RDWR | os.O_CREAT))
+    handle = _create_file(
+        str(fence),
+        _GENERIC_READ,
+        0,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if not handle or handle == _INVALID_HANDLE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    except BaseException:
+        _close_handle(handle)
+        raise
+    try:
+        information = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(information.st_mode)
+            or information.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            or not _owner_only(descriptor)
+        ):
+            raise ValueError("runtime lock must be owner-only")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def open_lock(root: Path, name: str) -> int:

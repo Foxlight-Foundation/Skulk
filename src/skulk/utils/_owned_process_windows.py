@@ -31,7 +31,7 @@ does not make up for that: when this process dies, Windows frees its lock and
 ends its job in two separate steps, and for a millisecond or two in between
 the lock is free while the tree still runs (measured: about 1 run in 130 saw a
 late write). So the child is also started holding the lock's *children fence*
-open with no sharing (:func:`skulk.utils._runtime_files_windows.children_fence`).
+open with no sharing (:func:`skulk.utils._runtime_files_windows.hold_children_fence`).
 The lock refuses a new holder while that file is held, which is until the
 child has ended.
 
@@ -61,6 +61,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import final
 
+from skulk.utils._runtime_files_windows import hold_children_fence
+
 _JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
@@ -75,9 +77,6 @@ _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _CREATE_NO_WINDOW = 0x08000000
 _STARTF_USESTDHANDLES = 0x00000100
-_GENERIC_READ = 0x80000000
-_OPEN_ALWAYS = 4
-_FILE_ATTRIBUTE_NORMAL = 0x80
 _INFINITE = 0xFFFFFFFF
 _ERROR_ACCESS_DENIED = 5
 # How often to look whether ended processes have finished: quickly at first,
@@ -180,16 +179,6 @@ _kernel32.QueryInformationJobObject.argtypes = (
     wt.LPVOID,
 )
 _kernel32.QueryInformationJobObject.restype = wt.BOOL
-_kernel32.CreateFileW.argtypes = (
-    wt.LPCWSTR,
-    wt.DWORD,
-    wt.DWORD,
-    wt.LPVOID,
-    wt.DWORD,
-    wt.DWORD,
-    wt.HANDLE,
-)
-_kernel32.CreateFileW.restype = wt.HANDLE
 _kernel32.OpenProcess.argtypes = (wt.DWORD, wt.BOOL, wt.DWORD)
 _kernel32.OpenProcess.restype = wt.HANDLE
 _kernel32.IsProcessInJob.argtypes = (wt.HANDLE, wt.HANDLE, ctypes.POINTER(wt.BOOL))
@@ -243,10 +232,6 @@ _set_job_information: Callable[[int, int, object, int], int] = (
 _query_job: Callable[[int, int, object, int, None], int] = (
     _kernel32.QueryInformationJobObject
 )
-_create_file: Callable[[str, int, int, None, int, int, None], int | None] = (
-    _kernel32.CreateFileW
-)
-_INVALID_HANDLE = wt.HANDLE(-1).value
 _open_process: Callable[[int, bool, int], int | None] = _kernel32.OpenProcess
 _is_in_job: Callable[[int, int, object], int] = _kernel32.IsProcessInJob
 _terminate_job: Callable[[int, int], int] = _kernel32.TerminateJobObject
@@ -314,16 +299,6 @@ def _set_limits(job: int, *, admit_new_members: bool) -> None:
         ctypes.sizeof(limits),
     ):
         raise _failure("could not configure a job")
-
-
-def _hold_alone(path: Path) -> int:
-    """Open ``path`` so that nobody else can open it while the handle lives."""
-    handle = _create_file(
-        str(path), _GENERIC_READ, 0, None, _OPEN_ALWAYS, _FILE_ATTRIBUTE_NORMAL, None
-    )
-    if not handle or handle == _INVALID_HANDLE:
-        raise ctypes.WinError(ctypes.get_last_error())
-    return handle
 
 
 def _create_in_job(
@@ -576,16 +551,17 @@ class JobChild:
         self._job = None
 
 
-async def start(arguments: Sequence[str], *, cwd: Path, fence: Path) -> JobChild:
+async def start(arguments: Sequence[str], *, cwd: Path, lock: Path) -> JobChild:
     """Start a program as a member of a new job, with its output as a stream.
 
     Args:
         arguments: The program and its arguments.
         cwd: The directory the program starts in.
-        fence: The lock's children fence, which the child holds open, alone,
-            for as long as it runs.
+        lock: The path of the lock that fences ``cwd``. The child holds that
+            lock's children fence open, alone, for as long as it runs.
 
     Raises:
+        ValueError: The lock's children fence is not an owner-only file.
         OSError: The program could not be started, or an earlier child still
             holds the fence.
     """
@@ -596,12 +572,14 @@ async def start(arguments: Sequence[str], *, cwd: Path, fence: Path) -> JobChild
         # writing end is the plain handle a child expects for its output.
         read_end, write_end = windows_utils.pipe(overlapped=(True, False))
         try:
-            held = _hold_alone(fence)
+            fence = hold_children_fence(lock)
             try:
-                process, pid = _create_in_job(arguments, cwd, job, write_end, held)
+                process, pid = _create_in_job(
+                    arguments, cwd, job, write_end, msvcrt.get_osfhandle(fence)
+                )
             finally:
                 # From here the child's copy is the only one.
-                _close_handle(held)
+                os.close(fence)
         except BaseException:
             _close_handle(read_end)
             raise

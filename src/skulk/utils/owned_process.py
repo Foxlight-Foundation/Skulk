@@ -40,7 +40,6 @@ from skulk.utils.runtime_files import RuntimeLock
 
 if sys.platform == "win32":
     from skulk.utils import _owned_process_windows as _windows
-    from skulk.utils._runtime_files_windows import children_fence
 
 
 class OwnedProcess(Protocol):
@@ -151,7 +150,7 @@ async def start_owned(
         calling ``kill`` first when it gives up on the child.
     """
     if sys.platform == "win32":
-        return await _windows.start(arguments, cwd=cwd, fence=children_fence(lock.path))
+        return await _windows.start(arguments, cwd=cwd, lock=lock.path)
     return _SessionChild(
         await asyncio.create_subprocess_exec(
             *arguments,

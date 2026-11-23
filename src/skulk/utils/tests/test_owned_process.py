@@ -15,7 +15,7 @@ import pytest
 
 import skulk.extensions
 from skulk.utils.owned_process import isolated_environment, start_owned
-from skulk.utils.runtime_files import RuntimeLock, private_directory
+from skulk.utils.runtime_files import RuntimeLock, private_directory, read_private
 
 # What only the process seam may do: start a child in its own session, hand it
 # descriptors, or signal a whole process group.
@@ -177,6 +177,44 @@ async def test_the_lock_is_not_free_while_a_child_still_runs(root: Path) -> None
     finally:
         await child.close()
     RuntimeLock(root, "installer.lock").close()
+
+
+async def test_the_children_fence_is_owner_only_state_on_windows(root: Path) -> None:
+    """The file a child holds is protected like the lock it stands in for."""
+    if sys.platform != "win32":
+        pytest.skip("POSIX passes the lock's own descriptor to the child")
+    fence = root / "installer.lock.children"
+    lock = RuntimeLock(root, "installer.lock")
+    try:
+        child = await start_owned(
+            (sys.executable, "-I", "-c", "pass"), cwd=root, lock=lock
+        )
+        try:
+            assert await child.wait() == 0
+        finally:
+            await child.close()
+        # Created through the file seam: it passes the owner-only read.
+        assert read_private(fence) == b""
+
+        # One made by other means is refused, as any runtime state would be.
+        fence.unlink()
+        fence.write_bytes(b"")
+        with pytest.raises(ValueError, match="owner-only"):
+            await start_owned((sys.executable, "-I", "-c", "pass"), cwd=root, lock=lock)
+
+        # So is a link standing in its place.
+        fence.unlink()
+        elsewhere = root / "elsewhere"
+        elsewhere.write_bytes(b"")
+        try:
+            fence.symlink_to(elsewhere)
+        except OSError:
+            return  # this account cannot create symbolic links
+        with pytest.raises((ValueError, OSError)):
+            await start_owned((sys.executable, "-I", "-c", "pass"), cwd=root, lock=lock)
+        assert elsewhere.read_bytes() == b""
+    finally:
+        lock.close()
 
 
 async def test_stopping_a_child_stops_everything_it_started(root: Path) -> None:
