@@ -1433,7 +1433,8 @@ refuses every reparse point (a junction needs no privilege), requires that
 each member is the account's and grants access to nobody but the account and
 SYSTEM (`examine().exclusive`; inherited access counts, because `venv` and `pip`
 create the files), checks that `home` is the base's folder, and records the
-base (its path and the digests of `python.exe` and `python3XX.dll`) in a `base`
+base (its path and the digests of `python.exe` and `python3XX.dll`, both
+required: a base missing its library is refused, never recorded) in a `base`
 field that a POSIX seal does not have. The base on Windows is
 `sys._base_executable`: `sys.executable` is the environment's launcher there.
 Adoption after an application move or update rewrites `pyvenv.cfg` and that

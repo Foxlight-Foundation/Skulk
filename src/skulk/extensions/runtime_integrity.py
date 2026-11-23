@@ -67,8 +67,10 @@ class _Base(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
     path: str = Field(max_length=4096)
-    # The program and, beside it, the library that holds the interpreter.
-    files: dict[str, Digest] = Field(min_length=1, max_length=2)
+    executable: Digest
+    # The library beside the program. It holds nearly all of the interpreter,
+    # so a base without it cannot start and is never recorded.
+    library: Digest
 
 
 class _Seal(BaseModel):
@@ -238,16 +240,23 @@ def _current_base() -> Path:
 
 
 def _sealed_base(base: Path) -> _Base | None:
-    """What a seal made now records about the base outside its entries."""
+    """What a seal made now records about the base outside its entries.
+
+    Raises:
+        OSError: When the base's program or its library cannot be read. A
+            base that is missing either is refused, at sealing, at
+            verification and at adoption alike.
+    """
     if sys.platform != "win32":
         return None
-    files = {base.name: _file_digest(base)}
     library = base.with_name(
         f"python{sys.version_info.major}{sys.version_info.minor}.dll"
     )
-    if library.is_file():
-        files[library.name] = _file_digest(library)
-    return _Base(path=str(base), files=files)
+    return _Base(
+        path=str(base),
+        executable=_file_digest(base),
+        library=_file_digest(library),
+    )
 
 
 def _read_seal(generation: Path) -> _Seal:

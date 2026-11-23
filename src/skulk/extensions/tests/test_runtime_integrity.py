@@ -30,6 +30,8 @@ from skulk.utils.runtime_files import has_root_authority
 
 _WINDOWS = sys.platform == "win32"
 _MINOR = f"python{sys.version_info.major}.{sys.version_info.minor}"
+# On Windows, the file beside python.exe that holds the interpreter.
+_LIBRARY = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
 # Where venv puts installed packages inside an environment.
 _SITE = (
     Path("Lib") / "site-packages"
@@ -38,6 +40,9 @@ _SITE = (
 )
 
 posix_only = pytest.mark.skipif(_WINDOWS, reason="POSIX permission bits and links")
+windows_only = pytest.mark.skipif(
+    not _WINDOWS, reason="a Windows base is a program and its library"
+)
 # The installer refuses an administrator, as it refuses root.
 installs = pytest.mark.skipif(
     has_root_authority(), reason="the installer refuses root authority"
@@ -114,9 +119,8 @@ def test_a_seal_names_the_base_only_where_no_link_does(tmp_path: Path) -> None:
         json.loads((tmp_path / "installed-files.json").read_bytes()),
     )
     if _WINDOWS:
-        base = _current_base()
-        assert sealed["base"]["path"] == str(base)
-        assert base.name in cast(dict[str, str], sealed["base"]["files"])
+        assert sealed["base"].keys() == {"path", "executable", "library"}
+        assert sealed["base"]["path"] == str(_current_base())
     else:
         assert sealed.keys() == {"runtime_digest", "entries"}
 
@@ -184,8 +188,7 @@ def _interpreter(directory: Path, content: bytes) -> Path:
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "python.exe"
         path.write_bytes(content)
-        library = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
-        (directory / library).write_bytes(b"library of " + content)
+        (directory / _LIBRARY).write_bytes(b"library of " + content)
         return path.resolve()
     (directory / "bin").mkdir(parents=True, exist_ok=True)
     path = directory / "bin" / _MINOR
@@ -314,6 +317,57 @@ def test_adoption_refuses_anything_but_an_interpreter_change(
     assert _base_of(runtime) == old
 
 
+@windows_only
+def test_a_changed_library_alone_is_an_interpreter_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows the library is the interpreter; python.exe only starts it."""
+    base = _interpreter(tmp_path / "App", b"interpreter")
+    generation = tmp_path / "generation"
+    _environment(generation, base)
+    _use_base(monkeypatch, base)
+    seal_runtime(generation, "a" * 64)
+    base.with_name(_LIBRARY).write_bytes(b"updated library")
+    with pytest.raises(ValueError, match="integrity differs"):
+        verify_installed_runtime(generation, "a" * 64)
+    assert adopt_current_interpreter(generation, "a" * 64)
+    verify_installed_runtime(generation, "a" * 64)
+
+
+@windows_only
+@pytest.mark.parametrize("moment", ["sealing", "verification", "adoption"])
+def test_a_base_without_its_library_is_never_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, moment: str
+) -> None:
+    """Such a base cannot start, so no seal may come to name it as complete."""
+    base = _interpreter(tmp_path / "App", b"interpreter")
+    generation = tmp_path / "generation"
+    runtime = _environment(generation, base)
+    _use_base(monkeypatch, base)
+    if moment == "sealing":
+        base.with_name(_LIBRARY).unlink()
+        with pytest.raises(FileNotFoundError):
+            seal_runtime(generation, "a" * 64)
+        assert not (generation / "installed-files.json").exists()
+        return
+    seal_runtime(generation, "a" * 64)
+    sealed = (generation / "installed-files.json").read_bytes()
+    configuration = (runtime / "pyvenv.cfg").read_bytes()
+    if moment == "verification":
+        base.with_name(_LIBRARY).unlink()
+        with pytest.raises(FileNotFoundError):
+            verify_installed_runtime(generation, "a" * 64)
+    else:
+        moved = _interpreter(tmp_path / "Moved", b"interpreter")
+        moved.with_name(_LIBRARY).unlink()
+        _use_base(monkeypatch, moved)
+        with pytest.raises(FileNotFoundError):
+            adopt_current_interpreter(generation, "a" * 64)
+    assert (generation / "installed-files.json").read_bytes() == sealed
+    assert (runtime / "pyvenv.cfg").read_bytes() == configuration
+    assert not (generation / "interpreter-rebase.json").exists()
+
+
 @pytest.mark.parametrize(
     "step", [pytest.param("link", marks=posix_only), "configuration", "seal"]
 )
@@ -385,6 +439,8 @@ async def test_locked_generation_adopts_a_moved_interpreter(
     )
     moved.parent.mkdir(parents=True)
     shutil.copy2(base, moved)
+    if _WINDOWS:
+        shutil.copy2(base.with_name(_LIBRARY), moved.with_name(_LIBRARY))
     _use_base(monkeypatch, moved.resolve())
     async with installer.locked_generation(operation.runtime_digest):
         pass
