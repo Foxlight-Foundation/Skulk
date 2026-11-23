@@ -3,27 +3,68 @@
 import ast
 import asyncio
 import contextlib
+import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import cast
 
 import psutil
 import pytest
 
 import skulk.extensions
-from skulk.utils.owned_process import isolated_environment, start_owned
+from skulk.utils.owned_process import hand_over, isolated_environment, start_owned
 from skulk.utils.runtime_files import RuntimeLock, private_directory, read_private
 
 # What only the process seam may do: start a child in its own session, hand it
-# descriptors, or signal a whole process group.
+# descriptors, signal a whole process group, or replace this process.
 _DIRECT_PROCESS_CONTROL = frozenset(
-    {"killpg", "pass_fds", "preexec_fn", "setsid", "start_new_session"}
+    {
+        "execl",
+        "execle",
+        "execlp",
+        "execlpe",
+        "execv",
+        "execve",
+        "execvp",
+        "execvpe",
+        "killpg",
+        "pass_fds",
+        "preexec_fn",
+        "setsid",
+        "start_new_session",
+    }
 )
-# Plugin-hosting modules that still start or stop child processes themselves,
-# so cannot run on Windows. Remove a module when it is ported; add none.
-_NOT_YET_PORTED = frozenset({"runtime_service.py", "service_snapshot.py"})
+# Plugin-hosting modules that still start, stop or replace processes
+# themselves, so cannot run on Windows. Remove a module when it is ported; add
+# none.
+_NOT_YET_PORTED = frozenset(
+    {"runtime_service.py", "service_bootstrap.py", "service_snapshot.py"}
+)
+
+# Takes the lock, then hands the terminal over to the program it is given.
+_TAKES_THE_LOCK = (
+    "import os, sys\n"
+    "from pathlib import Path\n"
+    "from skulk.utils.owned_process import hand_over\n"
+    "from skulk.utils.runtime_files import RuntimeLock\n"
+    "lock = RuntimeLock(Path(sys.argv[1]), 'installer.lock')\n"
+    "os.set_inheritable(lock.descriptor, True)\n"
+)
+_THEN_HANDS_OVER = "hand_over([sys.executable, '-I', '-c', sys.argv[2], *sys.argv[3:]], lock=lock.path)\n"
+_HANDS_OVER = _TAKES_THE_LOCK + _THEN_HANDS_OVER
+# Says it is ready, echoes one line of input on each output stream, and exits
+# with a code of its own.
+_CONVERSES = (
+    "import sys\n"
+    "print('ready', sys.argv[1], flush=True)\n"
+    "line = sys.stdin.readline().strip()\n"
+    "print('out:' + line, flush=True)\n"
+    "print('err:' + line, file=sys.stderr, flush=True)\n"
+    "raise SystemExit(7)\n"
+)
 
 # Appends one byte at a time, unbuffered, to the file it is given, for far
 # longer than any test runs: a file that has stopped growing means the writer
@@ -417,6 +458,162 @@ def test_a_tree_never_writes_once_another_process_holds_the_lock(root: Path) -> 
             with contextlib.suppress(psutil.NoSuchProcess):
                 if identifier:
                     psutil.Process(identifier).kill()
+
+
+def _hand_over_in_a_process(
+    root: Path, program: str, *arguments: str
+) -> "subprocess.Popen[bytes]":
+    """Start a process that takes the lock in ``root`` and hands over to ``program``."""
+    return subprocess.Popen(
+        [sys.executable, "-c", _HANDS_OVER, str(root), program, *arguments],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+
+
+def test_handing_over_gives_the_program_this_terminal_and_the_lock(root: Path) -> None:
+    """Input, both outputs and the exit code pass straight through, under the lock."""
+    process = _hand_over_in_a_process(root, _CONVERSES, "an argument")
+    try:
+        assert process.stdin is not None and process.stdout is not None
+        assert process.stdout.readline().split() == [b"ready", b"an", b"argument"]
+        # The program is running and waiting for input: the lock is still held.
+        with pytest.raises(BlockingIOError):
+            RuntimeLock(root, "installer.lock")
+        output, errors = process.communicate(b"typed by a person\n", timeout=30)
+        assert output.split(b":", 1)[1].strip() == b"typed by a person"
+        assert errors.strip() == b"err:typed by a person"
+        assert process.returncode == 7
+    finally:
+        process.kill()
+        process.wait()
+    RuntimeLock(root, "installer.lock").close()
+
+
+def test_a_program_handed_over_to_gets_only_the_fixed_environment(root: Path) -> None:
+    program = (
+        "import json, os, sys\nprint(json.dumps(sorted(os.environ)), flush=True)\n"
+    )
+    process = _hand_over_in_a_process(root, program)
+    try:
+        output, errors = process.communicate(timeout=30)
+        assert process.returncode == 0, errors.decode()
+    finally:
+        process.kill()
+        process.wait()
+    expected = {name.upper() for name in isolated_environment()}
+    names = {name.upper() for name in cast(list[str], json.loads(output))}
+    # An interpreter may add names of its own at startup; nothing of the
+    # caller's, such as the search path this test started it with, gets in.
+    assert expected <= names
+    assert "PYTHONPATH" not in names and "HOME" not in names and "USERNAME" not in names
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX replaces the process")
+def test_handing_over_on_posix_is_one_process_replacement(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replaced: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+
+    def record(
+        path: str, arguments: tuple[str, ...], environment: dict[str, str]
+    ) -> None:
+        replaced.append((path, arguments, environment))
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execve", record)
+    with pytest.raises(SystemExit):
+        hand_over(("/usr/bin/true", "one", "two"), lock=root / "installer.lock")
+    assert replaced == [
+        ("/usr/bin/true", ("/usr/bin/true", "one", "two"), isolated_environment())
+    ]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows waits for the program")
+def test_handing_over_on_windows_ends_what_the_program_left_running(root: Path) -> None:
+    """Nothing the program started outlives the lock its owner then releases."""
+    program = (
+        "import os, subprocess, sys, time\n"
+        "left = subprocess.Popen([sys.executable, '-I', '-c', sys.argv[2], sys.argv[1]])\n"
+        "while not (os.path.exists(sys.argv[1]) and os.path.getsize(sys.argv[1])):\n"
+        "    time.sleep(0.01)\n"
+        "print(left.pid, flush=True)\n"
+    )
+    process = _hand_over_in_a_process(root, program, str(root / "child.log"), _WRITER)
+    try:
+        output, errors = process.communicate(timeout=60)
+        assert process.returncode == 0, errors.decode()
+        left_running = int(output)
+    finally:
+        process.kill()
+        process.wait()
+    _wait_until_gone([left_running])
+    before = (root / "child.log").stat().st_size
+    time.sleep(0.3)
+    assert (root / "child.log").stat().st_size == before
+    RuntimeLock(root, "installer.lock").close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows copies the streams")
+@pytest.mark.parametrize("closed", [1, 2])
+def test_a_closed_output_stream_on_windows_reaches_the_program_as_the_null_device(
+    root: Path, closed: int
+) -> None:
+    """A copy of standard input must not land in the closed stream's place.
+
+    A copied descriptor takes the lowest free number, which is the closed
+    stream's own, so the stream would then look open and the program would be
+    given a second, read-only standard input to write its output to.
+    """
+    other = 3 - closed
+    program = (
+        "import os, stat, sys\n"
+        f"device = stat.S_ISCHR(os.fstat({closed}).st_mode)\n"
+        "try:\n"
+        f"    os.write({closed}, b'discarded')\n"
+        "    written = True\n"
+        "except OSError:\n"
+        "    written = False\n"
+        "line = sys.stdin.readline().strip()\n"
+        f"os.write({other}, f'{{device}} {{written}} {{line}}'.encode())\n"
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            # Closed last, so that nothing this process opens takes its place.
+            _TAKES_THE_LOCK + f"os.close({closed})\n" + _THEN_HANDS_OVER,
+            str(root),
+            program,
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+    try:
+        streams = process.communicate(b"typed\n", timeout=30)
+        assert streams[other - 1] == b"True True typed"
+        assert streams[closed - 1] == b""
+        assert process.returncode == 0
+    finally:
+        process.kill()
+        process.wait()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows exit codes are 32 bits")
+def test_a_windows_exit_code_above_the_signed_range_passes_through(root: Path) -> None:
+    """A program ended by Ctrl-C reports 0xC000013A; so must its owner."""
+    program = "import ctypes\nctypes.windll.kernel32.ExitProcess(0xC000013A)\n"
+    process = _hand_over_in_a_process(root, program)
+    try:
+        process.communicate(timeout=30)
+        assert process.returncode == 0xC000013A
+    finally:
+        process.kill()
+        process.wait()
 
 
 def test_only_the_seam_starts_or_stops_a_process_tree() -> None:

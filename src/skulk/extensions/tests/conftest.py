@@ -1,6 +1,7 @@
 """Keep the plugin bridge's Tailscale observation off the machine running the tests."""
 
 import asyncio
+import itertools
 import sys
 import tempfile
 from collections.abc import AsyncIterator
@@ -20,18 +21,27 @@ from skulk.extensions.tests.test_native_host_protocol import Channels, binding
 from skulk.utils.runtime_files import private_directory
 
 if sys.platform == "win32":
+    _short_names = itertools.count()
 
     @pytest.fixture
-    def tmp_path(tmp_path: Path) -> Path:
-        """Give each test an owner-only temporary directory on Windows.
+    def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+        """Give each test a short, owner-only temporary directory on Windows.
 
-        pytest creates its temporary directory with the access list it inherits
-        from the account's temp folder, which is not owner-only there. On POSIX
-        pytest already creates it private to the account, so tests pass it
-        straight to code that requires an owner-only root. A directory created
-        through the file seam is what that code expects on Windows.
+        Owner-only: pytest creates its temporary directory with the access
+        list it inherits from the account's temp folder, which is not
+        owner-only there. On POSIX pytest already creates it private to the
+        account, so tests pass it straight to code that requires an owner-only
+        root. A directory created through the file seam is what that code
+        expects on Windows.
+
+        Short: a path on Windows is limited to 259 characters unless the
+        machine has long paths switched on, and an installed runtime uses 184
+        of them below its installation's root (the generation's 64-character
+        name, then up to 98 for the files of ``pip`` itself). pytest's own
+        directory, named after the test, leaves too little for a test that
+        installs under ``service/installations/<plugin>``.
         """
-        private = tmp_path / "private"
+        private = tmp_path_factory.getbasetemp() / f"w{next(_short_names)}"
         private_directory(private)
         return private
 

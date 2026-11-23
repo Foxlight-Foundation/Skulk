@@ -25,6 +25,11 @@ process and cannot be inherited, so the child instead holds a file that the
 lock checks: the lock cannot be taken again until the child has ended. The
 job ends the rest of the tree in the same operation as the child, though
 Windows does not promise the order within it.
+
+A terminal command that ends by running an installed program in its own place
+uses :func:`hand_over`. POSIX replaces the process. Windows cannot, so there
+the program runs as an owned child on the same terminal and this process
+waits for it and then exits with its exit code.
 """
 
 import asyncio
@@ -34,7 +39,7 @@ import signal
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Protocol, final
+from typing import NoReturn, Protocol, final
 
 from skulk.utils.runtime_files import RuntimeLock
 
@@ -163,3 +168,41 @@ async def start_owned(
             env=isolated_environment(),
         )
     )
+
+
+def hand_over(arguments: Sequence[str], *, lock: Path) -> NoReturn:
+    """Give this process's terminal, and its place under a lock, to a program.
+
+    The program gets this process's standard input, output and error as they
+    are, its working directory, and :func:`isolated_environment`. Interrupts
+    from the terminal are the program's to handle. This function does not
+    return.
+
+    On POSIX the program replaces this process. The caller must already have
+    made the lock's descriptor inheritable, which is how the program comes to
+    hold the lock until it exits.
+
+    On Windows a process cannot be replaced and a file lock cannot be passed
+    on. The program runs as an owned child holding the lock's children fence;
+    this process keeps the lock, waits, ends anything the program left
+    running, and then exits with the program's exit code. Unwinding on the way
+    out releases the lock, so the caller holds it for exactly as long as the
+    program ran.
+
+    Args:
+        arguments: The program and its arguments.
+        lock: The path of the lock this process holds.
+
+    Raises:
+        SystemExit: On Windows, when the program has ended, with its exit code.
+        ValueError: On Windows, when the lock's children fence is not an
+            owner-only file.
+        OSError: When the program could not be started.
+    """
+    if sys.platform == "win32":
+        code = _windows.run_in_place(arguments, lock=lock)
+        # Windows exit codes are unsigned 32-bit values, and a program ended
+        # by the system reports a large one. Python exits with a signed
+        # integer of the same bits.
+        raise SystemExit(code - (1 << 32) if code >= 1 << 31 else code)
+    os.execve(arguments[0], tuple(arguments), isolated_environment())

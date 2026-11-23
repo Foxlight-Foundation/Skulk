@@ -1,6 +1,5 @@
 """Explicit local setup through one fixed entrypoint in a verified private runtime."""
 
-import os
 import sqlite3
 import zipfile
 from contextlib import closing
@@ -16,8 +15,11 @@ from skulk.extensions.runtime_attachment import (
     ServiceConnection,
 )
 from skulk.extensions.runtime_files import read_private
+from skulk.extensions.runtime_integrity import runtime_interpreter
 from skulk.extensions.runtime_selection import RuntimeSelection, RuntimeSelector
 from skulk.shared.constants import SKULK_CONFIG_HOME
+from skulk.utils.owned_process import hand_over
+from skulk.utils.runtime_files import has_borrowed_identity, has_root_authority
 
 _SETUP_ENTRYPOINT = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module('__setup__',run_name='__main__')"
 _MANAGEMENT_ENTRYPOINT = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module('__manage__',run_name='__main__')"
@@ -62,14 +64,17 @@ def _retained_history(root: Path, selection: RuntimeSelection) -> None:
 
 
 async def setup_installed_plugin(plugin_id: str, arguments: tuple[str, ...]) -> None:
-    """Replace this local terminal process with the selected plugin's setup command.
+    """Hand this local terminal process over to the selected plugin's setup command.
 
     Resolve the installation from the protected local service connection, verify
     signatures, compatibility and all executable bytes, then execute the setup
     launcher: the archive's fixed optional __setup__ entrypoint, or the ``setup``
     launcher a signed wheel declares in the ``skulk.capability_runtime`` group.
-    Arguments are plugin-owned setup fields, never a command/module selector. The inherited installation lock blocks
+    Arguments are plugin-owned setup fields, never a command/module selector. The installation lock blocks
     generation changes until setup exits. No remote route invokes this operation.
+    On POSIX the command replaces this process and inherits the lock; on Windows
+    it runs on the same terminal while this process holds the lock and waits,
+    then exits with the command's exit code.
     """
     await _run_installed_plugin(plugin_id, arguments, "setup")
 
@@ -87,7 +92,7 @@ async def manage_installed_plugin(plugin_id: str, arguments: tuple[str, ...]) ->
 async def _run_installed_plugin(
     plugin_id: str, arguments: tuple[str, ...], action: Literal["setup", "manage"]
 ) -> None:
-    if os.geteuid() == 0 or os.geteuid() != os.getuid():
+    if has_root_authority() or has_borrowed_identity():
         raise ValueError("plugin setup requires the existing nonroot owner")
     identifier = TypeAdapter[str](InstallationIdentifier).validate_python(
         plugin_id, strict=True
@@ -137,11 +142,11 @@ async def _run_installed_plugin(
                 bootstrap = _LAUNCHER_ENTRYPOINT.format(name=action)
             if entry is not None and (entry.is_dir() or entry.file_size > 16384):
                 raise ValueError("invalid plugin setup entrypoint")
-        python = str(generation / "runtime/bin/python")
-        # Exec retains terminal I/O and normal interrupt behavior. Only the verified
-        # generation and fixed module come from us; provider prompts remain private.
-        os.execve(
-            python,
+        python = str(runtime_interpreter(generation / "runtime"))
+        # The command keeps terminal I/O and normal interrupt behavior. Only the
+        # verified generation and fixed module come from us; provider prompts
+        # remain private.
+        hand_over(
             (python, "-I", "-B", "-c", bootstrap, str(artifact), *arguments),
-            {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+            lock=selector.installer.installer / "installer.lock",
         )

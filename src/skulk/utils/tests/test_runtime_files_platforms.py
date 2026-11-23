@@ -53,7 +53,6 @@ _DIRECT_FILE_CUSTODY = frozenset(
 # Windows. Remove a module from this list when it is ported; add none.
 _NOT_YET_PORTED = frozenset(
     {
-        "local_setup.py",
         "service_bootstrap.py",
         "service_registration.py",
         "service_setup.py",
