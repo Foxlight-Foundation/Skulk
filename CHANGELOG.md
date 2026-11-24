@@ -138,6 +138,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Security
 
+- A logged error no longer includes the values of local variables. Skulk's
+  logging library prints, under each line of an error traceback, the values
+  of the variables on that line unless told not to, and Skulk had not told
+  it. A request that failed (for example a prompt longer than the model's
+  context window) therefore wrote the start of the request's text into the
+  node's log file and its console output, which a service install captures to
+  a file. Every log destination now withholds those values: the console, the
+  log file, the JSON output used for log shipping, and the output of model
+  runner processes and of command-line tools. Tracebacks still show the
+  error, its message and where it happened. Log files written before this
+  release are not rewritten, so remove old ones if that matters to you.
 - Updated primp, the HTTP client behind web search, from 1.2.2 to 1.3.1.
   1.2.2 was withdrawn by its maintainer: two web searches that were the first
   in a process and started together could freeze the whole node, because the
