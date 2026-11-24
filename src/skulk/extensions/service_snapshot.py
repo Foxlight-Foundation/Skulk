@@ -11,6 +11,7 @@ import stat
 import sys
 import sysconfig
 import venv
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import final
@@ -24,13 +25,16 @@ from skulk.extensions.runtime_artifacts import Digest, QualifiedHost, measure_ho
 from skulk.extensions.runtime_files import (
     RuntimeLock,
     is_desktop_metadata,
+    no_other_account_can_change,
     private_directory,
     read_private,
-    writable_only_by,
     write_private,
 )
 from skulk.extensions.runtime_install import finish_runtime_work
+from skulk.extensions.runtime_integrity import copied_path_excess
 from skulk.utils.dashboard_path import find_resources
+from skulk.utils.owned_process import start_owned
+from skulk.utils.runtime_files import examine, has_root_authority, open_unfollowed
 
 _MAXIMUM_FILES = 200000
 _MAXIMUM_BYTES = 17179869184
@@ -48,6 +52,31 @@ def _require_free_space(destination: Path, needed: int) -> None:
             "Not enough free disk space to set up plugins: "
             f"about {(needed + _FREE_SPACE_MARGIN_BYTES) / gibibyte:.1f} GB needed, "
             f"{free / gibibyte:.1f} GB free"
+        )
+
+
+# What ``venv`` itself puts in an empty environment on Windows, at its deepest.
+_ENVIRONMENT_PATHS = ("Lib/site-packages/", "Scripts/deactivate.bat")
+
+
+def _require_path_room(runtime: Path, members: Iterable[str]) -> None:
+    """Refuse a copy whose deepest file would not fit below ``runtime``.
+
+    Windows limits how long a path may be unless the machine has long paths
+    switched on. Without this the copy stops partway with an error that names
+    one file and says nothing of why.
+
+    Args:
+        runtime: Where the environment would be built.
+        members: The ``/``-separated paths the copy creates below it.
+    """
+    excess = copied_path_excess(runtime, (*_ENVIRONMENT_PATHS, *members))
+    if excess:
+        characters = "1 character" if excess == 1 else f"{excess} characters"
+        raise ValueError(
+            f"Skulk's own files need a path {characters} longer than Windows allows "
+            "on this machine. Switch on long paths in Windows, or keep Skulk's "
+            "plugin service in a folder with a shorter path."
         )
 
 
@@ -115,6 +144,13 @@ def dedicated_skulk_interpreter() -> bool:
     return (Path(sys.prefix) / PACKAGED_RUNTIME_MARKER).is_file()
 
 
+def _site_prefix() -> str:
+    """Where ``venv`` puts site-packages in a new environment, relative to it."""
+    if sys.platform == "win32":
+        return "Lib/site-packages/"
+    return f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages/"
+
+
 def _sources() -> tuple[_SourceFile, ...]:
     if not dedicated_skulk_interpreter() or sysconfig.get_path(
         "purelib"
@@ -123,9 +159,7 @@ def _sources() -> tuple[_SourceFile, ...]:
             "service setup requires an isolated supported Skulk environment"
         )
     site_packages = Path(sysconfig.get_path("purelib"))
-    site_prefix = (
-        f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages/"
-    )
+    site_prefix = _site_prefix()
     roots = [(site_packages, site_prefix, True)]
     for package in ("skulk", "skulk_pyo3_bindings"):
         specification = importlib.util.find_spec(package)
@@ -152,15 +186,14 @@ def _sources() -> tuple[_SourceFile, ...]:
             # rewrites whenever the folder is browsed.
             if is_desktop_metadata(path):
                 continue
-            info = path.lstat()
-            if stat.S_ISLNK(info.st_mode):
+            member = examine(path)
+            if member.kind == "link":
                 raise ValueError("installed dependency has an unresolved link")
-            if stat.S_ISDIR(info.st_mode):
+            if member.kind == "directory":
                 continue
-            if not stat.S_ISREG(info.st_mode) or not writable_only_by(
-                info, os.getuid()
-            ):
+            if member.kind != "file" or not no_other_account_can_change(path):
                 raise ValueError("installed dependency is not a protected regular file")
+            info = member.info
             if primary and relative == Path("skulk.pth"):
                 # The effective imported core is copied explicitly above. Never
                 # retain the editable installation's checkout redirection.
@@ -203,7 +236,13 @@ def _protect(tree: Path) -> None:
     the service bootstrap rightly refuses a runtime another account could
     change. The staged runtime belongs to the service alone, so it is made
     private before it is qualified and sealed.
+
+    Windows has no such step: everything created inside the runtime's private
+    folder takes its access from that folder, the account and SYSTEM only,
+    and the seal refuses a member that grants anyone else.
     """
+    if sys.platform == "win32":
+        return
     for path in (tree, *tree.rglob("*")):
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode):
@@ -216,8 +255,15 @@ def _protect(tree: Path) -> None:
 def _copy(source: tuple[_SourceFile, ...], destination: Path) -> None:
     for item in source:
         target = destination / item.relative
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor = os.open(item.source, os.O_RDONLY | os.O_NOFOLLOW)
+        if sys.platform == "win32":
+            # No mode: a new folder then takes its access from the private
+            # folder above it, the account and SYSTEM only. Python gives mode
+            # 0o700 a meaning of its own on Windows, an access list that also
+            # admits Administrators, which the seal refuses.
+            target.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = open_unfollowed(item.source)
         with os.fdopen(descriptor, "rb") as original, target.open("xb") as copied:
             info = os.fstat(original.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_size != item.size:
@@ -230,7 +276,12 @@ def _copy(source: tuple[_SourceFile, ...], destination: Path) -> None:
             raise ValueError("core dependency bytes changed during copy")
 
 
-_QUALIFY = """import importlib.metadata,json
+# The state directory arrives as an argument and is put in place before
+# anything of Skulk's is imported: an owned child starts with a fixed
+# environment that the caller cannot add to.
+_QUALIFY = """import os,sys
+os.environ['SKULK_HOME']=sys.argv[1]
+import importlib.metadata,json
 from packaging.utils import canonicalize_name
 from skulk.extensions.runtime_artifacts import measure_host
 host=measure_host()
@@ -241,45 +292,93 @@ for d in importlib.metadata.distributions()}},sort_keys=True))
 """
 
 
-async def _qualify(runtime: Path, lock: RuntimeLock) -> bytes:
-    process = await asyncio.create_subprocess_exec(
-        str(runtime / "bin/python"),
-        "-I",
-        "-B",
-        "-c",
-        _QUALIFY,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        pass_fds=(lock.descriptor,),
-        cwd=runtime,
-        env={
-            "PATH": "/usr/bin:/bin",
-            "LANG": "C.UTF-8",
-            "SKULK_HOME": str(runtime.parent / "qualification-state"),
-        },
-    )
+async def _run(
+    arguments: tuple[str, ...], directory: Path, lock: RuntimeLock, failure: str
+) -> bytes:
+    """Run one owned program to its end and return what it printed.
+
+    The program cannot outlive the installer lock, and its whole tree has
+    ended before this returns. What it printed is kept beside the runtime
+    when it fails.
+
+    Args:
+        arguments: The program and its arguments.
+        directory: The directory it starts in; evidence goes beside it.
+        lock: The held installer lock.
+        failure: What to say when the program exits with an error.
+    """
+    child = await start_owned(arguments, cwd=directory, lock=lock)
     output = bytearray()
     try:
-        assert process.stdout is not None
         async with asyncio.timeout(60):
-            while block := await process.stdout.read(16384):
+            while block := await child.stdout.read(16384):
                 output.extend(block)
                 if len(output) > 262144:
                     raise ValueError("service qualification output exceeds bound")
-            await process.wait()
-        if process.returncode != 0:
-            raise ValueError("copied service runtime did not qualify")
+            await child.wait()
+        if child.returncode != 0:
+            raise ValueError(failure)
         return bytes(output)
     except (OSError, ValueError, TimeoutError):
         write_private(
-            runtime.parent / "qualification-evidence.log", bytes(output[:262144])
+            directory.parent / "qualification-evidence.log", bytes(output[:262144])
         )
         raise
     finally:
-        if process.returncode is None:
-            process.kill()
-        await finish_runtime_work(asyncio.create_task(process.wait()))
+        try:
+            if child.returncode is None:
+                child.kill()
+            await finish_runtime_work(asyncio.create_task(child.wait()))
+        finally:
+            await finish_runtime_work(asyncio.create_task(child.close()))
+
+
+async def _build_environment(runtime: Path, lock: RuntimeLock) -> None:
+    """Create the empty environment the copy goes into.
+
+    Windows builds it in a child that runs the base interpreter by its real
+    path, and asks for copies outright. The environment there holds no link
+    to the base: its launcher finds the base through ``home`` in
+    ``pyvenv.cfg``, which ``venv`` takes from how its interpreter was started,
+    and the seal requires that to be the base's own folder. Asked for links,
+    ``venv`` would also fall back to copies for an ordinary account without
+    saying so.
+    """
+    if sys.platform == "win32":
+        await _run(
+            (
+                str(service_bootstrap.current_base()),
+                "-I",
+                "-m",
+                "venv",
+                "--copies",
+                "--without-pip",
+                str(runtime),
+            ),
+            runtime,
+            lock,
+            "service environment could not be created",
+        )
+        return
+    await asyncio.to_thread(
+        venv.EnvBuilder(symlinks=True, with_pip=False).create, runtime
+    )
+
+
+async def _qualify(runtime: Path, lock: RuntimeLock) -> bytes:
+    return await _run(
+        (
+            str(service_bootstrap.manager_interpreter(runtime)),
+            "-I",
+            "-B",
+            "-c",
+            _QUALIFY,
+            str(runtime.parent / "qualification-state"),
+        ),
+        runtime,
+        lock,
+        "copied service runtime did not qualify",
+    )
 
 
 def service_source_identity() -> str:
@@ -290,15 +389,13 @@ def service_source_identity() -> str:
     Runtime activation still verifies the complete copied tree independently.
     """
     host = measure_host()
-    base = Path(sys.executable).resolve(strict=True)
     identity = {
         "platform": host.platform,
         "python_version": host.python_version,
         "skulk_version": host.skulk_version,
         "skulk_build_sha256": host.skulk_build_sha256,
         "inventory": _distributions(),
-        "base_python": str(base),
-        "base_sha256": service_bootstrap.digest_file(base),
+        **service_bootstrap.base_identity(service_bootstrap.current_base()),
     }
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
@@ -313,7 +410,7 @@ async def stage_service_runtime(root: Path) -> ServiceSnapshot:
     refused outright when the volume lacks room for it. Cancellation waits for
     owned copy and qualification work to finish.
     """
-    if os.geteuid() == 0:
+    if has_root_authority():
         raise ValueError("service runtime preparation must run without root")
     private_directory(root)
     lock = RuntimeLock(root)
@@ -325,6 +422,10 @@ async def stage_service_runtime(root: Path) -> ServiceSnapshot:
             source = await asyncio.to_thread(_sources)
             generation_id = uuid4().hex
             parent = root / "core-runtimes"
+            # Before anything is created: a refused copy leaves nothing behind.
+            _require_path_room(
+                parent / generation_id / "runtime", (item.relative for item in source)
+            )
             private_directory(parent)
             await asyncio.to_thread(
                 _require_free_space, parent, sum(item.size for item in source)
@@ -353,9 +454,7 @@ async def stage_service_runtime(root: Path) -> ServiceSnapshot:
             lock: RuntimeLock,
         ) -> ServiceSnapshot:
             generation_id = generation.name
-            await asyncio.to_thread(
-                venv.EnvBuilder(symlinks=True, with_pip=False).create, runtime
-            )
+            await _build_environment(runtime, lock)
             await asyncio.to_thread(_copy, source, runtime)
             await asyncio.to_thread(_protect, runtime)
             bootstrap = Path(service_bootstrap.__file__).read_bytes()
@@ -379,15 +478,14 @@ async def stage_service_runtime(root: Path) -> ServiceSnapshot:
                 raise ValueError(
                     "source environment changed during service preparation"
                 )
-            base = Path(sys.executable).resolve(strict=True)
+            base = service_bootstrap.current_base()
             entries = await asyncio.to_thread(
                 service_bootstrap.runtime_tree, runtime, base
             )
             metadata = {
                 "protocol": 1,
                 "generation": generation_id,
-                "base_python": str(base),
-                "base_sha256": service_bootstrap.digest_file(base),
+                **service_bootstrap.base_identity(base),
                 "bootstrap_sha256": hashlib.sha256(bootstrap).hexdigest(),
                 "qualified_host": expected,
                 "entries": entries,
@@ -446,13 +544,10 @@ def activate_staged_runtime(root: Path, snapshot: ServiceSnapshot) -> None:
     if hashlib.sha256(raw).hexdigest() != snapshot.manifest_sha256:
         raise ValueError("service manifest integrity differs")
     metadata = service_bootstrap.document(raw)
-    base = Path(sys.executable).resolve(strict=True)
-    if (
-        metadata.get("base_python") != str(base)
-        or metadata.get("base_sha256") != service_bootstrap.digest_file(base)
-        or metadata.get("entries")
-        != service_bootstrap.runtime_tree(generation / "runtime", base)
-    ):
+    base = service_bootstrap.current_base()
+    if not service_bootstrap.names_base(metadata, base) or metadata.get(
+        "entries"
+    ) != service_bootstrap.runtime_tree(generation / "runtime", base):
         raise ValueError("staged service runtime differs")
     bootstrap = read_private(generation / "bootstrap.py", 65536)
     if hashlib.sha256(bootstrap).hexdigest() != metadata.get("bootstrap_sha256"):

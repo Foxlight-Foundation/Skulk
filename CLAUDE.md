@@ -1432,8 +1432,12 @@ a file or opens one link-safely by calling the operating system itself: it uses
 `is_private_directory`, `open_private`, `sync_directory`, `examine`,
 `open_unfollowed` and `create_file` from the same module, and a guard in
 `utils/tests/test_runtime_files_platforms.py` lists the modules not yet moved
-(the `service_*` modules). Take a module off that list when it is ported; add
-none.
+(`service_registration.py` and `service_setup.py`). Take a module off that
+list when it is ported; add none. `no_other_account_can_change()` in the same
+module is the rule for a file this account did not necessarily create, such
+as one in the Python environment Skulk itself is installed in: on Windows its
+owner, and every account its access list lets change it, must be the account,
+SYSTEM or Administrators, and what others may read is not examined.
 An installed runtime is laid out differently per platform, and only
 `extensions/runtime_integrity.py` knows how: `runtime_interpreter()` gives the
 environment's interpreter (`runtime/bin/python`, or `runtime\Scripts\python.exe`
@@ -1483,9 +1487,15 @@ program on the console and are the running program's to interpret), waits,
 ends what the program left running and exits with its exit code.
 `has_borrowed_identity()` in `utils/runtime_files.py` is the one test for a
 set-user-ID process; it is always false on Windows.
-`utils/tests/test_owned_process.py` lists the modules that still start, stop
-or replace processes themselves (`service_bootstrap.py`,
-`service_snapshot.py`).
+The fixed environment an owned child starts with (`isolated_environment()`)
+names the account's home on Windows: `USERPROFILE`, set to the profile folder
+Windows itself records for the account (`profile_directory()` in
+`utils/_windows_account.py`), never copied from this process's environment. A
+POSIX program finds its home in the account database whatever its environment
+holds; a Windows program finds it only through that variable, and Skulk's own
+modules ask for it when they are imported.
+`utils/tests/test_owned_process.py` names the one module that still replaces
+its own process itself, `service_bootstrap.py`, which does so on POSIX only.
 The owner launcher (`extensions/runtime_service.py`) starts a plugin's owner
 with `start_supervised` from the same seam: a long-running child that holds
 one end of a lifetime pipe. Closing the launcher's end, which also happens
@@ -1521,6 +1531,45 @@ A service's own stop request goes through `stop_on_signal()` in
 POSIX; Ctrl-C and Ctrl-Break on Windows, where the loop cannot register a
 signal handler. `runtime_service` and `runtime_manager serve` both use it, so
 the manager runs as a program on Windows.
+The plugin service's own copy of Skulk (`extensions/service_snapshot.py`) and
+the file that checks that copy before the manager starts
+(`extensions/service_bootstrap.py`) run on Windows. The bootstrap may import
+only the standard library, so it cannot use `utils/runtime_files.py`: it
+restates that module's rules for both platforms, the two guards above name it
+as the one exception, and `extensions/tests/test_service_snapshot.py` holds
+it to them. `current_base()`, `base_identity()`, `manager_interpreter()`,
+`manager_command()` and `manager_environment()` in the bootstrap are the one
+place each of those is worked out; never spell them out elsewhere. On Windows
+the copy's environment is built by a child that runs the base interpreter by
+its real path (`venv --copies --without-pip`), so that `home` in `pyvenv.cfg`
+names the base's own folder and not a link to it (uv reaches its Python
+through a junction). The copy lies under `Lib\site-packages`, and the folders
+the copy makes are created with no mode: Python gives `mkdir(mode=0o700)` an
+access list on Windows that also admits Administrators. The seal
+(`runtime_tree`) refuses every reparse point there, requires each member to
+be the account's and to grant access to nobody but the account and SYSTEM,
+and requires `home` to be the base's folder; the manifest also records the
+base's library (`base_library_sha256`, the digest of `python3XX.dll`), which
+a POSIX manifest does not have. A POSIX manifest is the bytes it has always
+been. Windows cannot replace a running process, so there the bootstrap does
+not become the manager: it joins a Job Object that ends its processes when
+the bootstrap's handle closes, starts the manager as a child with the fixed
+environment, ignores Ctrl-C and Ctrl-Break (the manager's to act on), waits,
+and exits with the manager's exit code. However the bootstrap ends, the
+manager and everything the manager started end with it. Staging refuses,
+before it creates anything, a copy whose deepest file would not fit below the
+service root on a machine without long paths (`copied_path_excess()` in
+`extensions/runtime_integrity.py`): the copy's files begin 56 characters
+after the root's path, so the 144-character file a development environment
+holds needs a root of 59 characters or fewer.
+Staging a real copy still cannot run on Windows. It starts by measuring the
+host (`measure_host()`), and `current_platform()` names macOS and Linux only.
+Naming a Windows artifact family is a decision for the release schema and the
+owner runtime, not a porting step. Until it is made, the tests give staging a
+stand-in host and a stand-in answer from the copy; everything else in them is
+real, including a copy of the whole installed environment that is sealed,
+verified by the bootstrap and serves as the manager. Registering the service
+with Windows (`service_registration.py`, `service_setup.py`) is not built.
 Windows limits how long a path may be unless the machine has long paths
 switched on (off by default): a directory's path may be 247 characters and a
 file's 259. A generation folder on Windows is therefore named by the first 32

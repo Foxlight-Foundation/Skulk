@@ -34,6 +34,7 @@ from skulk.extensions.runtime_integrity import (
     adopt_current_interpreter,
     check_generation,
     claim_generation,
+    copied_path_excess,
     environment_command,
     generation_directory,
     generation_name,
@@ -323,6 +324,30 @@ def test_a_path_is_measured_as_windows_counts_it(
     # Characters of the basic plane are one unit each, accents included.
     accented = Path("\u00e9" * (247 - 1 - len(directory)))
     assert runtime_path_excess(accented, (), wheels) == 0
+
+
+def test_a_copied_tree_is_measured_member_by_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file may reach 259 and the folder that holds one 247, counted as Windows counts."""
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._paths_are_limited", lambda: True
+    )
+    destination = Path("r" * 100)
+    file = "package/" + "m" * (259 - 100 - 1 - len("package/"))
+    assert copied_path_excess(destination, [file]) == 0
+    assert copied_path_excess(destination, [file + "m"]) == 1
+    folder = "d" * (247 - 100 - 1) + "/"
+    assert copied_path_excess(destination, [folder]) == 0
+    assert copied_path_excess(destination, ["d" + folder]) == 1
+    # A short file in a folder that does not fit: the folder is what counts.
+    assert copied_path_excess(destination, ["d" + folder + "m.py"]) == 1
+    assert copied_path_excess(Path("r" * 99 + "\U0001f98a"), [file]) == 1
+    assert copied_path_excess(destination, []) == 0
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._paths_are_limited", lambda: False
+    )
+    assert copied_path_excess(destination, ["d" * 400 + "/m.py"]) == 0
 
 
 def test_the_measure_covers_pip_the_artifacts_and_the_environment(

@@ -427,6 +427,30 @@ def runtime_path_excess(
     return max(0, below + directory - _DIRECTORY_LIMIT, below + file - _FILE_LIMIT)
 
 
+def copied_path_excess(destination: Path, members: Iterable[str]) -> int:
+    """How many characters too long the deepest of ``members`` would be.
+
+    For a tree that is copied member by member under its final names, such as
+    the plugin service's own copy of Skulk. Lengths are in UTF-16 code units,
+    as Windows counts them.
+
+    Args:
+        destination: The folder the members are created in.
+        members: Their paths relative to it, ``/``-separated. One ending in
+            ``/`` is a directory; any other is a file, and the directory that
+            holds it is counted too.
+
+    Returns:
+        Zero when everything fits, and always zero where no such limit
+        applies: on POSIX, and on Windows with long paths switched on.
+    """
+    if not _paths_are_limited():
+        return 0
+    directory, file = _depth(members)
+    below = _units(str(destination)) + 1
+    return max(0, below + directory - _DIRECTORY_LIMIT, below + file - _FILE_LIMIT)
+
+
 # On Windows a generation folder is named by this many leading characters of
 # the runtime digest: 128 bits, far past any accidental repeat, and 32
 # characters given back to the installation's own path.

@@ -74,6 +74,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import final
 
+from skulk.utils import _windows_account
 from skulk.utils._runtime_files_windows import hold_children_fence
 
 _JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
@@ -270,7 +271,14 @@ def _failure(what: str) -> OSError:
 
 
 def isolated_environment() -> dict[str, str]:
-    """The least a Windows program needs: the system directory and a temp folder."""
+    """The least a Windows program needs: the system, a temp folder and its home.
+
+    A POSIX program finds its home in the account database whatever its
+    environment holds. A Windows program finds it only through
+    ``USERPROFILE``, and Skulk's own modules ask for it when they are
+    imported, so the account's profile folder is named here: the one Windows
+    records for the account, not whatever this process's variable says.
+    """
     system_root = os.environ.get("SYSTEMROOT", r"C:\Windows")
     temporary = tempfile.gettempdir()
     return {
@@ -278,6 +286,7 @@ def isolated_environment() -> dict[str, str]:
         "PATH": str(Path(system_root) / "System32"),
         "TEMP": temporary,
         "TMP": temporary,
+        "USERPROFILE": _windows_account.profile_directory(),
     }
 
 

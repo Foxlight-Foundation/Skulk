@@ -16,6 +16,9 @@ from skulk.utils.runtime_files import (
     is_desktop_metadata as is_desktop_metadata,
 )
 from skulk.utils.runtime_files import (
+    no_other_account_can_change as no_other_account_can_change,
+)
+from skulk.utils.runtime_files import (
     private_directory as private_directory,
 )
 from skulk.utils.runtime_files import (

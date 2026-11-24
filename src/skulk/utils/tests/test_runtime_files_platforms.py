@@ -16,6 +16,7 @@ from skulk.utils.runtime_files import (
     create_file,
     examine,
     is_private_directory,
+    no_other_account_can_change,
     open_private,
     open_unfollowed,
     private_directory,
@@ -51,14 +52,11 @@ _DIRECT_FILE_CUSTODY = frozenset(
 )
 # Plugin-hosting modules not yet moved onto the seam, so not yet able to run on
 # Windows. Remove a module from this list when it is ported; add none.
-_NOT_YET_PORTED = frozenset(
-    {
-        "service_bootstrap.py",
-        "service_registration.py",
-        "service_setup.py",
-        "service_snapshot.py",
-    }
-)
+_NOT_YET_PORTED = frozenset({"service_registration.py", "service_setup.py"})
+# Runs on nothing but the standard library, before anything of Skulk's may be
+# imported, so it cannot use the seam. It restates the seam's rules for both
+# platforms and is held to them by its own tests (``test_service_snapshot.py``).
+_STANDALONE = frozenset({"service_bootstrap.py"})
 
 
 @pytest.fixture
@@ -469,6 +467,50 @@ def test_a_grant_to_another_account_is_not_exclusive(root: Path, access: str) ->
     assert examine(path).owned
 
 
+@posix_only
+def test_a_file_the_account_alone_can_write_is_not_another_accounts_to_change(
+    tmp_path: Path,
+) -> None:
+    """What others may read does not matter; what they may write does."""
+    path = tmp_path / "installed.py"
+    path.write_bytes(b"VALUE = 7\n")
+    path.chmod(0o644)
+    assert no_other_account_can_change(path)
+    path.chmod(0o646)
+    assert not no_other_account_can_change(path)
+
+
+@windows_only
+def test_a_file_as_an_installer_leaves_it_is_not_another_accounts_to_change(
+    root: Path,
+) -> None:
+    """The account, SYSTEM and Administrators may change it; anyone may read it.
+
+    That is how an installed Python environment in a profile looks, and it is
+    not ``exclusive``, which names nobody but the account and SYSTEM.
+    """
+    path = root / "installed.py"
+    path.write_bytes(b"VALUE = 7\n")
+    assert no_other_account_can_change(path)
+    subprocess.run(
+        ["icacls", str(path), "/grant", "*S-1-5-32-544:(F)"],
+        check=True,
+        capture_output=True,
+    )
+    assert no_other_account_can_change(path)
+    assert not examine(path).exclusive
+    # Reading is anyone's to have.
+    _grant_everyone(path, "R")
+    assert no_other_account_can_change(path)
+    _grant_everyone(path, "W")
+    assert not no_other_account_can_change(path)
+
+
+def test_a_missing_file_cannot_be_asked_who_can_change_it(root: Path) -> None:
+    with pytest.raises(OSError):
+        no_other_account_can_change(root / "absent")
+
+
 def test_opening_unfollowed_reads_a_file_and_refuses_a_link(
     tmp_path: Path, root: Path
 ) -> None:
@@ -532,4 +574,4 @@ def test_only_the_seam_asks_who_owns_a_file_or_opens_one_link_safely() -> None:
         ):
             direct.add(source.name)
 
-    assert direct == _NOT_YET_PORTED
+    assert direct == _NOT_YET_PORTED | _STANDALONE

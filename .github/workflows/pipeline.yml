@@ -230,7 +230,9 @@ jobs:
         #
         # The slow tests are included: one of them copies a standalone Python,
         # installs through it, moves it and starts the adopted environment,
-        # which nothing else in CI does on Windows.
+        # and another copies this Skulk into a service folder, seals the copy
+        # and starts the plugin manager from it. Nothing else in CI does
+        # either on Windows.
         #
         # This runner has long paths switched on, which a Windows machine does
         # not by default, so the 259-character path limit is not checked here.
@@ -250,7 +252,8 @@ jobs:
             src/skulk/extensions/tests/test_runtime_selection.py \
             src/skulk/extensions/tests/test_local_setup.py \
             src/skulk/extensions/tests/test_runtime_service.py \
-            src/skulk/extensions/tests/test_runtime_manager_platforms.py
+            src/skulk/extensions/tests/test_runtime_manager_platforms.py \
+            src/skulk/extensions/tests/test_service_snapshot.py
 
   test:
     name: Test
