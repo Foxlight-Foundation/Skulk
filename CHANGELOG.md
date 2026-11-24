@@ -7,6 +7,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Two nodes on one machine
+
+- A node started with `SKULK_HOME` now stages models in a `staging` folder inside that home
+  when its settings name no staging folder. Before, it staged into `~/.skulk/staging` whatever
+  `SKULK_HOME` said, so a second node on a machine shared the first node's staged models: a
+  fresh second node's own model store imported every one of them, and either node's cleanup
+  could delete the other's copies. Nothing changes for a node started without `SKULK_HOME`
+  (its default stays `~/.skulk/staging` on macOS and Linux), and a `node_cache_path` written
+  in `skulk.yaml` is used as written.
+
 ### Windows management node
 
 - A Skulk node now starts on Windows from a source checkout, as a management node only. It
