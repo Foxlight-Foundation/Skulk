@@ -1104,6 +1104,43 @@ def load_skulk_config(
     return SkulkConfig.model_validate(without_unset_sections(raw))
 
 
+def omit_unwritten_staging_paths(
+    model_store: ModelStoreConfig, shared: dict[str, object]
+) -> None:
+    """Take out of a store section about to be shared what nobody wrote in it.
+
+    The store host sends its settings to every node, and every node writes
+    them to its own file. A staging folder nobody wrote is this node's own
+    default, which another node must not inherit: a host whose home was moved
+    with ``SKULK_HOME`` would hand its folder to every node, including a
+    second node on the same machine, the exact sharing the default exists to
+    prevent. A node override is sent with only the fields a person set, so a
+    partial override stays partial and goes on inheriting the rest from the
+    base section, as :func:`resolve_node_staging` intends. Anything a person
+    wrote is sent as written.
+
+    Args:
+        model_store: The store section as loaded, which remembers which
+            fields its file named.
+        shared: That section's serialized form, changed in place.
+    """
+    staging = shared.get("staging")
+    if (
+        isinstance(staging, dict)
+        and "node_cache_path" not in model_store.staging.model_fields_set
+    ):
+        cast(dict[str, object], staging).pop("node_cache_path", None)
+    overrides = shared.get("node_overrides")
+    if not isinstance(overrides, dict):
+        return
+    for name, override in model_store.node_overrides.items():
+        entry = cast(dict[str, object], overrides).get(name)
+        if override.staging is not None and isinstance(entry, dict):
+            cast(dict[str, object], entry)["staging"] = override.staging.model_dump(
+                exclude_unset=True
+            )
+
+
 def resolve_node_staging(
     config: ModelStoreConfig,
     node_id: str,

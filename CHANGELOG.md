@@ -16,6 +16,11 @@ This project records release notes here and mirrors public-facing notes in
   could delete the other's copies. Nothing changes for a node started without `SKULK_HOME`
   (its default stays `~/.skulk/staging` on macOS and Linux), and a `node_cache_path` written
   in `skulk.yaml` is used as written.
+- A store host no longer writes a staging folder nobody chose into every node's `skulk.yaml`
+  when it shares its settings, so each node keeps its own default. A node override that names
+  only some staging settings is now shared as written and goes on inheriting the rest from
+  the base section; before, one broadcast filled in every default and the override stopped
+  inheriting. A staging folder a person wrote is still shared as written.
 
 ### Windows management node
 

@@ -1822,7 +1822,10 @@ class Node:
         # its own broadcast via local delivery and persists it through the
         # normal config-sync path, so there is no separate local write here
         # (it would only be clobbered by that same broadcast).
-        from skulk.store.config import normalized_hf_token
+        from skulk.store.config import (
+            normalized_hf_token,
+            omit_unwritten_staging_paths,
+        )
 
         # Unset sections stay out of what every node writes, so a section a
         # newer build adds can never stop an older one from starting (see
@@ -1836,6 +1839,12 @@ class Node:
             self.skulk_config.model_dump(exclude=unset_sections)
         )
         broadcast_dict["model_store"]["store_http_host"] = reachable_host
+        # A staging folder nobody wrote is this node's own default. Every
+        # node writes this broadcast to its file, so sending it would hand
+        # this node's folder to all of them.
+        omit_unwritten_staging_paths(
+            ms, cast(dict[str, object], broadcast_dict["model_store"])
+        )
         if normalized_hf_token(broadcast_dict.get("hf_token")) is None:
             broadcast_dict.pop("hf_token", None)
         broadcast_dict.pop("model_trust", None)
