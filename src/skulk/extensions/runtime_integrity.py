@@ -19,6 +19,16 @@ Windows also limits how long a path may be unless the machine has long paths
 switched on. :func:`runtime_path_excess` says whether a runtime's files would
 fit below a generation folder, so the installer can refuse before it writes
 any of them.
+
+Where a generation lives is decided here too (:func:`generation_directory`).
+A runtime's identity is its 64-character digest everywhere. The folder it is
+installed in is named by that digest, except on Windows, where the name is the
+digest's first 32 characters: the path limit there leaves an installation's
+own folder too little room otherwise. Because a short name could in principle
+be shared by two digests, a Windows generation folder also holds the full
+digest it belongs to, and :func:`claim_generation` and
+:func:`check_generation` refuse a folder that belongs to another runtime
+before anything in it is touched.
 """
 
 import base64
@@ -42,6 +52,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from skulk.extensions.runtime_artifacts import Digest, canonical_json
 from skulk.extensions.runtime_files import (
     is_desktop_metadata,
+    private_directory,
     read_private,
     write_private,
 )
@@ -413,6 +424,102 @@ def runtime_path_excess(
     directory, file = _generation_depth(artifacts, wheels)
     below = _units(str(generation)) + 1
     return max(0, below + directory - _DIRECTORY_LIMIT, below + file - _FILE_LIMIT)
+
+
+# On Windows a generation folder is named by this many leading characters of
+# the runtime digest: 128 bits, far past any accidental repeat, and 32
+# characters given back to the installation's own path.
+_SHORT_NAME_CHARACTERS: Final = 32
+# In a folder whose name is not the whole digest, the file that says whose it is.
+_DIGEST_RECORD: Final = "runtime-digest"
+
+
+def _names_are_short() -> bool:
+    """Whether generation folders are named by part of the digest here."""
+    return sys.platform == "win32"
+
+
+def generation_name(runtime_digest: str) -> str:
+    """The name of the folder a runtime is installed in.
+
+    The owner runtime derives the same name from the same digest, so this
+    rule is a contract with it: the whole digest, except on Windows, where it
+    is the digest's first 32 characters.
+
+    Args:
+        runtime_digest: The runtime's 64-character digest, its identity.
+
+    Returns:
+        The folder's name. It identifies the runtime only where it is the
+        whole digest.
+    """
+    if _names_are_short():
+        return runtime_digest[:_SHORT_NAME_CHARACTERS]
+    return runtime_digest
+
+
+def generation_directory(root: Path, runtime_digest: str) -> Path:
+    """The folder a runtime is installed in, below its installation's root.
+
+    Args:
+        root: The installation's root.
+        runtime_digest: The runtime's 64-character digest.
+
+    Returns:
+        ``<root>/generations/<name>``; whether it exists is the caller's to
+        find out.
+    """
+    return root / "generations" / generation_name(runtime_digest)
+
+
+def check_generation(generation: Path, runtime_digest: str) -> None:
+    """Refuse a generation folder that holds another runtime; change nothing.
+
+    A folder named by the whole digest is that runtime's by its name. A
+    folder with a shorter name says whose it is in a record of its own. One
+    that is missing, or exists and is still empty, belongs to nobody yet.
+
+    Args:
+        generation: The folder, from :func:`generation_directory`.
+        runtime_digest: The digest of the runtime about to use it.
+
+    Raises:
+        ValueError: The folder belongs to another runtime, or holds
+            something and does not say whose it is.
+    """
+    if generation.name == runtime_digest:
+        return
+    try:
+        recorded = read_private(generation / _DIGEST_RECORD, 128)
+    except FileNotFoundError:
+        if generation.is_dir() and any(generation.iterdir()):
+            raise ValueError(
+                "generation folder holds an unidentified runtime"
+            ) from None
+        return
+    if recorded != runtime_digest.encode():
+        raise ValueError("generation folder belongs to another runtime")
+
+
+def claim_generation(generation: Path, runtime_digest: str) -> None:
+    """Create a runtime's generation folder, or confirm that it is this runtime's.
+
+    Call it before writing anything into the folder. Where the name is not
+    the whole digest, the first thing the folder is given is the record of
+    whose it is.
+
+    Args:
+        generation: The folder, from :func:`generation_directory`.
+        runtime_digest: The runtime's digest.
+
+    Raises:
+        ValueError: As :func:`check_generation`; the folder is left as it was.
+    """
+    check_generation(generation, runtime_digest)
+    private_directory(generation)
+    record = generation / _DIGEST_RECORD
+    if generation.name != runtime_digest and not record.exists():
+        write_private(record, runtime_digest.encode())
 
 
 def _interpreter_names() -> frozenset[str]:

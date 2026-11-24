@@ -358,13 +358,25 @@ signal handler. `runtime_service` and `runtime_manager serve` both use it, so
 the manager runs as a program on Windows.
 Windows limits how long a path may be unless the machine has long paths
 switched on (off by default): a directory's path may be 247 characters and a
-file's 259. The deepest directory of an installed runtime lies 163 characters
-below its installation's root: `generations\<64 characters>\runtime\`, then 77
+file's 259. A generation folder on Windows is therefore named by the first 32
+characters of the runtime digest, not all 64. `generation_directory()` in
+`extensions/runtime_integrity.py` is the one place that builds a generation's
+path; never spell `generations/<digest>` out. The digest stays the identity
+everywhere: `staged.json`, the seal, selection and rollback check all 64
+characters as before, and POSIX folder names are unchanged. Two digests could
+share a short name, so on Windows the folder's first file, `runtime-digest`,
+holds the whole digest, and `claim_generation()` and `check_generation()`
+refuse a folder that belongs to another runtime, or holds something and does
+not say whose it is, before anything in it is read, moved or written. The
+owner runtime must derive the same name from the same digest; that is a
+contract with it (Codex agreed to carry it into the Windows owner release).
+With that name the deepest directory of an installed runtime lies 131
+characters below its installation's root: `generations\<32 characters>\runtime\`, then 77
 for a folder of the `pip` that `venv` puts in every runtime (pip 26.3; another
-version may differ). An installation root longer than 84 characters therefore
+version may differ). An installation root longer than 116 characters therefore
 cannot be installed into on a default Windows machine: `venv` exits with an
 error. Compiled files (`.pyc`) lie deeper still, but Python skips one whose path
-is too long, so a root from about 62 characters gets a runtime with some of
+is too long, so a root from about 94 characters gets a runtime with some of
 `pip`'s compiled files missing and nothing else different.
 `runtime_path_excess()` in `extensions/runtime_integrity.py` measures all of
 this from the bundled `pip` wheel and the runtime's own wheels (each member

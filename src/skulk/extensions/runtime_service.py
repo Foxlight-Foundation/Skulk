@@ -33,7 +33,10 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 from skulk.extensions.runtime_install import finish_runtime_work
-from skulk.extensions.runtime_integrity import runtime_interpreter
+from skulk.extensions.runtime_integrity import (
+    generation_directory,
+    runtime_interpreter,
+)
 from skulk.extensions.runtime_selection import RuntimeSelection, RuntimeSelector
 from skulk.utils.owned_process import SupervisedProcess, start_supervised
 from skulk.utils.stop_signals import stop_on_signal
@@ -158,7 +161,7 @@ class RuntimeService:
 
     async def _spawn(self, lock: RuntimeLock) -> None:
         assert self.selection is not None
-        generation = self.root / "generations" / self.selection.runtime_digest
+        generation = generation_directory(self.root, self.selection.runtime_digest)
         provision_native_host(self.root, self.selection.runtime_digest, self.instance)
         bundle = generation / "artifacts" / "bundle.pyz"
         command = (

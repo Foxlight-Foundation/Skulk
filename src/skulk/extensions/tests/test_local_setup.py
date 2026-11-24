@@ -17,7 +17,10 @@ from skulk.extensions.runtime_files import (
     read_private,
     write_private,
 )
-from skulk.extensions.runtime_integrity import runtime_interpreter
+from skulk.extensions.runtime_integrity import (
+    generation_directory,
+    runtime_interpreter,
+)
 from skulk.extensions.runtime_selection import RuntimeSelector
 from skulk.extensions.tests.test_runtime_install import artifacts
 from skulk.utils.runtime_files import has_root_authority
@@ -97,13 +100,13 @@ async def test_local_setup_verifies_before_process_replacement(
         selector.disable(expected_revision=1)
     elif fault == "damaged":
         write_private(
-            root / "generations" / staged.runtime_digest / "artifacts/bundle.pyz",
+            generation_directory(root, staged.runtime_digest) / "artifacts/bundle.pyz",
             b"damaged",
         )
     elif fault == "unclaimed_wheel":
         # A wheel dropped into the artifacts directory that the signed runtime
         # never claimed declares the launcher; it must not authorize the branch.
-        generation = root / "generations" / staged.runtime_digest
+        generation = generation_directory(root, staged.runtime_digest)
         with zipfile.ZipFile(
             generation / "artifacts/stray-1.0-py3-none-any.whl", "w"
         ) as stray:
@@ -128,7 +131,7 @@ async def test_local_setup_verifies_before_process_replacement(
         executed = True
         assert arguments[0] == str(
             runtime_interpreter(
-                root / "generations" / staged.runtime_digest / "runtime"
+                generation_directory(root, staged.runtime_digest) / "runtime"
             )
         )
         assert lock == selector.installer.installer / "installer.lock"

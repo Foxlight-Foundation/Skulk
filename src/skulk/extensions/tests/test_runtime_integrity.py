@@ -15,7 +15,11 @@ from typing import cast
 import pytest
 from pydantic import JsonValue, TypeAdapter
 
-from skulk.extensions.runtime_files import private_directory, write_private
+from skulk.extensions.runtime_files import (
+    private_directory,
+    read_private,
+    write_private,
+)
 from skulk.extensions.runtime_install import (
     RuntimeInstaller,
     _without_shared_write,  # pyright: ignore[reportPrivateUsage]
@@ -28,7 +32,11 @@ from skulk.extensions.runtime_integrity import (
     _pip_depth,  # pyright: ignore[reportPrivateUsage]
     _wheel_depth,  # pyright: ignore[reportPrivateUsage]
     adopt_current_interpreter,
+    check_generation,
+    claim_generation,
     environment_command,
+    generation_directory,
+    generation_name,
     path_refusal,
     path_refusal_payload,
     path_refusal_sentence,
@@ -380,6 +388,96 @@ def test_a_path_refusal_is_a_fixed_vocabulary_of_a_code_and_one_integer() -> Non
     assert path_refusal({"error": "manager_operation_refused", "excess": 12}) is None
 
 
+def _short_names(monkeypatch: pytest.MonkeyPatch, short: bool) -> None:
+    """Name generation folders as Windows does, or as everywhere else does."""
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._names_are_short", lambda: short
+    )
+
+
+def test_a_generation_folder_is_named_by_the_digest_and_shorter_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole digest everywhere but Windows, where it is the first 32 characters."""
+    digest = "0123456789abcdef" * 4
+    assert generation_name(digest) == (digest[:32] if _WINDOWS else digest)
+    _short_names(monkeypatch, True)
+    assert generation_name(digest) == "0123456789abcdef0123456789abcdef"
+    assert generation_directory(tmp_path, digest) == (
+        tmp_path / "generations" / "0123456789abcdef0123456789abcdef"
+    )
+    _short_names(monkeypatch, False)
+    assert generation_directory(tmp_path, digest) == tmp_path / "generations" / digest
+
+
+def test_a_folder_named_by_the_whole_digest_needs_no_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where the name is the identity, nothing is added to the generation."""
+    _short_names(monkeypatch, False)
+    private_directory(tmp_path / "generations")
+    digest = "a" * 64
+    generation = generation_directory(tmp_path, digest)
+    check_generation(generation, digest)
+    claim_generation(generation, digest)
+    assert generation.is_dir() and list(generation.iterdir()) == []
+    write_private(generation / "anything", b"content")
+    check_generation(generation, digest)
+    claim_generation(generation, digest)
+
+
+def test_a_short_named_folder_says_whose_it_is_and_refuses_another_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two digests can share a short name; the folder belongs to the first to claim it."""
+    _short_names(monkeypatch, True)
+    private_directory(tmp_path / "generations")
+    first, second = "a" * 32 + "1" * 32, "a" * 32 + "2" * 32
+    generation = generation_directory(tmp_path, first)
+    assert generation == generation_directory(tmp_path, second)
+    # Missing: nobody's yet.
+    check_generation(generation, first)
+    check_generation(generation, second)
+    claim_generation(generation, first)
+    assert read_private(generation / "runtime-digest") == first.encode()
+    write_private(generation / "evidence", b"the first runtime's")
+    # The same runtime again, any number of times.
+    check_generation(generation, first)
+    claim_generation(generation, first)
+
+    def contents() -> dict[str, bytes]:
+        return {item.name: item.read_bytes() for item in generation.iterdir()}
+
+    before = contents()
+    for refuse in (check_generation, claim_generation):
+        with pytest.raises(ValueError, match="belongs to another runtime"):
+            refuse(generation, second)
+    assert contents() == before
+
+
+def test_a_short_named_folder_with_content_and_no_record_is_nobodys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Something is there and does not say whose: refused. Empty: adopted."""
+    _short_names(monkeypatch, True)
+    private_directory(tmp_path / "generations")
+    digest = "b" * 64
+    generation = generation_directory(tmp_path, digest)
+    # Created, and interrupted before the record was written.
+    private_directory(generation)
+    check_generation(generation, digest)
+    claim_generation(generation, digest)
+    assert read_private(generation / "runtime-digest") == digest.encode()
+    # Content without a record cannot be told from another runtime's.
+    other = generation_directory(tmp_path, "c" * 64)
+    private_directory(other)
+    write_private(other / "evidence", b"unknown")
+    for refuse in (check_generation, claim_generation):
+        with pytest.raises(ValueError, match="unidentified runtime"):
+            refuse(other, "c" * 64)
+    assert [item.name for item in other.iterdir()] == ["evidence"]
+
+
 def test_desktop_metadata_does_not_unseal_a_generation(tmp_path: Path) -> None:
     """Browsing a generation in Finder leaves it sealed; a link by that name does not."""
     private_directory(tmp_path)
@@ -411,7 +509,7 @@ async def test_cached_stage_refuses_startup_injection_before_execution(
         installer.root / "publisher-trust.json", trust.model_dump_json().encode()
     )
     operation = await installer.stage(metadata, source)
-    generation = installer.root / "generations" / operation.runtime_digest
+    generation = generation_directory(installer.root, operation.runtime_digest)
     verify_installed_runtime(generation, operation.runtime_digest)
     marker = tmp_path / "unexpected-startup"
     injection = generation / "runtime" / _SITE / "unexpected.pth"
@@ -685,7 +783,7 @@ async def test_locked_generation_adopts_a_moved_interpreter(
     _use_base(monkeypatch, moved.resolve())
     async with installer.locked_generation(operation.runtime_digest):
         pass
-    generation = installer.root / "generations" / operation.runtime_digest
+    generation = generation_directory(installer.root, operation.runtime_digest)
     assert _base_of(generation / "runtime") == moved.resolve()
 
 
@@ -734,7 +832,7 @@ async def test_relinked_runtime_starts_on_a_moved_standalone_interpreter(
     _run_from(monkeypatch, _standalone_interpreter(moved))
     async with installer.locked_generation(operation.runtime_digest):
         pass
-    runtime = installer.root / "generations" / operation.runtime_digest / "runtime"
+    runtime = generation_directory(installer.root, operation.runtime_digest) / "runtime"
     started = subprocess.run(
         (
             str(runtime_interpreter(runtime)),

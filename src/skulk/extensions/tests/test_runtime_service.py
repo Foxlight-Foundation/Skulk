@@ -14,6 +14,7 @@ import psutil
 import pytest
 
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
+from skulk.extensions.runtime_integrity import generation_directory
 from skulk.extensions.runtime_selection import RuntimeSelector
 from skulk.extensions.runtime_service import (
     RuntimeService,
@@ -179,7 +180,7 @@ async def test_service_refuses_tampered_runtime_and_disabled_selection(
     selector = await installed(tmp_path, monkeypatch)
     selection = selector.current()
     assert selection is not None
-    generation = selector.root / "generations" / selection.runtime_digest
+    generation = generation_directory(selector.root, selection.runtime_digest)
     (generation / "runtime/unsealed.py").write_bytes(b"raise Exception('never run')")
     service = RuntimeService(selector.root)
     assert not await service.serve(asyncio.Event())
