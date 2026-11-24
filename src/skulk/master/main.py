@@ -84,6 +84,7 @@ from skulk.shared.types.commands import (
     AudioSeparation,
     AudioTranscription,
     CancelDownload,
+    ChangeEnginePackage,
     CreateInstance,
     DecideStewardAction,
     DeleteCustomModelCard,
@@ -128,6 +129,8 @@ from skulk.shared.types.events import (
     CustomModelCardDeleted,
     DemucsPreparationCompleted,
     DemucsPreparationRequested,
+    EnginePackageChangeCompleted,
+    EnginePackageChangeRequested,
     Event,
     GlobalForwarderEvent,
     IndexedEvent,
@@ -375,6 +378,9 @@ _COMMAND_TASK_TYPES = (
 
 NODE_HEARTBEAT_GAP_WARNING = timedelta(seconds=10)
 _INSTANCE_FAILURE_MESSAGE_LIMIT = 2048
+# How long a worker may take to start an ordered engine package change. A
+# request replayed after this changes nothing.
+_ENGINE_PACKAGE_CHANGE_SECONDS = 120.0
 
 
 def _node_unavailable_failure_message(node_id: NodeId, reason: str) -> str:
@@ -1686,6 +1692,8 @@ class Master:
                 self._telemetry_view.node_resources[result.target_node] = resources
         if isinstance(indexed.event, AudioCppPreparationCompleted):
             self._record_audio_cpp_preparation(indexed.event)
+        if isinstance(indexed.event, EnginePackageChangeCompleted):
+            self._record_engine_package_change(indexed.event)
         if isinstance(indexed.event, AceStepPreparationCompleted):
             result = indexed.event
             resources = result.resources
@@ -1920,6 +1928,64 @@ class Master:
         ):
             return effective_card
         return ordered_card
+
+    def _order_engine_change(
+        self, command: SetModelEngineOrder | ChangeEnginePackage
+    ) -> list[Event]:
+        """Order one of the two engine commands a person can send.
+
+        The command loop's own match is as large as the type checker can
+        follow, so both commands share one of its cases and are told apart
+        here.
+        """
+        if isinstance(command, ChangeEnginePackage):
+            return [self._order_engine_package_change(command)]
+        event = self._order_model_engine_order(command)
+        return [] if event is None else [event]
+
+    def _order_engine_package_change(
+        self, command: ChangeEnginePackage
+    ) -> EnginePackageChangeRequested | EnginePackageChangeCompleted:
+        """Order one engine package change for the node that holds the package.
+
+        A node that is not a live member is answered at once, so the API that
+        asked does not wait for a worker that will never read the request.
+        """
+        if command.target_node not in self.state.topology.list_nodes():
+            return EnginePackageChangeCompleted(
+                request_id=command.command_id,
+                target_node=command.target_node,
+                owner_node=command.owner_node,
+                success=False,
+                code="node_unavailable",
+            )
+        return EnginePackageChangeRequested(
+            request_id=command.command_id,
+            target_node=command.target_node,
+            owner_node=command.owner_node,
+            engine_id=command.engine_id,
+            lane=command.lane,
+            action=command.action,
+            build=command.build,
+            expires_at=time.time() + _ENGINE_PACKAGE_CHANGE_SECONDS,
+        )
+
+    def _record_engine_package_change(
+        self, event: EnginePackageChangeCompleted
+    ) -> None:
+        """Let placement see a changed node's packages before the answer is broadcast.
+
+        Telemetry is lossy and may arrive after the API has told a person the
+        change was made. The worker's own fresh report rides the ordered
+        answer, so a launch sent straight after it is stamped with the build
+        that is now active. Ordinary telemetry refreshes the same facts later.
+        """
+        if (
+            event.success
+            and event.resources is not None
+            and event.target_node in self.state.topology.list_nodes()
+        ):
+            self._telemetry_view.node_resources[event.target_node] = event.resources
 
     def _order_model_engine_order(
         self, command: SetModelEngineOrder
@@ -4115,11 +4181,8 @@ class Master:
                                     approved=command.approved,
                                 )
                             )
-                        case SetModelEngineOrder():
-                            if (
-                                event := self._order_model_engine_order(command)
-                            ) is not None:
-                                generated_events.append(event)
+                        case SetModelEngineOrder() | ChangeEnginePackage():
+                            generated_events.extend(self._order_engine_change(command))
                         case ProposeStewardAction():
                             proposal = command.proposal
                             now = datetime.now(tz=timezone.utc)

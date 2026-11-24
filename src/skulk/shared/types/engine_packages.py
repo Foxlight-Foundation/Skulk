@@ -15,6 +15,18 @@ MAX_REPORTED_ENGINE_BUILDS: Final = 16
 
 _DIGEST: Final = r"^[0-9a-f]{64}$"
 
+ENGINE_BUILD_PATTERN: Final = _DIGEST
+"""Shape of a build identity: the SHA-256 of a package's signed manifest."""
+
+ENGINE_ID_PATTERN: Final = r"^[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9]+(?:_[a-z0-9]+)*$"
+"""Shape of ``publisher.engine``, the same one a signed manifest must have."""
+
+EnginePackageLane = Literal["metal", "cuda", "rocm", "vulkan", "cpu"]
+"""The accelerator classes a package build may execute on."""
+
+EnginePackageAction = Literal["activate", "rollback", "remove"]
+"""What a person may ask a node to do with a package it holds."""
+
 
 class NodeEngineLoadResult(CamelCaseModel):
     """How the last model load on one engine package build ended on one node.

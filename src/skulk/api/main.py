@@ -110,7 +110,17 @@ from skulk.api.diagnostics_compatibility import (
     compare_diagnostics_builds,
     parse_peer_node_diagnostics,
 )
-from skulk.api.engines import EnginesResponse, engines_view
+from skulk.api.engines import (
+    EngineActivateRequest,
+    EngineChangeResponse,
+    EngineRemoveRequest,
+    EngineRollbackRequest,
+    EnginesResponse,
+    engine_change_refusal,
+    engines_view,
+    held_engine_package,
+    reported_engine_package,
+)
 from skulk.api.field_telemetry import (
     FieldTelemetryCollector,
     hardware_class,
@@ -563,6 +573,7 @@ from skulk.shared.types.chunks import (
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
+    ChangeEnginePackage,
     Command,
     CreateInstance,
     DecideStewardAction,
@@ -629,12 +640,17 @@ from skulk.shared.types.engine_orders import (
     engine_order_level,
     engine_order_problem,
 )
+from skulk.shared.types.engine_packages import (
+    EnginePackageAction,
+    EnginePackageLane,
+)
 from skulk.shared.types.events import (
     AceStepPreparationCompleted,
     AudioCppPreparationCompleted,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     DemucsPreparationCompleted,
+    EnginePackageChangeCompleted,
     Event,
     IndexedEvent,
     InstanceCreated,
@@ -1478,6 +1494,10 @@ _TERMINAL_TASK_STATUSES: frozenset[task_types.TaskStatus] = frozenset(
 # How long an engine order change may take to appear in replicated State
 # before the caller is told it is unconfirmed.
 _ENGINE_ORDER_CONFIRM_SECONDS: Final = 10.0
+
+# How long an engine package change may take to be answered by its node. A
+# large build is hashed in full before it is activated.
+_ENGINE_CHANGE_CONFIRM_SECONDS: Final = 100.0
 
 # How long POST /place_instance waits for node memory info to finish
 # gossiping before giving up with 503. Covers the window between cluster
@@ -2514,6 +2534,8 @@ class API:
         self._music_output_sources: dict[CommandId, NodeId] = {}
         self._audio_cpp_prepare_events: dict[CommandId, anyio.Event] = {}
         self._audio_cpp_prepare_results: dict[CommandId, AudioCppPreparationCompleted] = {}
+        self._engine_change_events: dict[CommandId, anyio.Event] = {}
+        self._engine_change_results: dict[CommandId, EnginePackageChangeCompleted] = {}
         self._demucs_mount_preparer = DemucsMountPreparer(
             self.node_id,
             lambda: self.state,
@@ -2920,6 +2942,52 @@ class API:
                 "resources in /state."
             ),
         )(self.list_engines)
+        self.app.post(
+            "/v1/engines/{engine_id}/activate",
+            tags=["Engines"],
+            summary="Activate an installed engine package build",
+            description=(
+                "Make one build that is already on a node's disk the build new "
+                "launches there use. The build is hashed in full first, and the "
+                "build that was active is kept as the one a rollback returns "
+                "to. Models already running keep the build they started on. "
+                "Nothing is downloaded. Returns the lane as the node reports it "
+                "afterwards. 404 when the node, the package or the build is not "
+                "there; 409 when the build is damaged, this Skulk version cannot "
+                "run it, or engine packages are turned off on the node; 503 when "
+                "the node did not answer in time."
+            ),
+        )(self.activate_engine_build)
+        self.app.post(
+            "/v1/engines/{engine_id}/rollback",
+            tags=["Engines"],
+            summary="Return an engine package to its earlier build",
+            description=(
+                "Make the build that was active before the current one the "
+                "build new launches use again. The two swap places, so a second "
+                "rollback undoes the first. Models already running keep the "
+                "build they started on. 404 when the node or the package is not "
+                "there or no earlier build is kept; 409 when the earlier build "
+                "is damaged or cannot run on this Skulk version; 503 when the "
+                "node did not answer in time."
+            ),
+        )(self.rollback_engine_build)
+        self.app.post(
+            "/v1/engines/{engine_id}/remove",
+            tags=["Engines"],
+            summary="Remove an engine package build, or the whole package, from a node",
+            description=(
+                "Delete one build from a node's disk, or every build of the "
+                "package when no build is named. The build new launches use "
+                "cannot be removed alone. Nothing a model is running on is "
+                "removed. Model files are never touched. After the whole "
+                "package is removed the node may offer it again, and installs "
+                "it again the first time a model placed there needs it. 404 "
+                "when the node, the package or the build is not there; 409 "
+                "when the build is the active one or a model is running on it; "
+                "503 when the node did not answer in time."
+            ),
+        )(self.remove_engine_build)
         self.app.get(
             "/models/requirements",
             tags=["Models"],
@@ -12766,6 +12834,15 @@ class API:
                         self._audio_cpp_prepare_results[event.request_id] = event
                         waiter.set()
 
+                if (
+                    isinstance(event, EnginePackageChangeCompleted)
+                    and event.owner_node == self.node_id
+                ):
+                    change_waiter = self._engine_change_events.get(event.request_id)
+                    if change_waiter is not None:
+                        self._engine_change_results[event.request_id] = event
+                        change_waiter.set()
+
                 if isinstance(event, DemucsPreparationCompleted):
                     self._demucs_mount_preparer.record(event)
                 if isinstance(event, AceStepPreparationCompleted):
@@ -16910,6 +16987,153 @@ class API:
         return engines_view(
             self._telemetry_view.node_resources,
             packages_enabled=not engine_packages_disabled(),
+        )
+
+    async def _change_engine_package(
+        self,
+        engine_id: str,
+        node_id: str,
+        lane: EnginePackageLane,
+        action: EnginePackageAction,
+        build: str | None,
+    ) -> EngineChangeResponse:
+        """Ask one node to change an engine package it holds and wait for its answer.
+
+        Args:
+            engine_id: The publisher.engine identity.
+            node_id: The node whose package is changed.
+            lane: The accelerator class of the package.
+            action: What the node is asked to do.
+            build: The build to activate or remove, when one is named.
+
+        Returns:
+            The lane as the node reported it straight after the change.
+
+        Raises:
+            HTTPException: 404 when the node reports no such package, the
+                status ``engine_change_refusal`` gives for a refusal, 503 when
+                the node does not answer in time.
+        """
+        target = NodeId(node_id)
+        held = held_engine_package(
+            self._telemetry_view.node_resources.get(target), engine_id, lane
+        )
+        if held is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Node {node_id} reports no installed {engine_id} package "
+                    f"for {lane}. Read /v1/engines to see what each node holds."
+                ),
+            )
+        try:
+            command = ChangeEnginePackage(
+                target_node=target,
+                owner_node=self.node_id,
+                engine_id=engine_id,
+                lane=lane,
+                action=action,
+                build=build,
+            )
+        except ValidationError:
+            raise HTTPException(
+                status_code=404, detail=f"{engine_id} is not an engine package name."
+            ) from None
+        waiter = anyio.Event()
+        self._engine_change_events[command.command_id] = waiter
+        try:
+            await self._send(command)
+            with anyio.move_on_after(_ENGINE_CHANGE_CONFIRM_SECONDS):
+                await waiter.wait()
+            result = self._engine_change_results.pop(command.command_id, None)
+        finally:
+            self._engine_change_events.pop(command.command_id, None)
+            self._engine_change_results.pop(command.command_id, None)
+        if result is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The change was sent but the node has not answered yet. "
+                    "Read /v1/engines to see what it holds before trying again."
+                ),
+            )
+        if not result.success:
+            status_code, detail = engine_change_refusal(result.code)
+            raise HTTPException(status_code=status_code, detail=detail)
+        return EngineChangeResponse(
+            node_id=node_id,
+            engine_id=engine_id,
+            lane=lane,
+            action=action,
+            package=reported_engine_package(result.resources, engine_id, lane),
+        )
+
+    async def activate_engine_build(
+        self, engine_id: str, payload: EngineActivateRequest
+    ) -> EngineChangeResponse:
+        """Make an installed build the one new launches on a node use.
+
+        Args:
+            engine_id: The publisher.engine identity.
+            payload: The node, the accelerator class and the build.
+
+        Returns:
+            The lane as the node reported it after the change.
+        """
+        return await self._change_engine_package(
+            engine_id, payload.node_id, payload.lane, "activate", payload.build
+        )
+
+    async def rollback_engine_build(
+        self, engine_id: str, payload: EngineRollbackRequest
+    ) -> EngineChangeResponse:
+        """Return a node's engine package to the build that was active before.
+
+        Args:
+            engine_id: The publisher.engine identity.
+            payload: The node and the accelerator class.
+
+        Returns:
+            The lane as the node reported it after the change.
+        """
+        held = held_engine_package(
+            self._telemetry_view.node_resources.get(NodeId(payload.node_id)),
+            engine_id,
+            payload.lane,
+        )
+        if held is not None and held.rollback_build is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Node {payload.node_id} keeps no earlier {engine_id} build "
+                    f"for {payload.lane} to return to."
+                ),
+            )
+        # Naming the build makes the request safe to read twice: a second
+        # reading finds that build already active and swaps nothing back.
+        return await self._change_engine_package(
+            engine_id,
+            payload.node_id,
+            payload.lane,
+            "rollback",
+            None if held is None else held.rollback_build,
+        )
+
+    async def remove_engine_build(
+        self, engine_id: str, payload: EngineRemoveRequest
+    ) -> EngineChangeResponse:
+        """Delete one build, or the whole package, from a node's disk.
+
+        Args:
+            engine_id: The publisher.engine identity.
+            payload: The node, the accelerator class and optionally one build.
+
+        Returns:
+            The lane as the node reported it after the change, or with a null
+            package when the node no longer holds or is offered it.
+        """
+        return await self._change_engine_package(
+            engine_id, payload.node_id, payload.lane, "remove", payload.build
         )
 
     async def list_model_engine_orders(self) -> ModelEngineOrdersResponse:

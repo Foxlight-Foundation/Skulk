@@ -138,6 +138,15 @@ def _build_fit_refusal(
     return None
 
 
+def engine_build_fit_refusal(claims: EnginePackageClaims) -> EnginePackageRefusal | None:
+    """Why the Skulk that is running cannot run an installed build, or ``None``."""
+    return _build_fit_refusal(
+        claims,
+        skulk_version=get_skulk_version(),
+        python_version=platform.python_version(),
+    )
+
+
 def read_engine_package_inventory(
     *,
     root: Path = ENGINE_PACKAGES_DIR,

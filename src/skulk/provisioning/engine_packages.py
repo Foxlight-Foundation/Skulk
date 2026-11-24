@@ -105,6 +105,7 @@ EnginePackageRefusal = Literal[
     "install_cancelled",
     "generation_missing",
     "generation_active",
+    "generation_in_use",
     "installation_damaged",
     "packages_disabled",
 ]

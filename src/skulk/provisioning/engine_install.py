@@ -681,6 +681,31 @@ def installed_engine_generations(
     )
 
 
+def installed_engine_generation(
+    engine_id: str,
+    lane: EngineLane,
+    digest: str,
+    *,
+    root: Path = ENGINE_PACKAGES_DIR,
+) -> InstalledEngine:
+    """One installed generation by its digest, checked quickly against its inventory.
+
+    Raises:
+        EnginePackageRefusedError: ``generation_missing`` when no such
+            generation is installed, ``installation_damaged`` when it is not
+            intact.
+    """
+    target = _lane_directory(root, engine_id, lane) / digest
+    if (
+        len(digest) != 64
+        or not set(digest) <= set("0123456789abcdef")
+        or not target.is_dir()
+        or target.is_symlink()
+    ):
+        raise _refuse("generation_missing", "that engine generation is not installed")
+    return verify_installed_engine(target, deep=False)
+
+
 def _read_pointer(lane_directory: Path) -> _Pointer | None:
     try:
         return _Pointer.model_validate_json(
@@ -711,6 +736,21 @@ def rollback_engine_generation(
     except EnginePackageRefusedError:
         return None
     return None if pointer is None else pointer.previous
+
+
+def active_engine_generation(
+    engine_id: str, lane: EngineLane, *, root: Path = ENGINE_PACKAGES_DIR
+) -> str | None:
+    """The digest new placements use, or ``None`` when the lane has none.
+
+    Read-only and unchecked: it says what the record names, not whether that
+    generation is intact. An unreadable record reads as ``None``.
+    """
+    try:
+        pointer = _read_pointer(_lane_directory(root, engine_id, lane))
+    except EnginePackageRefusedError:
+        return None
+    return None if pointer is None else pointer.active
 
 
 def active_engine(
@@ -829,3 +869,36 @@ def remove_engine_generation(
                 _Pointer(schema_version=1, active=pointer.active, previous=None),
             )
         shutil.rmtree(doomed, ignore_errors=True)
+
+
+def remove_engine_package(
+    engine_id: str, lane: EngineLane, *, root: Path = ENGINE_PACKAGES_DIR
+) -> None:
+    """Delete every generation of one engine lane and its active-generation record.
+
+    The record goes first, so nothing is ever pointed at a generation that is
+    being deleted. A lane whose record is unreadable can still be removed,
+    which is how a damaged package is cleared. Model data is never under this
+    directory and is not affected.
+
+    Raises:
+        EnginePackageRefusedError: ``generation_missing`` when the lane holds
+            no generation and no record.
+    """
+    lane_directory = _lane_directory(root, engine_id, lane)
+    absent = _refuse("generation_missing", "that engine package is not installed")
+    if not lane_directory.is_dir() or lane_directory.is_symlink():
+        raise absent
+    with _lock(lane_directory):
+        _sweep(lane_directory)
+        generations = installed_engine_generations(engine_id, lane, root=root)
+        record = lane_directory / _POINTER_NAME
+        if not generations and not record.exists():
+            raise absent
+        record.unlink(missing_ok=True)
+        for digest in generations:
+            doomed = lane_directory / (
+                f"{_REMOVING_PREFIX}{digest[:16]}-{secrets.token_hex(4)}"
+            )
+            os.rename(lane_directory / digest, doomed)
+            shutil.rmtree(doomed, ignore_errors=True)

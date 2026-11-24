@@ -177,6 +177,9 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 - `DELETE /instance/{instance_id}`
 - `GET /state`
 - `GET /v1/engines`
+- `POST /v1/engines/{engine_id}/activate`
+- `POST /v1/engines/{engine_id}/rollback`
+- `POST /v1/engines/{engine_id}/remove`
 - `GET /events`
 - `POST /download/start`
 - `DELETE /download/{node_id}/{model_id}`
@@ -2861,6 +2864,81 @@ An `active` status says the node holds an intact build that this Skulk version
 can run. It does not promise that a given model loads on it; only a launch
 answers that. With no engine package anywhere in the cluster, `engines` is
 empty.
+
+### Change an engine package on a node
+
+Three routes change a package a node already holds. Each names the engine in
+the path and the node and accelerator class in a JSON body, takes effect on
+that node only, and answers with the lane as the node reports it straight
+after the change. Through the operator gateway they need the
+`operations:write` scope.
+
+None of them downloads anything, starts an engine or touches a model that is
+running: a running model keeps the build it started on until it stops. Model
+files are never touched.
+
+**POST** `/v1/engines/{engine_id}/activate`
+
+Makes one build that is already on the node's disk the build new launches
+there use. The build is hashed in full first. The build that was active
+becomes the one a rollback returns to.
+
+```bash
+curl -X POST http://localhost:52415/v1/engines/foxlight.tensorfold/activate \
+  -H 'Content-Type: application/json' \
+  -d '{"nodeId": "<node id>", "lane": "rocm", "build": "<manifest digest>"}'
+```
+
+**POST** `/v1/engines/{engine_id}/rollback`
+
+Makes the build that was active before the current one the build new launches
+use again. The two swap places, so a second rollback undoes the first. The
+body has `nodeId` and `lane`.
+
+**POST** `/v1/engines/{engine_id}/remove`
+
+Deletes one build from the node's disk when the body names a `build`, or every
+build of the package when it does not. The build new launches use cannot be
+removed alone. After the whole package is removed the node may offer it again,
+and installs it again the first time a model placed there needs it; to keep an
+engine from being used, change the model's engine order or turn engine
+packages off in Settings.
+
+| Body field | Meaning |
+|---|---|
+| `nodeId` | The node whose package is changed, as `GET /v1/engines` names it. |
+| `lane` | `metal`, `cuda`, `rocm`, `vulkan` or `cpu`. |
+| `build` | Manifest digest of a build on the node's disk. Required to activate, optional to remove, not used to roll back. |
+
+The answer has `nodeId`, `engineId`, `lane`, `action` and `package`, which is
+the lane in the same shape `GET /v1/engines` gives, or null when the node no
+longer holds or is offered the package.
+
+| Status | When |
+|---|---|
+| 404 | The node reports no installed package for that engine and lane, the build is not on its disk, there is no earlier build to return to, or the node has left the cluster. |
+| 409 | The build's files are not intact; the node's Skulk version cannot run the build; the build is the active one and was asked to be removed alone; a model on the node is running on a build that would be deleted; or engine packages are turned off on the node. Nothing was changed. |
+| 500 | The node did not confirm the change. Read `GET /v1/engines` to see what it holds now. |
+| 503 | The change was sent and the node did not answer in time. Read `GET /v1/engines` before trying again. |
+
+The same four routes are available from a terminal on any machine that runs a
+Skulk node. Each command asks the node on that machine, which passes a change
+on to the node that holds the package:
+
+```bash
+skulk engines list
+skulk engines activate foxlight.tensorfold <manifest digest> --node <node id> --lane rocm
+skulk engines rollback foxlight.tensorfold
+skulk engines remove foxlight.tensorfold <manifest digest>
+skulk engines remove foxlight.tensorfold
+```
+
+Without `--node` the node on this machine is meant. Without `--lane` the
+node's only package for the engine is meant; a node that holds the engine for
+more than one accelerator class must be told which. `list --json` prints the
+report as JSON, and `--api-port` names the local node's port when it is not
+52415. A command exits 0 when it did what was asked and 1 when the node
+refused or did not answer.
 
 ### Read model capacity requirements
 

@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, final
 
 import anyio
 from anyio import (
@@ -149,6 +149,8 @@ from skulk.shared.types.events import (
     CustomModelCardDeleted,
     DemucsPreparationCompleted,
     DemucsPreparationRequested,
+    EnginePackageChangeCompleted,
+    EnginePackageChangeRequested,
     EnginePackageNeedStated,
     Event,
     IndexedEvent,
@@ -707,6 +709,35 @@ def engine_package_load_results(
             )
         )
     return results
+
+
+@final
+class _EveryBuild:
+    """Stands for every build of a lane, when a runner does not say which it uses."""
+
+    def __contains__(self, build: object) -> bool:
+        return True
+
+
+def engine_package_builds_in_use(
+    runners: Mapping[RunnerId, "RunnerSupervisor"], backend_tag: str
+) -> Container[str]:
+    """Return the builds of one engine package lane that a runner here is on.
+
+    A runner counts from the moment the worker holds it, whatever its status,
+    because its engine process may be using the build's files. A runner with
+    no stamped build runs on whichever build was active when it started, so
+    every build is then treated as in use.
+    """
+    builds: set[str] = set()
+    for supervisor in runners.values():
+        shard = supervisor.shard_metadata
+        if shard.resolved_backend != backend_tag:
+            continue
+        if shard.resolved_engine_build is None:
+            return _EveryBuild()
+        builds.add(shard.resolved_engine_build)
+    return frozenset(builds)
 
 
 def model_trust_failed_live_instances(
@@ -1960,6 +1991,68 @@ class Worker:
             error=error,
             resources=resources if success else None,
         ))
+
+    async def _change_engine_package(
+        self, request: EnginePackageChangeRequested
+    ) -> None:
+        """Make one requested engine package change here and answer it.
+
+        The change, the fresh reading of this node's facts and the answer are
+        one unit: a person told the change was made can launch at once and
+        get the build that is now active.
+        """
+        if request.expires_at <= time.time():
+            return
+        from skulk.engines.actions import change_engine_package
+        from skulk.facts import current_backend_derivation, refresh_node_facts
+        from skulk.provisioning.engine_packages import EnginePackageRefusedError
+
+        code: str | None = None
+        resources: NodeResources | None = None
+        try:
+            in_use = engine_package_builds_in_use(
+                self.runners,
+                f"{request.engine_id.split('.', 1)[1]}-{request.lane}",
+            )
+            await to_thread.run_sync(
+                lambda: change_engine_package(
+                    request.engine_id,
+                    request.lane,
+                    request.action,
+                    request.build,
+                    builds_in_use=in_use,
+                )
+            )
+            await to_thread.run_sync(refresh_node_facts)
+            derivation = await to_thread.run_sync(current_backend_derivation)
+            self._on_demand_backends = derivation.on_demand_backends
+            resources = await self._gather_node_resources()
+            if self._telemetry_sender is not None:
+                await self._telemetry_sender.send(
+                    NodeTelemetry(node_id=self.node_id, info=resources)
+                )
+        except EnginePackageRefusedError as refused:
+            code = refused.code
+            logger.warning(
+                f"Engine package {request.action} refused for {request.engine_id} "
+                f"({request.lane}): {refused.code}: {refused}"
+            )
+        except Exception as failure:  # noqa: BLE001 - the asker gets one answer
+            code = "change_failed"
+            logger.opt(exception=failure).error(
+                f"Engine package {request.action} failed for {request.engine_id} "
+                f"({request.lane})"
+            )
+        await self.event_sender.send(
+            EnginePackageChangeCompleted(
+                request_id=request.request_id,
+                target_node=self.node_id,
+                owner_node=request.owner_node,
+                success=code is None,
+                code=code,
+                resources=resources if code is None else None,
+            )
+        )
 
     def _effective_downloads(self) -> dict[NodeId, list[DownloadProgress]]:
         """Return durable outcomes overlaid with live download telemetry."""
@@ -4101,6 +4194,13 @@ class Worker:
                     and event.expires_at > time.time()
                 ):
                     self._tg.start_soon(self._prepare_audio_cpp_engine, event)
+
+                if (
+                    isinstance(event, EnginePackageChangeRequested)
+                    and event.target_node == self.node_id
+                    and event.expires_at > time.time()
+                ):
+                    self._tg.start_soon(self._change_engine_package, event)
 
                 if (
                     isinstance(event, DemucsPreparationRequested)

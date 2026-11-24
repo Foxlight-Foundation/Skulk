@@ -22,6 +22,12 @@ from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.engine_orders import engine_order_problem
+from skulk.shared.types.engine_packages import (
+    ENGINE_BUILD_PATTERN,
+    ENGINE_ID_PATTERN,
+    EnginePackageAction,
+    EnginePackageLane,
+)
 from skulk.shared.types.music import MusicGenerationTaskParams
 from skulk.shared.types.music_edits import MusicEditingTaskParams
 from skulk.shared.types.native_music import NativeMusicDevice
@@ -218,6 +224,37 @@ class SetModelTrustApproval(BaseCommand):
     )
     approved: bool = Field(
         description="Whether repository code for the exact identity is authorized."
+    )
+
+
+class ChangeEnginePackage(BaseCommand):
+    """Ask one node to activate, roll back or remove an engine package build.
+
+    The packages are on that node's disk, so only its worker can make the
+    change. The master orders the request and the worker answers it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    target_node: NodeId = Field(description="The node whose package is changed.")
+    owner_node: NodeId = Field(description="The API node waiting for the answer.")
+    engine_id: str = Field(
+        max_length=64,
+        pattern=ENGINE_ID_PATTERN,
+        description="The publisher.engine identity of the package.",
+    )
+    lane: EnginePackageLane = Field(
+        description="The accelerator class of the package."
+    )
+    action: EnginePackageAction = Field(description="What the node is asked to do.")
+    build: str | None = Field(
+        default=None,
+        pattern=ENGINE_BUILD_PATTERN,
+        description=(
+            "The build to activate or remove; remove without one removes "
+            "the whole package. For a roll back, the build expected to "
+            "become active, so the request is safe to read twice."
+        ),
     )
 
 
@@ -507,6 +544,7 @@ Command = (
     | PrepareAudioCpp
     | PrepareDemucs
     | PrepareAceStep
+    | ChangeEnginePackage
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription

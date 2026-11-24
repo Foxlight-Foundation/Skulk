@@ -16,6 +16,8 @@ from skulk.shared.types.events import (
     CustomModelCardDeleted,
     DemucsPreparationCompleted,
     DemucsPreparationRequested,
+    EnginePackageChangeCompleted,
+    EnginePackageChangeRequested,
     EnginePackageNeedStated,
     Event,
     IndexedEvent,
@@ -101,6 +103,8 @@ def event_apply(event: Event, state: State) -> State:
             | DemucsPreparationCompleted()
             | AceStepPreparationRequested()
             | AceStepPreparationCompleted()
+            | EnginePackageChangeRequested()
+            | EnginePackageChangeCompleted()
             | ChunkGenerated()
             | TaskAcknowledged()
             | InputChunkReceived()

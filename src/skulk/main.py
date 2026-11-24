@@ -2209,6 +2209,11 @@ def main():
         from skulk.operator.cli import main as operator_main
 
         sys.exit(operator_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "engines":
+        # `skulk engines` asks the node already running here; it launches none.
+        from skulk.engines.cli import main as engines_main
+
+        sys.exit(engines_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "doctor":
         # `skulk doctor` is a standalone audit, not a node launch: dispatch
         # before Args.parse() so the node argument parser never sees it.

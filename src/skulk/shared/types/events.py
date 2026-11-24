@@ -14,6 +14,12 @@ from skulk.shared.types.common import (
     SessionId,
     SystemId,
 )
+from skulk.shared.types.engine_packages import (
+    ENGINE_BUILD_PATTERN,
+    ENGINE_ID_PATTERN,
+    EnginePackageAction,
+    EnginePackageLane,
+)
 from skulk.shared.types.native_music import NativeMusicDevice
 from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.restart_recovery import PlacementIntent
@@ -274,6 +280,59 @@ class EnginePackageNeedStated(BaseEvent):
     )
 
 
+class EnginePackageChangeRequested(BaseEvent):
+    """Master-ordered request for one worker to change an engine package it holds."""
+
+    model_config = ConfigDict(frozen=True)
+
+    request_id: CommandId = Field(description="The command this request answers.")
+    target_node: NodeId = Field(description="The node whose package is changed.")
+    owner_node: NodeId = Field(description="The API node waiting for the answer.")
+    engine_id: str = Field(max_length=64, pattern=ENGINE_ID_PATTERN)
+    lane: EnginePackageLane
+    action: EnginePackageAction
+    build: str | None = Field(default=None, pattern=ENGINE_BUILD_PATTERN)
+    expires_at: float = Field(
+        description="Unix deadline after which a replayed request changes nothing."
+    )
+
+
+class EnginePackageChangeCompleted(BaseEvent):
+    """How a requested engine package change ended on its node.
+
+    A refusal carries only a short code. The node's own words can name local
+    paths and stay in its log.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    request_id: CommandId = Field(description="The command this answers.")
+    target_node: NodeId = Field(description="The node that was asked.")
+    owner_node: NodeId = Field(description="The API node waiting for the answer.")
+    success: bool = Field(description="Whether the change was made.")
+    code: str | None = Field(
+        default=None,
+        pattern=r"^[a-z_]{1,64}$",
+        description="Why the change was not made. Present only for a refusal.",
+    )
+    resources: NodeResources | None = Field(
+        default=None,
+        description=(
+            "What the node reports about itself after the change, so the next "
+            "launch is stamped with the build that is now active."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _require_matching_outcome(self) -> "EnginePackageChangeCompleted":
+        """A change made carries the node's facts; a refusal carries its code."""
+        if self.success and (self.resources is None or self.code is not None):
+            raise ValueError("A completed engine package change requires resources")
+        if not self.success and (self.code is None or self.resources is not None):
+            raise ValueError("A refused engine package change requires its code")
+        return self
+
+
 class NodeTimeoutEvidence(FrozenModel):
     """Signal ages captured when the master decides to prune a node."""
 
@@ -512,6 +571,8 @@ Event = (
     | InstanceDeleted
     | RunnerStatusUpdated
     | EnginePackageNeedStated
+    | EnginePackageChangeRequested
+    | EnginePackageChangeCompleted
     | NodeTimedOut
     | NodeGatheredInfo
     | NodeDownloadProgress
@@ -552,6 +613,8 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     InstanceDeleted,
     RunnerStatusUpdated,
     EnginePackageNeedStated,
+    EnginePackageChangeRequested,
+    EnginePackageChangeCompleted,
     NodeTimedOut,
     TopologyEdgeCreated,
     TopologyEdgeDeleted,
