@@ -11,7 +11,6 @@ command, because registering a system service needs local elevation.
 
 import asyncio
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Final, Literal, final
@@ -197,7 +196,7 @@ class ServiceSetupRunner:
         """
         if self._repair_attempted:
             return False
-        base = Path(sys.executable).resolve(strict=True)
+        base = service_bootstrap.current_base()
         same_path = await asyncio.to_thread(registered_unit_names_base, base)
         if same_path and await asyncio.to_thread(
             service_bootstrap.selected_base_matches, root, base

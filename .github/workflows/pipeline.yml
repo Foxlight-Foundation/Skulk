@@ -234,6 +234,9 @@ jobs:
         # and starts the plugin manager from it. Nothing else in CI does
         # either on Windows.
         #
+        # The service setup tests run setup's own steps against a stand-in
+        # registration: registering the service with Windows is not built.
+        #
         # This runner has long paths switched on, which a Windows machine does
         # not by default, so the 259-character path limit is not checked here.
         shell: bash
@@ -253,7 +256,9 @@ jobs:
             src/skulk/extensions/tests/test_local_setup.py \
             src/skulk/extensions/tests/test_runtime_service.py \
             src/skulk/extensions/tests/test_runtime_manager_platforms.py \
-            src/skulk/extensions/tests/test_service_snapshot.py
+            src/skulk/extensions/tests/test_service_snapshot.py \
+            src/skulk/extensions/tests/test_service_setup.py \
+            src/skulk/extensions/tests/test_service_user_scope.py
 
   test:
     name: Test

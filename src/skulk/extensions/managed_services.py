@@ -7,7 +7,6 @@ import os
 import re
 import shutil
 import signal
-import sys
 import time
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -17,6 +16,7 @@ from typing import Final, Literal, final
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
+from skulk.extensions import service_bootstrap
 from skulk.extensions.managed import ManagedConnection, ManagedOwner
 from skulk.extensions.managed_attachment import (
     ManagedAttachment,
@@ -755,7 +755,7 @@ class ManagedServices:
                 isinstance(inventory, dict) and inventory.get("reload_runtime") is True
             )
             if not reloads and not await asyncio.to_thread(
-                registered_unit_names_base, Path(sys.executable).resolve(strict=True)
+                registered_unit_names_base, service_bootstrap.current_base()
             ):
                 # The legacy path selects a generation sealed to this
                 # interpreter for the OS service to start; a service

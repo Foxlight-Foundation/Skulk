@@ -10,7 +10,7 @@ from typing import Literal, cast
 
 import pytest
 
-from skulk.extensions import service_registration, service_setup
+from skulk.extensions import service_bootstrap, service_registration, service_setup
 from skulk.extensions.runtime_artifacts import QualifiedHost
 from skulk.extensions.runtime_attachment import HostSettings
 from skulk.extensions.runtime_files import (
@@ -28,7 +28,17 @@ from skulk.extensions.service_setup import (
 from skulk.extensions.service_snapshot import ServiceSnapshot
 from skulk.extensions.tests.test_service_snapshot import staged
 
+posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="a launchd or systemd registration, which is POSIX by nature",
+)
 
+# A layout names its owner by number. Windows has no such numbers, and this
+# file stands in for the registration there, so any nonroot pair serves.
+_OWNER = (1001, 1001) if sys.platform == "win32" else (os.getuid(), os.getgid())
+
+
+@posix_only
 @pytest.mark.parametrize(
     ("state", "process_id", "stop_code", "accepted"),
     [
@@ -80,6 +90,7 @@ def test_systemd_stop_requires_confirmed_quiescence(
             service_registration.register(layout, "stop")
 
 
+@posix_only
 @pytest.mark.parametrize("target", ["macos-arm64", "ubuntu-24.04-x86_64"])
 def test_fixed_system_definitions_and_foreign_unit_refusal(
     tmp_path: Path,
@@ -141,6 +152,7 @@ def test_fixed_system_definitions_and_foreign_unit_refusal(
         ServiceLayout(target, 0, 0, "root", "root")
 
 
+@posix_only
 def test_registration_helper_is_standalone_and_refuses_unprivileged_mutation(
     tmp_path: Path,
 ) -> None:
@@ -179,7 +191,8 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
         tmp_path / "system.service",
     )
     config.mkdir(mode=0o755)
-    layout = ServiceLayout("macos-arm64", os.getuid(), os.getgid(), "owner", "owners")
+    layout = ServiceLayout("macos-arm64", *_OWNER, "owner", "owners")
+    base = service_bootstrap.current_base()
 
     def service_root(self: ServiceLayout) -> Path:
         return root
@@ -187,13 +200,13 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
     def service_unit(self: ServiceLayout) -> Path:
         return unit
 
-    def fixture_layout(uid: int, scope: str = "system") -> ServiceLayout:
+    def fixture_layout(scope: str) -> ServiceLayout:
         # This test drives the system-service path whatever scope is asked.
         return layout
 
     monkeypatch.setattr(ServiceLayout, "root", property(service_root))
     monkeypatch.setattr(ServiceLayout, "unit", property(service_unit))
-    monkeypatch.setattr("skulk.extensions.service_setup.local_layout", fixture_layout)
+    monkeypatch.setattr("skulk.extensions.service_setup.owner_layout", fixture_layout)
     monkeypatch.setattr(
         "skulk.extensions.service_setup.service_source_identity", lambda: "c" * 64
     )
@@ -227,7 +240,7 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
         if action == "install":
             if fail and failure == "registration":
                 raise ValueError("synthetic OS registration failure")
-            unit.write_bytes(layout.definition(Path(sys.executable).resolve()))
+            unit.write_bytes(layout.definition(base))
 
     async def observe(path: Path) -> bool:
         return unit.exists() and not fail
@@ -244,6 +257,16 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
     monkeypatch.setattr("skulk.extensions.service_setup._observe", observe)
     monkeypatch.setattr(service_setup, "_READINESS_WAIT_SECONDS", 0.0)
     monkeypatch.setattr(service_setup, "_ready_installation", registered_copy)
+    if sys.platform == "win32":
+        # Nothing reads as registered on Windows until its registration is
+        # built, so the unit this test writes stands in there too.
+        def registered(
+            actual: ServiceLayout, interpreter: Path, *, protected: bool = False
+        ) -> bool:
+            del protected
+            return unit.exists() and unit.read_bytes() == actual.definition(interpreter)
+
+        monkeypatch.setattr(service_setup, "registered_for", registered)
     expected_error = ValueError if failure == "registration" else ServiceReadinessPendingError
     with pytest.raises(expected_error):
         await setup_service()
@@ -255,8 +278,9 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
         read_private(config / "managed-service/connection.json")
     )
     assert settings.profile_id == connection.profile_id == interrupted.profile_id
-    assert config.stat().st_mode & 0o777 == 0o755
-    assert (config / "managed-service").stat().st_mode & 0o777 == 0o700
+    if sys.platform != "win32":
+        assert config.stat().st_mode & 0o777 == 0o755
+        assert (config / "managed-service").stat().st_mode & 0o777 == 0o700
     fail = False
     completed = await setup_service()
     assert completed.phase == "ready"
@@ -276,7 +300,7 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
     with pytest.raises(expected_error):
         await setup_service()
     assert actions == [*expected_actions, "prepare", "stop", "install"]
-    unit.write_bytes(layout.definition(Path(sys.executable).resolve()))
+    unit.write_bytes(layout.definition(base))
     fail = False
     assert await setup_service() == completed
     monkeypatch.setattr(

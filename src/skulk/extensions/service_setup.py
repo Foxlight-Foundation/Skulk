@@ -4,9 +4,7 @@ import argparse
 import asyncio
 import getpass
 import json
-import os
 import sqlite3
-import stat
 import sys
 import time
 import warnings
@@ -39,8 +37,8 @@ from skulk.extensions.runtime_attachment import (
 from skulk.extensions.runtime_catalog import catalog_refusal, catalog_refusal_sentence
 from skulk.extensions.runtime_files import (
     RuntimeLock,
+    no_other_account_can_change,
     read_private,
-    writable_only_by,
     write_private,
 )
 from skulk.extensions.runtime_install import finish_runtime_work
@@ -57,7 +55,8 @@ from skulk.extensions.runtime_manager import (
 from skulk.extensions.service_registration import (
     ServiceLayout,
     ServiceScope,
-    local_layout,
+    owner_layout,
+    registered_for,
 )
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
@@ -68,6 +67,12 @@ from skulk.extensions.service_snapshot import (
 )
 from skulk.extensions.terminal_install import TerminalInstaller
 from skulk.shared.constants import SKULK_CONFIG_HOME, offline_mode
+from skulk.utils.runtime_files import (
+    examine,
+    has_borrowed_identity,
+    has_root_authority,
+    is_private_directory,
+)
 
 # The service's bootstrap verifies the seal of its whole copied runtime (every
 # file's digest, gigabytes for a full Skulk environment) before the manager
@@ -212,7 +217,7 @@ async def _elevate(
     # running as the existing nonroot Skulk owner.
     process = await asyncio.create_subprocess_exec(
         "/usr/bin/sudo",
-        str(Path(sys.executable).resolve(strict=True)),
+        str(service_bootstrap.current_base()),
         "-I",
         "-S",
         "-B",
@@ -255,19 +260,9 @@ def connected_scope() -> ServiceScope | None:
     root = Path(connection.manager_root)
     scopes: tuple[ServiceScope, ...] = ("user", "system")
     for scope in scopes:
-        if local_layout(os.getuid(), scope).root == root:
+        if owner_layout(scope).root == root:
             return scope
     return None
-
-
-def _definition_owner_protected(layout: ServiceLayout, info: os.stat_result) -> bool:
-    """A system definition belongs to root; a user definition to its owner."""
-    owner = 0 if layout.scope == "system" else os.getuid()
-    return (
-        stat.S_ISREG(info.st_mode)
-        and info.st_uid == owner
-        and not info.st_mode & 0o022
-    )
 
 
 async def _selected_within(root: Path, generation: str, seconds: float) -> bool:
@@ -299,17 +294,7 @@ def registered_unit_names_base(base: Path) -> bool:
     scope = connected_scope()
     if scope is None:
         return False
-    return _unit_names_base(local_layout(os.getuid(), scope), base)
-
-
-def _unit_names_base(layout: ServiceLayout, base: Path) -> bool:
-    """Whether the registered OS service still invokes this interpreter."""
-    try:
-        descriptor = os.open(layout.unit, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return False
-    with os.fdopen(descriptor, "rb") as source:
-        return source.read(65537) == layout.definition(base)
+    return registered_for(owner_layout(scope), base)
 
 
 def _ready_installation(
@@ -325,11 +310,8 @@ def _ready_installation(
         }:
             return False
         service_bootstrap.verified_runtime(layout.root)
-        descriptor = os.open(layout.unit, os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(descriptor, "rb") as source:
-            if not _definition_owner_protected(layout, os.fstat(source.fileno())):
-                return False
-            return source.read(65537) == layout.definition(base)
+        # A system definition belongs to root; a user definition to its owner.
+        return registered_for(layout, base, protected=True)
     except (OSError, ValueError):
         return False
 
@@ -360,10 +342,10 @@ async def setup_service(
     Returns:
         The completed setup operation.
     """
-    if os.geteuid() == 0 or os.geteuid() != os.getuid():
+    if has_root_authority() or has_borrowed_identity():
         raise ValueError("run setup as the existing Skulk owner, not under sudo")
-    layout = local_layout(os.getuid(), scope or connected_scope() or "user")
-    base = Path(sys.executable).resolve(strict=True)
+    layout = owner_layout(scope or connected_scope() or "user")
+    base = service_bootstrap.current_base()
     configuration = SKULK_CONFIG_HOME.resolve()
     _not_translocated(base)
     _outside_checkout(base)
@@ -374,17 +356,11 @@ async def setup_service(
     # state. Existing healthy registrations can be verified without another sudo
     # prompt; all repair paths still validate that parent through the fixed helper.
     try:
-        root_info = layout.root.lstat()
-    except FileNotFoundError:
-        prepared = True
-    else:
         # Interrupted initial preparation may leave an empty root-owned leaf.
         # The privileged helper must adopt or reject it before owner-side locking.
-        prepared = (
-            not stat.S_ISDIR(root_info.st_mode)
-            or root_info.st_uid != os.getuid()
-            or bool(root_info.st_mode & 0o077)
-        )
+        prepared = not is_private_directory(layout.root)
+    except FileNotFoundError:
+        prepared = True
     if prepared:
         await finish_runtime_work(asyncio.create_task(_register(layout, "prepare")))
     lock = RuntimeLock(layout.root, "setup.lock")
@@ -429,7 +405,7 @@ async def setup_service(
                     refresh = (
                         operation.phase in {"registered", "ready"}
                         and operation.snapshot is not None
-                        and await asyncio.to_thread(_unit_names_base, layout, base)
+                        and await asyncio.to_thread(registered_for, layout, base)
                         and await _observe(layout.root)
                     )
                     operation = None
@@ -438,11 +414,11 @@ async def setup_service(
                 manager_root=str(layout.root), profile_id=profile_id
             )
             configuration.mkdir(mode=0o700, parents=True, exist_ok=True)
-            info = configuration.lstat()
+            custody = examine(configuration)
             if (
-                not stat.S_ISDIR(info.st_mode)
-                or info.st_uid != os.getuid()
-                or not writable_only_by(info, os.getuid())
+                custody.kind != "directory"
+                or not custody.owned
+                or not no_other_account_can_change(configuration)
             ):
                 raise ValueError(
                     "Skulk configuration must be owned by this account and not writable by others"
@@ -608,7 +584,7 @@ async def setup_service(
 
 async def service_status() -> dict[str, str | bool]:
     """Distinguish historical setup completion from current management and integrity."""
-    layout = local_layout(os.getuid(), connected_scope() or "user")
+    layout = owner_layout(connected_scope() or "user")
     operation = SetupOperation.model_validate_json(
         read_private(layout.root / "setup.json")
     )
@@ -616,7 +592,7 @@ async def service_status() -> dict[str, str | bool]:
         _ready_installation,
         layout,
         operation.snapshot,
-        Path(sys.executable).resolve(strict=True),
+        service_bootstrap.current_base(),
     )
     available = await _observe(layout.root)
     return {
@@ -718,8 +694,8 @@ def main() -> None:
         action = TypeAdapter[str](str).validate_python(arguments.action)
         if action == "install-plugin":
             if (
-                os.geteuid() == 0
-                or os.geteuid() != os.getuid()
+                has_root_authority()
+                or has_borrowed_identity()
                 or not sys.stdin.isatty()
             ):
                 raise ValueError(
@@ -770,7 +746,7 @@ def main() -> None:
         if action == "purge-plugin":
             # The explicit end of an uninstall: the installation leaves the
             # inventory with everything it retained. Refused for a live one.
-            if os.geteuid() == 0:
+            if has_root_authority():
                 raise ValueError("plugin management requires the nonroot service owner")
             if len(remaining) != 1:
                 raise ValueError("purge-plugin takes exactly one installed plugin ID")
@@ -814,7 +790,7 @@ def main() -> None:
                 )
             )
         elif action == "catalog":
-            if os.geteuid() == 0:
+            if has_root_authority():
                 raise ValueError("plugin management requires the nonroot service owner")
             connection = ServiceConnection.model_validate_json(
                 read_private(
@@ -880,7 +856,7 @@ def main() -> None:
                 )
             )
         elif action == "manage":
-            if os.geteuid() == 0:
+            if has_root_authority():
                 raise ValueError("plugin management requires the nonroot service owner")
             connection = ServiceConnection.model_validate_json(
                 read_private(
