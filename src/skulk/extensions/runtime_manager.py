@@ -6,7 +6,6 @@ import contextlib
 import hashlib
 import json
 import shutil
-import signal
 import sys
 import time
 from collections.abc import Callable
@@ -103,6 +102,7 @@ from skulk.utils.local_transport import (
     serve,
 )
 from skulk.utils.runtime_files import has_root_authority, sync_directory
+from skulk.utils.stop_signals import stop_on_signal
 
 PluginIdentifier = Annotated[
     str, Field(pattern=r"^managed\.[a-z0-9][a-z0-9._-]{0,80}$")
@@ -1894,16 +1894,12 @@ async def manager_request(root: Path, request: ManagerRequest) -> dict[str, Json
 async def _serve(root: Path) -> None:
     stopped = asyncio.Event()
     manager = RuntimeManager(root, request_stop=stopped.set)
-    loop = asyncio.get_running_loop()
-    for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(shutdown_signal, stopped.set)
-    try:
-        await manager.start()
-        await stopped.wait()
-    finally:
-        await finish_runtime_work(asyncio.create_task(manager.close()))
-        for shutdown_signal in (signal.SIGTERM, signal.SIGINT):
-            loop.remove_signal_handler(shutdown_signal)
+    with stop_on_signal(stopped):
+        try:
+            await manager.start()
+            await stopped.wait()
+        finally:
+            await finish_runtime_work(asyncio.create_task(manager.close()))
 
 
 def main() -> None:
