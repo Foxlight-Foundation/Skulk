@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import multiprocessing as mp
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
+import anyio
 import loguru
 import pytest
 
+from skulk.engines.load_results import LoadObservation
 from skulk.engines.tests.package_fixtures import install_test_package
 from skulk.shared.backends import (
     ENGINE_PACKAGES_DISABLE_ENV,
@@ -19,16 +22,24 @@ from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.diagnostics import RunnerDiagnosticUpdate
+from skulk.shared.types.engine_packages import NodeEngineLoadResult
 from skulk.shared.types.events import Event, RunnerStatusUpdated
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.tasks import Task, TaskId
 from skulk.shared.types.worker.instances import BoundInstance, InstanceId
-from skulk.shared.types.worker.runners import RunnerFailed, RunnerId
+from skulk.shared.types.worker.runners import (
+    RunnerFailed,
+    RunnerId,
+    RunnerLoading,
+    RunnerReady,
+    RunnerStatus,
+)
 from skulk.shared.types.worker.shards import PipelineShardMetadata
-from skulk.utils.channels import mp_channel
+from skulk.utils.channels import channel, mp_channel
 from skulk.worker.main import (
     _engine_load_refused_instance_failure_message,  # pyright: ignore[reportPrivateUsage]
     engine_load_refused_live_instances,
+    engine_package_load_results,
 )
 from skulk.worker.runner import bootstrap
 from skulk.worker.runner.engine_package import runner as runner_module
@@ -252,3 +263,151 @@ def test_the_worker_gives_up_a_refused_load_with_the_code_only() -> None:
     assert found == [("instance-a", MODEL, "load_refused", refused)]
     durable = _engine_load_refused_instance_failure_message(MODEL, found[0][2])
     assert "load_refused" in durable and "/private" not in durable
+
+
+def test_the_worker_reads_load_results_only_from_engine_package_runners() -> None:
+    """A built-in engine's load is not part of the engines report."""
+
+    def supervisor(
+        tag: str | None, build: str | None, observed: LoadObservation | None
+    ) -> object:
+        return SimpleNamespace(
+            shard_metadata=SimpleNamespace(
+                model_card=SimpleNamespace(model_id=MODEL),
+                resolved_backend=tag,
+                resolved_engine_build=build,
+            ),
+            load_observation=observed,
+        )
+
+    loaded = LoadObservation("loaded", None, 1000)
+    refused = LoadObservation("refused", "load_refused", 2000)
+    runners = cast(
+        "dict[RunnerId, RunnerSupervisor]",
+        cast(
+            object,
+            {
+                "runner-a": supervisor("tensorfold-rocm", BUILD, loaded),
+                "runner-b": supervisor("tensorfold-cuda", "b" * 64, refused),
+                "runner-still-loading": supervisor("tensorfold-rocm", BUILD, None),
+                "runner-built-in": supervisor("llama_server-vulkan", BUILD, loaded),
+                "runner-unstamped": supervisor(None, None, loaded),
+                "runner-no-build": supervisor("tensorfold-rocm", None, loaded),
+                "runner-odd-build": supervisor("tensorfold-rocm", "not-a-digest", loaded),
+            },
+        ),
+    )
+
+    assert engine_package_load_results(runners) == [
+        (
+            "tensorfold-rocm",
+            NodeEngineLoadResult(
+                build=BUILD, outcome="loaded", model_id=str(MODEL), at_unix_ms=1000
+            ),
+        ),
+        (
+            "tensorfold-cuda",
+            NodeEngineLoadResult(
+                build="b" * 64,
+                outcome="refused",
+                code="load_refused",
+                model_id=str(MODEL),
+                at_unix_ms=2000,
+            ),
+        ),
+    ]
+
+
+class _ExitedProcess:
+    """A runner process that has already gone, for a supervisor nothing starts."""
+
+    pid = 1
+    exitcode = 0
+
+    def is_alive(self) -> bool:
+        return False
+
+    def join(self, _timeout: float | None = None) -> None:
+        return None
+
+    def terminate(self) -> None:
+        return None
+
+    def kill(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ending", "outcome", "code"),
+    [
+        (RunnerReady(), "loaded", None),
+        (
+            RunnerFailed(
+                error_message=engine_load_refusal("load_refused", "no /private/w.bin")
+            ),
+            "refused",
+            "load_refused",
+        ),
+        (RunnerFailed(error_message="adapter exited"), "failed", None),
+    ],
+)
+async def test_a_supervisor_keeps_how_its_runners_load_ended(
+    ending: RunnerStatus, outcome: str, code: str | None
+) -> None:
+    """The load's end is read from the runner's ordered statuses and survives later ones."""
+    event_sender, event_receiver = channel[Event](16)
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    ev_send, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+    bound = _bound()
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound.bound_shard,
+        bound_instance=bound,
+        runner_process=cast("mp.Process", cast(object, _ExitedProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+    assert supervisor.load_observation is None
+    statuses: list[RunnerStatus] = [
+        RunnerLoading(),
+        ending,
+        # What follows a load's end must not rewrite it.
+        RunnerFailed(error_message="Terminated (exitcode=1)"),
+    ]
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(
+            supervisor._forward_events  # pyright: ignore[reportPrivateUsage]
+        )
+        for status in statuses:
+            ev_send.send(RunnerStatusUpdated(runner_id=RUNNER, runner_status=status))
+            with anyio.fail_after(5):
+                await event_receiver.receive()
+            if status is statuses[0]:
+                assert supervisor.load_observation is None
+        task_group.cancel_scope.cancel()
+
+    ev_send.close()
+    observed = supervisor.load_observation
+    assert observed is not None
+    assert (observed.outcome, observed.code) == (outcome, code)
+    assert engine_package_load_results({RUNNER: supervisor}) == [
+        (
+            "tensorfold-rocm",
+            NodeEngineLoadResult.model_validate(
+                {
+                    "build": BUILD,
+                    "outcome": outcome,
+                    "code": code,
+                    "modelId": str(MODEL),
+                    "atUnixMs": observed.at_unix_ms,
+                }
+            ),
+        )
+    ]

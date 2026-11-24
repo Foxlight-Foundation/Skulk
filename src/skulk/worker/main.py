@@ -37,6 +37,11 @@ from skulk.download.download_utils import (
     installed_artifact_in_path,
     resolve_native_music_source_directory,
 )
+from skulk.engines.load_results import (
+    PROCESS_ENGINE_LOAD_RESULTS,
+    EngineLoadResults,
+    with_load_results,
+)
 from skulk.provisioning.ace_step_inventory import (
     ACE_STEP_PACKAGES,
     select_ace_step_package,
@@ -134,6 +139,7 @@ from skulk.shared.types.diagnostics import (
     RunnerTaskCancelResponse,
     VisionMediaIngressDiagnostics,
 )
+from skulk.shared.types.engine_packages import NodeEngineLoadResult
 from skulk.shared.types.events import (
     AceStepPreparationCompleted,
     AceStepPreparationRequested,
@@ -663,6 +669,44 @@ def engine_load_refused_live_instances(
                 )
             )
     return refused
+
+
+def engine_package_load_results(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+) -> list[tuple[str, NodeEngineLoadResult]]:
+    """Return how each engine package runner's model load ended, by backend tag.
+
+    Only a runner stamped with an engine package's backend tag and build is
+    read; a built-in engine's load is not part of the engines report. Reading
+    is repeatable: the same runner yields the same result every time.
+    """
+    results: list[tuple[str, NodeEngineLoadResult]] = []
+    for supervisor in runners.values():
+        observed = supervisor.load_observation
+        shard = supervisor.shard_metadata
+        tag, build = shard.resolved_backend, shard.resolved_engine_build
+        if (
+            observed is None
+            or tag is None
+            or build is None
+            or package_engine_of(tag) is None
+            or len(build) != 64
+            or not set(build) <= set("0123456789abcdef")
+        ):
+            continue
+        results.append(
+            (
+                tag,
+                NodeEngineLoadResult(
+                    build=build,
+                    outcome=observed.outcome,
+                    code=observed.code,
+                    model_id=str(shard.model_card.model_id)[:256],
+                    at_unix_ms=observed.at_unix_ms,
+                ),
+            )
+        )
+    return results
 
 
 def model_trust_failed_live_instances(
@@ -1575,7 +1619,15 @@ class Worker:
             self._fail_native_music, self._native_music_reader_drained,
         )
         self._engine_install_jobs: dict[str | tuple[str, str | None, str | None], _EngineInstallJob] = {}
+        # Process-wide, so what this node learned about its engine package
+        # builds survives the worker being replaced at an election change.
+        self._engine_load_results: EngineLoadResults = PROCESS_ENGINE_LOAD_RESULTS
         self._stopped: anyio.Event = anyio.Event()
+
+    def _note_engine_package_loads(self) -> None:
+        """Record how the engine package loads this worker can see ended."""
+        for tag, result in engine_package_load_results(self.runners):
+            self._engine_load_results.record(tag, result)
 
     async def _gather_node_resources(self) -> NodeResources:
         """Compose current facts with this worker's verified native observations.
@@ -1593,6 +1645,7 @@ class Worker:
             data_transport=self._data_transport,
             zenoh_connected_peers=peers,
         )
+        self._note_engine_package_loads()
         ready = self._demucs_preparation.engine_builds()
         # Derive builds from one locked probe snapshot. Separate build/probe
         # reads could straddle a concurrent withdrawal or successful prepare.
@@ -1677,6 +1730,9 @@ class Worker:
                     **installable,
                 },
                 "native_music_probes": native_probes,
+                "engine_packages": with_load_results(
+                    resources.engine_packages, self._engine_load_results
+                ),
             }
         )
 
@@ -4461,6 +4517,9 @@ class Worker:
                 case InstallEngine():
                     await self._start_engine_install(task)
                 case Shutdown(runner_id=runner_id):
+                    # A runner that failed its load is removed here, possibly
+                    # before the next resource reading would have seen it.
+                    self._note_engine_package_loads()
                     runner = self.runners.pop(runner_id)
                     shard_for_eviction = runner.shard_metadata
                     # Only evict staged files if the instance has been deleted.

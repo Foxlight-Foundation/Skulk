@@ -16,6 +16,39 @@ MAX_REPORTED_ENGINE_BUILDS: Final = 16
 _DIGEST: Final = r"^[0-9a-f]{64}$"
 
 
+class NodeEngineLoadResult(CamelCaseModel):
+    """How the last model load on one engine package build ended on one node.
+
+    Evidence about one build and one model, kept by the node since it
+    started. It never makes a node more or less eligible for anything.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    build: str = Field(
+        pattern=_DIGEST, description="Manifest digest of the build that was loaded."
+    )
+    outcome: Literal["loaded", "refused", "failed"] = Field(
+        description=(
+            "loaded: the model became ready. refused: the engine answered the "
+            "load with a typed refusal; see code. failed: the runner ended "
+            "while loading for another reason, which the node's log holds."
+        )
+    )
+    code: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[a-z_]+$",
+        description="The engine's typed refusal code. Present only for refused.",
+    )
+    model_id: str = Field(
+        min_length=1, max_length=256, description="The model that was loaded."
+    )
+    at_unix_ms: int = Field(
+        ge=0, description="When the load ended, by the node's own clock."
+    )
+
+
 class NodeEnginePackage(CamelCaseModel):
     """One engine package lane on one node.
 
@@ -103,5 +136,13 @@ class NodeEnginePackage(CamelCaseModel):
         description=(
             "Memory the active or offered build declares beyond a model's "
             "weight bytes, which admission counts for a launch."
+        ),
+    )
+    load_results: tuple[NodeEngineLoadResult, ...] = Field(
+        default=(),
+        max_length=MAX_REPORTED_ENGINE_BUILDS,
+        description=(
+            "How the last model load on each build of the lane ended since "
+            "the node started, newest first. Empty until a model is loaded."
         ),
     )

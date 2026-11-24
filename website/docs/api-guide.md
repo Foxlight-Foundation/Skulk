@@ -2841,6 +2841,21 @@ node:
 | `problem` | For an unusable build, a short refusal code such as `installation_damaged` or `skulk_version_unsupported`. |
 | `downloadBytes` | For an offered build, the bytes an install downloads. |
 | `overheadBytes` | Memory the build declares beyond a model's weight bytes, which admission counts for a launch. |
+| `loadResults` | How the last model load on each build of the lane ended on this node since it started, newest first, at most 16. Empty until a model is loaded there. |
+
+Each entry of `loadResults`:
+
+| Field | Meaning |
+|---|---|
+| `build` | Manifest digest of the build that was loaded. |
+| `outcome` | `loaded`: the model became ready. `refused`: the engine answered the load with a typed refusal, named in `code`. `failed`: the runner ended while loading for another reason; the node's log holds it. |
+| `code` | The engine's refusal code, such as `load_refused` or `settings_changed`. Null unless `outcome` is `refused`. |
+| `modelId` | The model that was loaded. |
+| `atUnixMs` | When the load ended, by the node's own clock. |
+
+A load result is evidence about one build and one model. It is kept in the
+node's memory, so a restart clears it, and it never changes where a model may
+be placed.
 
 An `active` status says the node holds an intact build that this Skulk version
 can run. It does not promise that a given model loads on it; only a launch
