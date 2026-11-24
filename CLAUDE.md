@@ -7,6 +7,12 @@ does not support Chromium installation on Ubuntu 26.04.
 
 ## Project Overview
 
+The package initializer disables Loguru variable-value traceback annotations
+before logger import; retain this for CLI, plugin and spawned-process privacy.
+Node sinks independently pass `diagnose=False`. A node started with `SKULK_HOME`
+keeps its default staging directory inside that home. Settings broadcasts omit
+staging paths and override fields the operator never set.
+
 Native host stream RPC cancellation uses the selected application's signed cleanup
 grace for readiness, input and output. Owner authority remains effective through
 pending terminal/end delivery after execution-scope cleanup; sibling roots retain
@@ -1426,8 +1432,12 @@ a file or opens one link-safely by calling the operating system itself: it uses
 `is_private_directory`, `open_private`, `sync_directory`, `examine`,
 `open_unfollowed` and `create_file` from the same module, and a guard in
 `utils/tests/test_runtime_files_platforms.py` lists the modules not yet moved
-(the `service_*` modules). Take a module off that list when it is ported; add
-none.
+(`service_registration.py` and `service_setup.py`). Take a module off that
+list when it is ported; add none. `no_other_account_can_change()` in the same
+module is the rule for a file this account did not necessarily create, such
+as one in the Python environment Skulk itself is installed in: on Windows its
+owner, and every account its access list lets change it, must be the account,
+SYSTEM or Administrators, and what others may read is not examined.
 An installed runtime is laid out differently per platform, and only
 `extensions/runtime_integrity.py` knows how: `runtime_interpreter()` gives the
 environment's interpreter (`runtime/bin/python`, or `runtime\Scripts\python.exe`
@@ -1477,9 +1487,15 @@ program on the console and are the running program's to interpret), waits,
 ends what the program left running and exits with its exit code.
 `has_borrowed_identity()` in `utils/runtime_files.py` is the one test for a
 set-user-ID process; it is always false on Windows.
-`utils/tests/test_owned_process.py` lists the modules that still start, stop
-or replace processes themselves (`service_bootstrap.py`,
-`service_snapshot.py`).
+The fixed environment an owned child starts with (`isolated_environment()`)
+names the account's home on Windows: `USERPROFILE`, set to the profile folder
+Windows itself records for the account (`profile_directory()` in
+`utils/_windows_account.py`), never copied from this process's environment. A
+POSIX program finds its home in the account database whatever its environment
+holds; a Windows program finds it only through that variable, and Skulk's own
+modules ask for it when they are imported.
+`utils/tests/test_owned_process.py` names the one module that still replaces
+its own process itself, `service_bootstrap.py`, which does so on POSIX only.
 The owner launcher (`extensions/runtime_service.py`) starts a plugin's owner
 with `start_supervised` from the same seam: a long-running child that holds
 one end of a lifetime pipe. Closing the launcher's end, which also happens
@@ -1515,15 +1531,70 @@ A service's own stop request goes through `stop_on_signal()` in
 POSIX; Ctrl-C and Ctrl-Break on Windows, where the loop cannot register a
 signal handler. `runtime_service` and `runtime_manager serve` both use it, so
 the manager runs as a program on Windows.
+The plugin service's own copy of Skulk (`extensions/service_snapshot.py`) and
+the file that checks that copy before the manager starts
+(`extensions/service_bootstrap.py`) run on Windows. The bootstrap may import
+only the standard library, so it cannot use `utils/runtime_files.py`: it
+restates that module's rules for both platforms, the two guards above name it
+as the one exception, and `extensions/tests/test_service_snapshot.py` holds
+it to them. `current_base()`, `base_identity()`, `manager_interpreter()`,
+`manager_command()` and `manager_environment()` in the bootstrap are the one
+place each of those is worked out; never spell them out elsewhere. On Windows
+the copy's environment is built by a child that runs the base interpreter by
+its real path (`venv --copies --without-pip`), so that `home` in `pyvenv.cfg`
+names the base's own folder and not a link to it (uv reaches its Python
+through a junction). The copy lies under `Lib\site-packages`, and the folders
+the copy makes are created with no mode: Python gives `mkdir(mode=0o700)` an
+access list on Windows that also admits Administrators. The seal
+(`runtime_tree`) refuses every reparse point there, requires each member to
+be the account's and to grant access to nobody but the account and SYSTEM,
+and requires `home` to be the base's folder; the manifest also records the
+base's library (`base_library_sha256`, the digest of `python3XX.dll`), which
+a POSIX manifest does not have. A POSIX manifest is the bytes it has always
+been. Windows cannot replace a running process, so there the bootstrap does
+not become the manager: it joins a Job Object that ends its processes when
+the bootstrap's handle closes, starts the manager as a child with the fixed
+environment, ignores Ctrl-C and Ctrl-Break (the manager's to act on), waits,
+and exits with the manager's exit code. However the bootstrap ends, the
+manager and everything the manager started end with it. Staging refuses,
+before it creates anything, a copy whose deepest file would not fit below the
+service root on a machine without long paths (`copied_path_excess()` in
+`extensions/runtime_integrity.py`): the copy's files begin 56 characters
+after the root's path, so the 144-character file a development environment
+holds needs a root of 59 characters or fewer.
+Staging a real copy still cannot run on Windows. It starts by measuring the
+host (`measure_host()`), and `current_platform()` names macOS and Linux only.
+Naming a Windows artifact family is a decision for the release schema and the
+owner runtime, not a porting step. Until it is made, the tests give staging a
+stand-in host and a stand-in answer from the copy; everything else in them is
+real, including a copy of the whole installed environment that is sealed,
+verified by the bootstrap and serves as the manager. Registering the service
+with Windows (`service_registration.py`, `service_setup.py`) is not built.
 Windows limits how long a path may be unless the machine has long paths
 switched on (off by default): a directory's path may be 247 characters and a
-file's 259. The deepest directory of an installed runtime lies 163 characters
-below its installation's root: `generations\<64 characters>\runtime\`, then 77
+file's 259. A generation folder on Windows is therefore named by the first 32
+characters of the runtime digest, not all 64. `generation_directory()` in
+`extensions/runtime_integrity.py` is the one place that builds a generation's
+path; never spell `generations/<digest>` out. The digest stays the identity
+everywhere: `staged.json`, the seal, selection and rollback check all 64
+characters as before, and POSIX folder names are unchanged. Two digests could
+share a short name, so on Windows the folder's first file, `runtime-digest`,
+holds the whole digest, and `claim_generation()` and `check_generation()`
+refuse a folder that belongs to another runtime, or holds something and does
+not say whose it is, before anything in it is read, moved or written. Code
+that reads an installed generation gets its folder from `owned_generation()`,
+which makes that check; `generation_directory()` alone is for working out a
+path without touching it. A test that builds a generation by hand claims it
+first, as the installer does. The
+owner runtime must derive the same name from the same digest; that is a
+contract with it (Codex agreed to carry it into the Windows owner release).
+With that name the deepest directory of an installed runtime lies 131
+characters below its installation's root: `generations\<32 characters>\runtime\`, then 77
 for a folder of the `pip` that `venv` puts in every runtime (pip 26.3; another
-version may differ). An installation root longer than 84 characters therefore
+version may differ). An installation root longer than 116 characters therefore
 cannot be installed into on a default Windows machine: `venv` exits with an
 error. Compiled files (`.pyc`) lie deeper still, but Python skips one whose path
-is too long, so a root from about 62 characters gets a runtime with some of
+is too long, so a root from about 94 characters gets a runtime with some of
 `pip`'s compiled files missing and nothing else different.
 `runtime_path_excess()` in `extensions/runtime_integrity.py` measures all of
 this from the bundled `pip` wheel and the runtime's own wheels (each member
@@ -1535,8 +1606,15 @@ before it is journaled or downloaded (`RuntimeDownloads.submit` and `recover`),
 and in `stage()` with every file of every wheel counted, before the generation
 folder exists. The first travels as the manager error `runtime_path_too_long`
 with one integer, and the dashboard and the terminal installer print
-`path_refusal_sentence()`; the second happens in the background and shows as
-the general `installation_failed`. The plugin tests get a short temporary
+`path_refusal_sentence()`. The second happens in the background, so it is
+retained on the operation: `RuntimeOperation` and `InstallOperation` read
+`recovery_required` with `error_code` `runtime_path_too_long` and
+`path_excess`, the count, which no other record carries (both models refuse
+one without the other, and a record written before the field existed still
+reads). The terminal installer prints the same sentence for such an
+operation and the dashboard words it in both places that explain a stopped
+install; `recover()` clears the code and the count when it accepts a retry.
+The plugin tests get a short temporary
 directory on Windows for this reason (`extensions/tests/conftest.py`), and one
 of them installs at the longest root that fits and one character past it, on
 a machine without long paths only.

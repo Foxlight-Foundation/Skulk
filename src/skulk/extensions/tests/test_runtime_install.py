@@ -32,6 +32,8 @@ from skulk.extensions.runtime_install import RuntimeInstaller
 from skulk.extensions.runtime_integrity import (
     RuntimePathTooLongError,
     _paths_are_limited,  # pyright: ignore[reportPrivateUsage]
+    claim_generation,
+    generation_directory,
     runtime_path_excess,
     verify_installed_runtime,
 )
@@ -413,7 +415,7 @@ async def test_offline_stage_and_reconnect_leave_host_unchanged(
         (d.metadata["Name"], d.version) for d in importlib.metadata.distributions()
     )
     assert not (root / "active.json").exists()
-    generation = root / "generations" / operation.runtime_digest
+    generation = generation_directory(root, operation.runtime_digest)
     assert read_private(generation / "staged.json") == metadata
     write_private(generation / "artifacts" / "bundle.pyz", b"tampered")
     with pytest.raises(ValueError, match="bundle differs"):
@@ -446,7 +448,7 @@ async def test_a_runtime_too_deep_for_the_machine_is_refused_before_it_is_built(
     monkeypatch.setattr(
         "skulk.extensions.runtime_integrity._pip_depth", lambda: (400, 420)
     )
-    generation = installer.root / "generations" / runtime.digest
+    generation = generation_directory(installer.root, runtime.digest)
     supplied = verified_artifacts(runtime, source)
     expected = runtime_path_excess(
         generation,
@@ -461,7 +463,13 @@ async def test_a_runtime_too_deep_for_the_machine_is_refused_before_it_is_built(
         await installer.stage(metadata, source, operation_id="1" * 32)
     assert refused.value.excess == expected
     assert not generation.exists()
-    assert installer.operation("1" * 32).state == "recovery_required"
+    # The retained operation names the refusal and its count.
+    retained = installer.operation("1" * 32)
+    assert retained.state == "recovery_required"
+    assert retained.error_code == "runtime_path_too_long"
+    assert retained.path_excess == expected
+    # Reading it again without recovery changes neither.
+    assert await installer.stage(metadata, source, operation_id="1" * 32) == retained
     # The refusal held nothing: the same operation installs once paths fit.
     monkeypatch.setattr(
         "skulk.extensions.runtime_integrity._paths_are_limited", lambda: False
@@ -470,6 +478,46 @@ async def test_a_runtime_too_deep_for_the_machine_is_refused_before_it_is_built(
         metadata, source, operation_id="1" * 32, recover=True
     )
     assert retried.state == "staged"
+    assert retried.error_code is None and retried.path_excess is None
+
+
+def test_a_staging_record_carries_a_path_excess_only_for_the_path_refusal() -> None:
+    """Records written before the count existed still read; a stray count does not."""
+    from skulk.extensions.runtime_install import RuntimeOperation
+
+    identity = {"operation_id": "1" * 32, "runtime_digest": "a" * 64}
+    earlier = RuntimeOperation.model_validate_json(
+        json.dumps(
+            {
+                **identity,
+                "state": "recovery_required",
+                "error_code": "installation_failed",
+            }
+        )
+    )
+    assert earlier.path_excess is None
+    named = RuntimeOperation.model_validate_json(
+        json.dumps(
+            {
+                **identity,
+                "state": "recovery_required",
+                "error_code": "runtime_path_too_long",
+                "path_excess": 9,
+            }
+        )
+    )
+    assert named.path_excess == 9
+    for stray in (
+        {"error_code": "installation_failed", "path_excess": 9},
+        {"error_code": "runtime_path_too_long"},
+        {"error_code": "runtime_path_too_long", "path_excess": 0},
+        {"error_code": "runtime_path_too_long", "path_excess": 32768},
+        {"error_code": None, "path_excess": 9},
+    ):
+        with pytest.raises(ValueError):
+            RuntimeOperation.model_validate_json(
+                json.dumps({**identity, "state": "recovery_required", **stray})
+            )
 
 
 @pytest.mark.skipif(
@@ -495,7 +543,7 @@ async def test_the_refusal_starts_exactly_where_an_install_stops_working(
     )
     # The excess grows by one with each character of the root, so one
     # measurement of a root far too long gives the longest that fits.
-    probe = Path("r" * 250) / "generations" / runtime.digest
+    probe = generation_directory(Path("r" * 250), runtime.digest)
     longest = 250 - runtime_path_excess(probe, tuple(supplied), wheels)
 
     def installer(length: int) -> RuntimeInstaller:
@@ -510,19 +558,151 @@ async def test_the_refusal_starts_exactly_where_an_install_stops_working(
     fits = installer(longest)
     staged = await fits.stage(metadata, source, operation_id="1" * 32)
     assert staged.state == "staged"
-    verify_installed_runtime(fits.root / "generations" / runtime.digest, runtime.digest)
+    verify_installed_runtime(
+        generation_directory(fits.root, runtime.digest), runtime.digest
+    )
 
     too_long = installer(longest + 1)
     with pytest.raises(RuntimePathTooLongError) as refused:
         await too_long.stage(metadata, source, operation_id="1" * 32)
     assert refused.value.excess == 1
-    assert not (too_long.root / "generations" / runtime.digest).exists()
+    assert not (generation_directory(too_long.root, runtime.digest)).exists()
     # Not a character early: left to try, that install fails.
     monkeypatch.setattr(
         "skulk.extensions.runtime_integrity._paths_are_limited", lambda: False
     )
     with pytest.raises(ValueError, match="runtime installer failed"):
         await too_long.stage(metadata, source, operation_id="2" * 32)
+
+
+async def test_a_runtime_installs_under_a_short_name_and_another_never_takes_its_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows naming end to end: installed, found again, and never overwritten.
+
+    The folder is named by half the digest. The digest stays the identity:
+    staging, finding the generation again and recovery all refuse a folder
+    that says it is another runtime's, and leave it exactly as it was.
+    """
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._names_are_short", lambda: True
+    )
+    source = tmp_path / "source"
+    metadata, trust, host = artifacts(source)
+    monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
+    runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
+    installer = RuntimeInstaller(tmp_path / "installation")
+    write_private(
+        installer.root / "publisher-trust.json", trust.model_dump_json().encode()
+    )
+    generation = installer.root / "generations" / runtime.digest[:32]
+    assert generation_directory(installer.root, runtime.digest) == generation
+
+    staged = await installer.stage(metadata, source, operation_id="1" * 32)
+    assert staged.state == "staged" and staged.runtime_digest == runtime.digest
+    assert read_private(generation / "runtime-digest") == runtime.digest.encode()
+    assert read_private(generation / "staged.json") == metadata
+    assert not (installer.root / "generations" / runtime.digest).exists()
+    async with installer.locked_generation(runtime.digest) as (found, _):
+        assert found.digest == runtime.digest
+    # Staged again from the cached bytes alone, as a reconnect does.
+    again = await installer.stage(
+        metadata, tmp_path / "no-source", operation_id="1" * 32
+    )
+    assert again.state == "staged"
+
+    def tree() -> dict[str, tuple[int, int]]:
+        return {
+            str(item.relative_to(generation)): (
+                item.stat().st_size,
+                item.stat().st_mtime_ns,
+            )
+            for item in generation.rglob("*")
+            if item.is_file()
+        }
+
+    # The folder now says it is another runtime's: one whose digest starts
+    # with the same 32 characters.
+    other = runtime.digest[:32] + "f" * 32
+    assert other != runtime.digest
+    write_private(generation / "runtime-digest", other.encode())
+    before = tree()
+    with pytest.raises(ValueError, match="belongs to another runtime"):
+        await installer.stage(metadata, source, operation_id="2" * 32)
+    with pytest.raises(ValueError, match="belongs to another runtime"):
+        await installer.stage(metadata, source, operation_id="2" * 32, recover=True)
+    with pytest.raises(ValueError, match="belongs to another runtime"):
+        async with installer.locked_generation(runtime.digest):
+            raise AssertionError("another runtime's generation was opened")
+    assert tree() == before
+    assert not (installer.installer / "recovery").exists()
+    # Readers of the installed generation are refused the same way: none
+    # returns another runtime's metadata under this runtime's digest.
+    from skulk.extensions.runtime_manager import RuntimeManager
+    from skulk.extensions.runtime_selection import (
+        RuntimeSelector,
+        _retained_contract_identity,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    write_private(generation / "runtime-digest", runtime.digest.encode())
+    selector = RuntimeSelector(installer.root)
+    await selector.activate(runtime.digest, expected_revision=0)
+    selection = selector.current()
+    assert selection is not None and selection.runtime_digest == runtime.digest
+    manager = RuntimeManager.__new__(RuntimeManager)
+    manager.release_identities = {}
+    assert _retained_contract_identity(installer.root, selection)
+    assert manager._release_identity(installer.root, runtime.digest) is not None  # pyright: ignore[reportPrivateUsage]
+    manager.release_identities.clear()
+
+    write_private(generation / "runtime-digest", other.encode())
+    with pytest.raises(ValueError, match="belongs to another runtime"):
+        _retained_contract_identity(installer.root, selection)
+    assert manager._release_identity(installer.root, runtime.digest) is None  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_recovery_never_moves_another_runtimes_unfinished_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recovery sets an unfinished generation aside only when it is this runtime's."""
+    monkeypatch.setattr(
+        "skulk.extensions.runtime_integrity._names_are_short", lambda: True
+    )
+    source = tmp_path / "source"
+    metadata, trust, host = artifacts(source)
+    monkeypatch.setattr("skulk.extensions.runtime_install.measure_host", lambda: host)
+    runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
+    installer = RuntimeInstaller(tmp_path / "installation")
+    write_private(
+        installer.root / "publisher-trust.json", trust.model_dump_json().encode()
+    )
+    private_directory(installer.root / "generations")
+    generation = generation_directory(installer.root, runtime.digest)
+    # Another runtime with the same short name began here and did not finish.
+    other = runtime.digest[:32] + "e" * 32
+    claim_generation(generation, other)
+    write_private(generation / "evidence", b"another runtime's unfinished work")
+    for recover in (False, True):
+        with pytest.raises(ValueError, match="belongs to another runtime"):
+            await installer.stage(
+                metadata, source, operation_id="3" * 32, recover=recover
+            )
+        assert sorted(item.name for item in generation.iterdir()) == [
+            "evidence",
+            "runtime-digest",
+        ]
+        assert read_private(generation / "evidence") == (
+            b"another runtime's unfinished work"
+        )
+    assert not (installer.installer / "recovery").exists()
+    # This runtime's own unfinished generation is still set aside and rebuilt.
+    write_private(generation / "runtime-digest", runtime.digest.encode())
+    rebuilt = await installer.stage(
+        metadata, source, operation_id="3" * 32, recover=True
+    )
+    assert rebuilt.state == "staged"
+    assert (installer.installer / "recovery" / ("3" * 32)).is_dir()
+    assert not (generation / "evidence").exists()
 
 
 async def test_interrupted_generation_is_retained_without_replay(
@@ -536,9 +716,10 @@ async def test_interrupted_generation_is_retained_without_replay(
         installer.root / "publisher-trust.json", trust.model_dump_json().encode()
     )
     runtime = verify_runtime(metadata, trust, host, now=int(time.time()))
-    partial = installer.root / "generations" / runtime.digest
+    partial = generation_directory(installer.root, runtime.digest)
     private_directory(installer.root / "generations")
-    private_directory(partial)
+    # As the installer leaves a generation it began and did not finish.
+    claim_generation(partial, runtime.digest)
     write_private(partial / "evidence", b"interrupted installation")
     operation = await installer.stage(metadata, tmp_path / "source")
     assert operation.state == "recovery_required"

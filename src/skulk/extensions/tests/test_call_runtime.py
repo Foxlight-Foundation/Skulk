@@ -19,7 +19,8 @@ from skulk.extensions.runtime_artifacts import (
     canonical_json,
     verify_runtime,
 )
-from skulk.extensions.runtime_files import private_directory, write_private
+from skulk.extensions.runtime_files import write_private
+from skulk.extensions.runtime_integrity import claim_generation, generation_directory
 from skulk.extensions.runtime_selection import RuntimeSelection, RuntimeSelector
 from skulk.extensions.tests.test_native_runtime import (
     OBJECT,
@@ -158,8 +159,8 @@ async def test_call_selection_requires_explicit_state_migration(
         skulk_version=host.skulk_version,
         skulk_build_sha256=host.skulk_build_sha256,
     )
-    generation = selector.root / "generations" / old.digest
-    private_directory(generation)
+    generation = generation_directory(selector.root, old.digest)
+    claim_generation(generation, old.digest)
     write_private(generation / "staged.json", metadata)
     before = selected.model_dump_json().encode()
     write_private(selector.root / "runtime-selection.json", before)

@@ -26,6 +26,7 @@ from skulk.extensions.runtime_download import (
     RuntimeDownloads,
 )
 from skulk.extensions.runtime_files import read_private, write_private
+from skulk.extensions.runtime_integrity import generation_directory
 from skulk.extensions.runtime_manager import installed_release
 from skulk.extensions.tests.test_runtime_install import artifacts
 from skulk.extensions.tests.test_steward_tools import context
@@ -308,7 +309,7 @@ async def test_large_signed_metadata_download_stage_reopen_and_inventory(
         assert downloads.operation(request.operation_id).state == "staged"
         async with downloads.installer.locked_generation(verified.digest) as (reread, _):
             assert reread.metadata == metadata
-        staged = root / "generations" / verified.digest / "staged.json"
+        staged = generation_directory(root, verified.digest) / "staged.json"
         installed = installed_release(staged)
         assert installed is not None and installed.registration is not None
         assert len(installed.registration.capabilities) == 16

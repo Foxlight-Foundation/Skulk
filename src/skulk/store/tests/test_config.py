@@ -1,8 +1,11 @@
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+import skulk.store.config as store_config
 from skulk.store.config import (
     DEFAULT_MODEL_STORE_PORT,
     ExperimentsConfig,
@@ -67,6 +70,7 @@ def test_staging_cleanup_defaults_to_budgeted_eviction(
     state cannot influence the result.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(store_config, "SKULK_HOME_IS_SET", False)
     config = StagingNodeConfig()
 
     assert config.enabled
@@ -82,6 +86,7 @@ def test_staging_default_ignores_legacy_exo_dir(
     runway is gone (#324): a populated legacy ~/.exo/staging is no longer
     migrated, and an explicit path is respected verbatim."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(store_config, "SKULK_HOME_IS_SET", False)
     legacy = tmp_path / ".exo" / "staging"
     legacy.mkdir(parents=True)
     (legacy / "mlx-community--some-model").mkdir()
@@ -91,6 +96,104 @@ def test_staging_default_ignores_legacy_exo_dir(
     # Explicit configuration is never rewritten.
     explicit = StagingNodeConfig(node_cache_path="/Volumes/foxlight/models")
     assert explicit.node_cache_path == "/Volumes/foxlight/models"
+
+
+def test_a_node_whose_home_was_moved_stages_inside_that_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two nodes on one machine must not share, import or evict each other's copies.
+
+    Before this, the second node staged into the first node's
+    ``~/.skulk/staging`` whatever ``SKULK_HOME`` said.
+    """
+    home = tmp_path / "second-node"
+    monkeypatch.setattr(store_config, "SKULK_HOME_IS_SET", True)
+    monkeypatch.setattr(store_config, "SKULK_DATA_HOME", home)
+
+    assert store_config.default_node_cache_path() == str(home / "staging")
+    assert StagingNodeConfig().node_cache_path == str(home / "staging")
+    # The store section and a settings file that name no folder follow it too.
+    assert ModelStoreConfig(store_host="node", store_path="/store").staging.node_cache_path == str(
+        home / "staging"
+    )
+    assert (
+        ModelStoreConfig.model_validate(
+            {"store_host": "node", "store_path": "/store", "staging": {"enabled": True}}
+        ).staging.node_cache_path
+        == str(home / "staging")
+    )
+
+
+@pytest.mark.parametrize("data_home", ["~/.skulk", "~/.local/share/skulk"])
+def test_a_node_whose_home_was_not_moved_stages_where_it_always_has(
+    monkeypatch: pytest.MonkeyPatch, data_home: str
+) -> None:
+    """The default does not follow the data folder, which on Linux is an XDG one.
+
+    Linux nodes have always staged under ``~/.skulk``; following the data
+    folder there would strand every copy they hold.
+    """
+    monkeypatch.setattr(store_config, "SKULK_HOME_IS_SET", False)
+    monkeypatch.setattr(store_config, "SKULK_DATA_HOME", Path(data_home).expanduser())
+
+    assert store_config.default_node_cache_path() == "~/.skulk/staging"
+    assert ModelStoreConfig(store_host="node", store_path="/store").staging.node_cache_path == (
+        "~/.skulk/staging"
+    )
+
+
+@pytest.mark.parametrize("home_moved", [False, True])
+def test_a_staging_folder_named_in_the_settings_is_used_as_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, home_moved: bool
+) -> None:
+    monkeypatch.setattr(store_config, "SKULK_HOME_IS_SET", home_moved)
+    monkeypatch.setattr(store_config, "SKULK_DATA_HOME", tmp_path / "second-node")
+    named = {"staging": {"node_cache_path": "~/.skulk/staging"}}
+
+    config = ModelStoreConfig.model_validate(
+        {"store_host": "node", "store_path": "/store", **named}
+    )
+    override = ModelStoreConfig.model_validate(
+        {
+            "store_host": "node",
+            "store_path": "/store",
+            "node_overrides": {"node-id": {"staging": {"node_cache_path": "/fast/staging"}}},
+        }
+    )
+
+    assert config.staging.node_cache_path == "~/.skulk/staging"
+    assert resolve_node_staging(override, "node-id").node_cache_path == "/fast/staging"
+
+
+@pytest.mark.parametrize("skulk_home", [None, "second-node/home"])
+def test_the_environment_a_node_starts_with_decides_its_default(
+    tmp_path: Path, skulk_home: str | None
+) -> None:
+    """The wiring from ``SKULK_HOME`` itself, read as a starting node reads it."""
+    environment = {
+        key: value for key, value in os.environ.items() if key != "SKULK_HOME"
+    } | {"HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
+    if skulk_home is not None:
+        environment["SKULK_HOME"] = skulk_home
+
+    printed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from skulk.store.config import StagingNodeConfig;"
+            "print(StagingNodeConfig().node_cache_path)",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    ).stdout.strip()
+
+    if skulk_home is None:
+        assert printed == "~/.skulk/staging"
+    else:
+        assert Path(printed) == tmp_path / "second-node" / "home" / "staging"
 
 
 def test_resolve_node_staging_matches_local_hostname_alias(monkeypatch: pytest.MonkeyPatch) -> None:

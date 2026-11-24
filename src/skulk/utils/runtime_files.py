@@ -89,6 +89,30 @@ def writable_only_by(info: os.stat_result, user_id: int) -> bool:
     return info.st_uid == user_id and private_group(info.st_gid, user_id)
 
 
+def no_other_account_can_change(path: Path) -> bool:
+    """Whether only this account, or the machine's own authorities, can change a file.
+
+    The rule for a file this account did not necessarily create, such as one
+    in an installed Python environment that is about to be copied. On POSIX
+    it is :func:`writable_only_by` for this user. On Windows the file's owner,
+    and every account its access list lets change it, must be this account,
+    SYSTEM or the Administrators group. What other accounts may read is not
+    examined on either.
+
+    Args:
+        path: The file, examined as itself: a link is never followed.
+
+    Returns:
+        False when another account can change the file.
+
+    Raises:
+        OSError: When the file cannot be examined.
+    """
+    if sys.platform == "win32":
+        return _windows.no_other_account_can_change(path)
+    return writable_only_by(path.lstat(), os.getuid())
+
+
 def is_desktop_metadata(path: Path) -> bool:
     """Whether ``path`` is a regular file a desktop file browser leaves behind.
 

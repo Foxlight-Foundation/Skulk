@@ -1,6 +1,7 @@
 """Which account a Windows process runs as, and whether it has root's authority."""
 
 import ctypes
+import os
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -178,6 +179,20 @@ def _run_under(token: int, arguments: list[str]) -> int:
     finally:
         kernel32.CloseHandle(started.hThread)
         kernel32.CloseHandle(started.hProcess)
+
+
+def test_the_profile_folder_is_the_accounts_own_whatever_the_variable_says(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert sys.platform == "win32"
+    from skulk.utils import _windows_account as account
+
+    home = Path(os.environ["USERPROFILE"])
+    assert Path(account.profile_directory()) == home
+    monkeypatch.setenv("USERPROFILE", r"C:\somewhere\else")
+    assert Path(account.profile_directory()) == home
+    monkeypatch.delenv("USERPROFILE")
+    assert Path(account.profile_directory()) == home
 
 
 def test_the_account_is_a_security_identifier_and_does_not_change() -> None:

@@ -33,6 +33,11 @@ from skulk.extensions.tests.test_steward_tools import context
 from skulk.operator.pairing import PluginGrantUpdate
 
 
+def _fixed_path_excess(*_paths_and_wheels: object) -> int:
+    """Force the same named refusal at both HTTP installation boundaries."""
+    return 7
+
+
 @pytest.mark.parametrize("action", ["disable", "uninstall"])
 async def test_http_scopes_lifecycle_status_and_api_loss(
     tmp_path: Path,
@@ -238,7 +243,7 @@ async def test_http_scopes_lifecycle_status_and_api_loss(
             with monkeypatch.context() as limited:
                 limited.setattr(
                     "skulk.extensions.runtime_install.runtime_path_excess",
-                    lambda *_: 7,
+                    _fixed_path_excess,
                 )
                 too_long = await client.post(
                     install_url, headers=bearer, json=install_body
@@ -262,7 +267,7 @@ async def test_http_scopes_lifecycle_status_and_api_loss(
             with monkeypatch.context() as limited:
                 limited.setattr(
                     "skulk.extensions.runtime_install.runtime_path_excess",
-                    lambda *_: 7,
+                    _fixed_path_excess,
                 )
                 too_long = await client.post(
                     recovery_url, headers=bearer, json={"expected_source_revision": 1}

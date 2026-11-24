@@ -43,10 +43,11 @@ _DIRECT_PROCESS_CONTROL = frozenset(
         "start_new_session",
     }
 )
-# Plugin-hosting modules that still start, stop or replace processes
-# themselves, so cannot run on Windows. Remove a module when it is ported; add
-# none.
-_NOT_YET_PORTED = frozenset({"service_bootstrap.py", "service_snapshot.py"})
+# The one plugin-hosting module that replaces its own process itself. It runs
+# on nothing but the standard library, before anything of Skulk's may be
+# imported, so it cannot use the seam; it does so on POSIX only and runs the
+# manager as a child on Windows. Add no module to this.
+_STANDALONE = frozenset({"service_bootstrap.py"})
 
 # Takes the lock, then hands the terminal over to the program it is given.
 _TAKES_THE_LOCK = (
@@ -217,6 +218,35 @@ async def test_a_child_starts_in_the_given_directory_without_the_callers_environ
     assert "SKULK_OWNED_PROCESS_SECRET" not in seen
     # The operating system may add names of its own; none of ours is missing.
     assert {name.upper() for name in isolated_environment()} <= seen
+
+
+async def test_an_owned_child_finds_its_home(root: Path) -> None:
+    """Skulk's own modules ask for the home folder when they are imported.
+
+    POSIX answers from the account database whatever the environment holds.
+    Windows answers only from a variable, so the fixed environment names the
+    folder Windows records for the account.
+    """
+    lock = RuntimeLock(root, "installer.lock")
+    try:
+        child = await start_owned(
+            (
+                sys.executable,
+                "-I",
+                "-c",
+                "from pathlib import Path; print(Path.home())",
+            ),
+            cwd=root,
+            lock=lock,
+        )
+        try:
+            output = (await child.stdout.read()).decode()
+            assert await child.wait() == 0
+        finally:
+            await child.close()
+    finally:
+        lock.close()
+    assert Path(output.strip()) == Path.home()
 
 
 async def test_a_program_that_cannot_be_started_is_an_error(root: Path) -> None:
@@ -846,4 +876,4 @@ def test_only_the_seam_starts_or_stops_a_process_tree() -> None:
             ):
                 direct.add(source.name)
 
-    assert direct == _NOT_YET_PORTED
+    assert direct == _STANDALONE

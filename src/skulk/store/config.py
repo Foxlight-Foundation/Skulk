@@ -81,7 +81,7 @@ import yaml
 from loguru import logger
 from pydantic import Field, field_validator, model_validator
 
-from skulk.shared.constants import SKULK_DATA_HOME
+from skulk.shared.constants import SKULK_DATA_HOME, SKULK_HOME_IS_SET
 from skulk.shared.models.memory_estimate import (
     MAX_REQUESTED_CONTEXT_TOKENS,
     MIN_REQUESTED_CONTEXT_TOKENS,
@@ -213,6 +213,35 @@ def node_matches_store_host(
     )
 
 
+DEFAULT_NODE_CACHE_PATH: Final = "~/.skulk/staging"
+"""Where a node stages models when nothing says otherwise.
+
+It is ``~/.skulk`` on every platform, Linux included, where Skulk's data
+folder is an XDG one: nodes there have staged under ``~/.skulk`` since staging
+existed, and moving the default would strand every copy they hold."""
+
+STAGING_DIRECTORY_NAME: Final = "staging"
+"""Folder inside a moved home that holds that node's staged models."""
+
+
+def default_node_cache_path() -> str:
+    """Return the staging folder for a node whose settings name none.
+
+    A node whose home was moved with ``SKULK_HOME`` stages inside that home.
+    Without this, a second node on one machine staged into the first node's
+    folder: a fresh second node's own model store then imported every model
+    the first had staged, and either node's cleanup could delete the other's
+    copies. Every other node keeps ``~/.skulk/staging``, exactly as before.
+
+    Returns:
+        The default ``node_cache_path``. A path written in ``skulk.yaml``
+        always takes its place.
+    """
+    if SKULK_HOME_IS_SET:
+        return str(SKULK_DATA_HOME / STAGING_DIRECTORY_NAME)
+    return DEFAULT_NODE_CACHE_PATH
+
+
 @final
 class StagingNodeConfig(FrozenModel):
     """Per-node staging configuration.
@@ -229,7 +258,9 @@ class StagingNodeConfig(FrozenModel):
             where staged model files are written.  Each model occupies a
             subdirectory named ``<org>--<model>`` (e.g.
             ``mlx-community--Qwen3-30B-A3B-4bit``).  Defaults to
-            ``~/.skulk/staging``.
+            ``~/.skulk/staging``, or to ``staging`` inside the node's home
+            when ``SKULK_HOME`` moved it (see
+            :func:`default_node_cache_path`).
         cleanup_on_deactivate: When ``True`` (the default), staged copies
             become eviction candidates when their model instance is shut
             down, and the staging directory is held to the
@@ -251,7 +282,7 @@ class StagingNodeConfig(FrozenModel):
     """
 
     enabled: bool = True
-    node_cache_path: str = "~/.skulk/staging"
+    node_cache_path: str = Field(default_factory=default_node_cache_path)
     cleanup_on_deactivate: bool = True
     staging_keep_recent_gb: float = Field(default=40.0, ge=0)
 
@@ -344,7 +375,7 @@ class ModelStoreConfig(FrozenModel):
     store_port: int = DEFAULT_MODEL_STORE_PORT
     store_path: str
     download: DownloadStoreConfig = DownloadStoreConfig()
-    staging: StagingNodeConfig = StagingNodeConfig()
+    staging: StagingNodeConfig = Field(default_factory=StagingNodeConfig)
     reconciliation: ReconciliationStoreConfig = ReconciliationStoreConfig()
     node_overrides: dict[str, NodeOverrideConfig] = {}
 
@@ -1139,6 +1170,43 @@ def load_skulk_config(
     if raw is None:
         return None
     return SkulkConfig.model_validate(without_unset_sections(raw))
+
+
+def omit_unwritten_staging_paths(
+    model_store: ModelStoreConfig, shared: dict[str, object]
+) -> None:
+    """Take out of a store section about to be shared what nobody wrote in it.
+
+    The store host sends its settings to every node, and every node writes
+    them to its own file. A staging folder nobody wrote is this node's own
+    default, which another node must not inherit: a host whose home was moved
+    with ``SKULK_HOME`` would hand its folder to every node, including a
+    second node on the same machine, the exact sharing the default exists to
+    prevent. A node override is sent with only the fields a person set, so a
+    partial override stays partial and goes on inheriting the rest from the
+    base section, as :func:`resolve_node_staging` intends. Anything a person
+    wrote is sent as written.
+
+    Args:
+        model_store: The store section as loaded, which remembers which
+            fields its file named.
+        shared: That section's serialized form, changed in place.
+    """
+    staging = shared.get("staging")
+    if (
+        isinstance(staging, dict)
+        and "node_cache_path" not in model_store.staging.model_fields_set
+    ):
+        cast(dict[str, object], staging).pop("node_cache_path", None)
+    overrides = shared.get("node_overrides")
+    if not isinstance(overrides, dict):
+        return
+    for name, override in model_store.node_overrides.items():
+        entry = cast(dict[str, object], overrides).get(name)
+        if override.staging is not None and isinstance(entry, dict):
+            cast(dict[str, object], entry)["staging"] = override.staging.model_dump(
+                exclude_unset=True
+            )
 
 
 def resolve_node_staging(

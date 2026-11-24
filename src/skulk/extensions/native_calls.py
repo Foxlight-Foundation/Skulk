@@ -48,6 +48,7 @@ from skulk.extensions.runtime_artifacts import VerifiedRuntime
 from skulk.extensions.runtime_attachment import HostSettings, ServiceConnection
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
 from skulk.extensions.runtime_install import finish_runtime_work
+from skulk.extensions.runtime_integrity import owned_generation
 from skulk.extensions.runtime_selection import RuntimeSelector
 from skulk.utils.local_transport import connect, endpoint_directory
 
@@ -389,7 +390,7 @@ class NativeCalls:
         binding = self._binding(plugin_id)
         selector = RuntimeSelector(self.root / "installations" / binding.plugin_id)
         metadata = read_private(
-            selector.root / "generations" / binding.runtime_digest / "staged.json",
+            owned_generation(selector.root, binding.runtime_digest) / "staged.json",
             MAX_RUNTIME_METADATA_BYTES,
         )
         runtime = await self._inspect_metadata(binding, selector, metadata)
@@ -512,7 +513,7 @@ class NativeCalls:
             binding = self._binding(path.stem)
             selector = RuntimeSelector(self.root / "installations" / binding.plugin_id)
             metadata = read_private(
-                selector.root / "generations" / binding.runtime_digest / "staged.json",
+                owned_generation(selector.root, binding.runtime_digest) / "staged.json",
                 MAX_RUNTIME_METADATA_BYTES,
             )
             runtime = await self._inspect_metadata(binding, selector, metadata)

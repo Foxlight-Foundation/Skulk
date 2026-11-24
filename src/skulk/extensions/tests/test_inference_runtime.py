@@ -30,11 +30,11 @@ from skulk.extensions.runtime_artifacts import (
     verify_runtime,
 )
 from skulk.extensions.runtime_files import (
-    private_directory,
     read_private,
     write_private,
 )
 from skulk.extensions.runtime_install import inference_reader_probe
+from skulk.extensions.runtime_integrity import claim_generation, generation_directory
 from skulk.extensions.runtime_selection import (
     RuntimeSelection,
     RuntimeSelector,
@@ -343,8 +343,8 @@ async def test_inference_update_preview_preserves_retained_identity_and_state(
         skulk_version=host.skulk_version,
         skulk_build_sha256=host.skulk_build_sha256,
     )
-    generation = selector.root / "generations" / previous.digest
-    private_directory(generation)
+    generation = generation_directory(selector.root, previous.digest)
+    claim_generation(generation, previous.digest)
     write_private(generation / "staged.json", metadata)
     before = selected.model_dump_json().encode()
     write_private(selector.root / "runtime-selection.json", before)

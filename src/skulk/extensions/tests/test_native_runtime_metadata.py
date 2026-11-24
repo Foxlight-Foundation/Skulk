@@ -29,7 +29,8 @@ from skulk.extensions.runtime_artifacts import (
 )
 from skulk.extensions.runtime_catalog import CatalogSourceUpdate
 from skulk.extensions.runtime_download import RuntimeDownloads
-from skulk.extensions.runtime_files import private_directory, write_private
+from skulk.extensions.runtime_files import write_private
+from skulk.extensions.runtime_integrity import claim_generation, generation_directory
 from skulk.extensions.runtime_manager import (
     CatalogInstall,
     CatalogInstallation,
@@ -277,8 +278,8 @@ async def test_native_installed_metadata_round_trips_without_startup(
             skulk_version=host.skulk_version,
             skulk_build_sha256=host.skulk_build_sha256,
         )
-        generation = controller.root / "generations" / runtime.digest
-        private_directory(generation)
+        generation = generation_directory(controller.root, runtime.digest)
+        claim_generation(generation, runtime.digest)
         write_private(generation / "staged.json", metadata)
         write_private(
             controller.root / "runtime-selection.json",
@@ -384,8 +385,8 @@ async def test_normal_selection_refuses_implicit_profile_migration(
         skulk_version=legacy_host.skulk_version,
         skulk_build_sha256=legacy_host.skulk_build_sha256,
     )
-    generation = selector.root / "generations" / legacy.digest
-    private_directory(generation)
+    generation = generation_directory(selector.root, legacy.digest)
+    claim_generation(generation, legacy.digest)
     write_private(generation / "staged.json", legacy_metadata)
     before = selected.model_dump_json().encode()
     write_private(selector.root / "runtime-selection.json", before)

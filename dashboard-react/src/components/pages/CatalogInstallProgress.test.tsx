@@ -94,6 +94,21 @@ it('says a stopped install can be retried from here or from Installed, and keeps
   expect(retries).toBe(1);
 });
 
+it('says what to change when the host found the install path too long for Windows, and still offers the retry', async () => {
+  installRead = () => json({ operation: { request: { operation_id: journey.installOperationId, runtime_digest: journey.runtimeDigest, expected_source_revision: 7 }, review: {}, state: 'recovery_required', downloaded_bytes: 12_000_000, error_code: 'runtime_path_too_long', path_excess: 9 } });
+  await render();
+  await contains("The download finished, but this plugin's files need a path 9 characters longer than Windows allows on this machine. Switch on long paths in Windows, or keep Skulk's files in a folder with a shorter path, then choose Retry. Its card under Installed offers the same Retry.");
+  expect(readJourneys()).toEqual([{ ...journey, interrupted: true }]);
+  const retry = [...host.querySelectorAll('button')].find((item) => item.textContent === 'Retry');
+  expect(retry).toBeDefined();
+});
+
+it('treats a path refusal the host gave no count for as a failed preparation', async () => {
+  installRead = () => json({ operation: { request: { operation_id: journey.installOperationId, runtime_digest: journey.runtimeDigest, expected_source_revision: 7 }, review: {}, state: 'recovery_required', downloaded_bytes: 12_000_000, error_code: 'runtime_path_too_long' } });
+  await render();
+  await contains('The download finished, but preparing its runtime failed.');
+});
+
 it('names a stopped download as a download, not a failed preparation', async () => {
   installRead = () => json({ operation: { request: { operation_id: journey.installOperationId, runtime_digest: journey.runtimeDigest, expected_source_revision: 7 }, review: {}, state: 'recovery_required', downloaded_bytes: 0, error_code: 'download_failed' } });
   await render();

@@ -25,6 +25,20 @@ This project records release notes here and mirrors public-facing notes in
   owner candidate; issued native contract and signature bytes are unchanged.
 - Advance the coordinated networking bindings to 0.2.11 so upgrades include
   both the accepted discovery fixes and interpreter-exit cleanup.
+### Two nodes on one machine
+
+- A node started with `SKULK_HOME` now stages models in a `staging` folder inside that home
+  when its settings name no staging folder. Before, it staged into `~/.skulk/staging` whatever
+  `SKULK_HOME` said, so a second node on a machine shared the first node's staged models: a
+  fresh second node's own model store imported every one of them, and either node's cleanup
+  could delete the other's copies. Nothing changes for a node started without `SKULK_HOME`
+  (its default stays `~/.skulk/staging` on macOS and Linux), and a `node_cache_path` written
+  in `skulk.yaml` is used as written.
+- A store host no longer writes a staging folder nobody chose into every node's `skulk.yaml`
+  when it shares its settings, so each node keeps its own default. A node override that names
+  only some staging settings is now shared as written and goes on inheriting the rest from
+  the base section; before, one broadcast filled in every default and the override stopped
+  inheriting. A staging folder a person wrote is still shared as written.
 
 ### Windows management node
 
@@ -207,6 +221,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Security
 
+- A logged error no longer includes the values of local variables. Skulk's
+  logging library prints, under each line of an error traceback, the values
+  of the variables on that line unless told not to, and Skulk had not told
+  it. A request that failed (for example a prompt longer than the model's
+  context window) therefore wrote the start of the request's text into the
+  node's log file and its console output, which a service install captures to
+  a file. Every log destination now withholds those values: the console, the
+  log file, the JSON output used for log shipping, and the output of model
+  runner processes and of command-line tools. Tracebacks still show the
+  error, its message and where it happened. Log files written before this
+  release are not rewritten, so remove old ones if that matters to you.
 - Updated primp, the HTTP client behind web search, from 1.2.2 to 1.3.1.
   1.2.2 was withdrawn by its maintainer: two web searches that were the first
   in a process and started together could freeze the whole node, because the

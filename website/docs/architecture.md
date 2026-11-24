@@ -2289,6 +2289,11 @@ Traces are intended for targeted debugging: turn on, reproduce, inspect, turn of
 
 ### Centralized logging
 
+Skulk disables Loguru variable-value annotations in exception tracebacks before
+its modules import the logger. Node sinks also set `diagnose=False` explicitly.
+This applies to command-line tools, plugin services and spawned interpreters as
+well as node logging; exception text and stack locations remain available.
+
 Each node can emit structured JSON on stdout alongside the human-readable stderr output. A local Vector agent reads stdout and ships logs to VictoriaLogs. Grafana queries VictoriaLogs for cluster-wide log search. Configuration:
 
 - `src/skulk/shared/logging.py`: loguru setup with the JSON stdout sink
@@ -2934,6 +2939,28 @@ retains the older source/service-copy and frozen desktop layouts. The repository
 root `resources` path is a compatibility symlink to the package directory.
 `service_bootstrap.py` uses only the standard library with Python site initialization
 disabled to verify the selected complete file seal before starting the fixed manager.
+How it starts the manager depends on the platform. On macOS and Linux the
+bootstrap replaces itself with the manager, so the process the OS service started
+is the manager. Windows cannot replace a running process, so there the bootstrap
+stays: it joins a Job Object that ends its processes when the bootstrap's own
+handle closes, starts the manager as a child with the same fixed environment,
+and waits. A console request to stop (Ctrl-C or Ctrl-Break) reaches both; the
+bootstrap ignores it and the manager shuts down in order, after which the
+bootstrap exits with the manager's exit code. If the bootstrap is ended outright,
+the manager and everything the manager started end with it, so nothing is left
+serving that the OS service does not know about.
+The seal follows the platform too. A Windows environment contains no link to its
+base interpreter, so the Windows check refuses every reparse point, requires each
+file and folder to belong to the account and to grant access to nobody but the
+account and SYSTEM, requires `home` in `pyvenv.cfg` to be the base interpreter's
+folder, and records the base's library beside its program. Staging there builds
+the environment in a child run on the base interpreter's real path, and refuses
+in advance a copy whose deepest file would not fit below the service root on a
+machine without long paths, saying how many characters too long it is.
+Two parts of this do not run on Windows yet. Staging a real copy starts by
+measuring the host, and Skulk names an artifact family for macOS and Linux only;
+naming one for Windows is a decision for the release schema and the plugin owner
+runtime. And nothing registers the service with Windows.
 Core-runtime activation requires a stopped manager and leaves plugin state intact.
 Explicit local setup with a changed source can supersede an interrupted operation;
 its journal and logical profile remain retained while a new copy is staged before

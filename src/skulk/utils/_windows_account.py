@@ -27,6 +27,7 @@ _MAXIMUM_SID_BYTES = 68
 
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+_userenv = ctypes.WinDLL("userenv", use_last_error=True)
 
 _kernel32.GetCurrentProcess.restype = wt.HANDLE
 _kernel32.GetCurrentProcess.argtypes = ()
@@ -59,6 +60,12 @@ _advapi32.CheckTokenMembership.argtypes = (
     wt.LPVOID,
     ctypes.POINTER(wt.BOOL),
 )
+_userenv.GetUserProfileDirectoryW.restype = wt.BOOL
+_userenv.GetUserProfileDirectoryW.argtypes = (
+    wt.HANDLE,
+    wt.LPWSTR,
+    ctypes.POINTER(wt.DWORD),
+)
 _advapi32.ConvertSidToStringSidW.restype = wt.BOOL
 _advapi32.ConvertSidToStringSidW.argtypes = (wt.LPVOID, ctypes.POINTER(wt.LPWSTR))
 
@@ -73,6 +80,7 @@ _sid_to_text: Callable[..., int] = _advapi32.ConvertSidToStringSidW
 _create_well_known_sid: Callable[..., int] = _advapi32.CreateWellKnownSid
 _check_token_membership: Callable[..., int] = _advapi32.CheckTokenMembership
 _duplicate_token: Callable[..., int] = _advapi32.DuplicateToken
+_profile_directory: Callable[..., int] = _userenv.GetUserProfileDirectoryW
 
 
 def _last_error(action: str) -> OSError:
@@ -135,6 +143,30 @@ def this_account() -> str:
     if _account is None:
         _account = process_account(_get_current_process())
     return _account
+
+
+def profile_directory() -> str:
+    """The folder Windows keeps for this process's account: its home.
+
+    Asked of Windows, not read from ``USERPROFILE``: the variable says
+    whatever the program that started this one put there, and a child started
+    with a fixed environment has none. This is what the account database
+    answers on POSIX.
+    """
+    token = wt.HANDLE()
+    if not _open_process_token(
+        _get_current_process(), _TOKEN_QUERY, ctypes.byref(token)
+    ):
+        raise _last_error("OpenProcessToken")
+    try:
+        size = wt.DWORD()
+        _profile_directory(token, None, ctypes.byref(size))
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not size.value or not _profile_directory(token, buffer, ctypes.byref(size)):
+            raise _last_error("GetUserProfileDirectory")
+        return ctypes.wstring_at(buffer)
+    finally:
+        _close_handle(token)
 
 
 def this_process_is_administrator() -> bool:

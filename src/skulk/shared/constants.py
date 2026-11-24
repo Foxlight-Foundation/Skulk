@@ -94,6 +94,13 @@ def _get_xdg_dir(env_var: str, fallback: str) -> Path:
     return Path.home() / fallback / "skulk"
 
 
+SKULK_HOME_IS_SET = bool(_SKULK_HOME_ENV and _SKULK_HOME_ENV.strip())
+"""Whether ``SKULK_HOME`` names a folder this node's data was moved to.
+
+A node started that way is usually a second node on a machine that already
+runs one, so a default that names a fixed place outside its home would be
+shared between the two."""
+
 SKULK_CONFIG_HOME = _get_xdg_dir("XDG_CONFIG_HOME", ".config")
 SKULK_DATA_HOME = _get_xdg_dir("XDG_DATA_HOME", ".local/share")
 SKULK_CACHE_HOME = _get_xdg_dir("XDG_CACHE_HOME", ".cache")
