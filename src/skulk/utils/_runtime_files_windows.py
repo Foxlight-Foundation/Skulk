@@ -62,7 +62,20 @@ _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _READ_CONTROL = 0x00020000
 _FILE_READ_ATTRIBUTES = 0x0080
 _SE_FILE_OBJECT = 1
+_OWNER_SECURITY_INFORMATION = 0x00000001
 _DACL_SECURITY_INFORMATION = 0x00000004
+_ADMINISTRATORS_GROUP = "S-1-5-32-544"
+# The rights that let an account change what a file holds, or who may.
+_CHANGING_RIGHTS = (
+    0x00000002  # FILE_WRITE_DATA
+    | 0x00000004  # FILE_APPEND_DATA
+    | 0x00000010  # FILE_WRITE_EA
+    | 0x00010000  # DELETE
+    | 0x00040000  # WRITE_DAC
+    | 0x00080000  # WRITE_OWNER
+    | 0x10000000  # GENERIC_ALL
+    | 0x40000000  # GENERIC_WRITE
+)
 _ACL_SIZE_INFORMATION = 2
 _ACCESS_ALLOWED_ACE = 0
 _ACCESS_DENIED_ACE = 1
@@ -267,6 +280,83 @@ def examine(entry: Path | int) -> _Custody:
         return _custody(descriptor)
     finally:
         os.close(descriptor)
+
+
+def no_other_account_can_change(path: Path) -> bool:
+    """Whether only this account, SYSTEM or Administrators can change ``path``.
+
+    The entry is examined as itself. Its owner must be one of the three,
+    because an owner can always rewrite the access list, and so must every
+    account the list grants a right that changes the file or its access. A
+    grant that only reads is anyone's to have. A volume without access lists
+    keeps nobody out.
+    """
+    handle = _create_file(
+        str(path),
+        _READ_CONTROL | _FILE_READ_ATTRIBUTES,
+        _FILE_SHARE_ALL,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
+    if not handle or handle == _INVALID_HANDLE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        owner = ctypes.c_void_p()
+        access_list = ctypes.c_void_p()
+        security = ctypes.c_void_p()
+        if _get_security_info(
+            handle,
+            _SE_FILE_OBJECT,
+            _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(access_list),
+            None,
+            ctypes.byref(security),
+        ):
+            return False
+        try:
+            trusted = {
+                _windows_account.this_account(),
+                _windows_account.SYSTEM_ACCOUNT,
+                _ADMINISTRATORS_GROUP,
+            }
+            if (
+                owner.value is None
+                or _windows_account.identifier_text(owner.value) not in trusted
+                or access_list.value is None
+            ):
+                return False
+            size = ctypes.create_string_buffer(12)
+            if not _get_acl_information(access_list, size, 12, _ACL_SIZE_INFORMATION):
+                return False
+            for index in range(int.from_bytes(size.raw[:4], sys.byteorder)):
+                entry = ctypes.c_void_p()
+                if (
+                    not _get_ace(access_list, index, ctypes.byref(entry))
+                    or not entry.value
+                ):
+                    return False
+                kind = ctypes.c_ubyte.from_address(entry.value).value
+                if kind == _ACCESS_DENIED_ACE:
+                    continue
+                if kind != _ACCESS_ALLOWED_ACE:
+                    return False
+                # A grant is a four-byte header, a four-byte mask of rights,
+                # then the identifier of the account it names.
+                rights = ctypes.c_uint32.from_address(entry.value + 4).value
+                if (
+                    rights & _CHANGING_RIGHTS
+                    and _windows_account.identifier_text(entry.value + 8) not in trusted
+                ):
+                    return False
+            return True
+        finally:
+            _local_free(security)
+    finally:
+        _close_handle(handle)
 
 
 def open_unfollowed(path: Path) -> int:
