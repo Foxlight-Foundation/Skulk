@@ -25,6 +25,7 @@ def native_contract_data_files() -> list[tuple[str, str]]:
         root / "native-inference-stream-cohort.json",
         root / "native-author-cohort.json",
         root / "native-discovery-cohort.json",
+        root / "native-stable-cohort.json",
     )
     if not all(cohort.is_file() for cohort in cohorts):
         raise FileNotFoundError("native contract cohort resource is missing")

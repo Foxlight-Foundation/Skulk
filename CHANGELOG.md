@@ -11,6 +11,9 @@ This project records release notes here and mirrors public-facing notes in
 
 ### SDK 1 candidate composition
 
+- Admit the stable native kernel `0.7.0` with its exact published receipt and
+  discovery profile. Preserve every earlier signed cohort and include the new
+  receipt in frozen packaging. Requires the matching SDK1 and owner runtime.
 - Add protected invocation-scoped directory queries under the original caller's
   narrowed permissions. Keep observation separate from execution authority,
   recheck policy at delivery, and preserve cancellation and independent metadata
