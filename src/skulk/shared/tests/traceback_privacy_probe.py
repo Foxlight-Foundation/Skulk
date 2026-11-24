@@ -96,6 +96,11 @@ def _run_node(
     request_text: str, log_file: Path, verbosity: int, json_sink: JsonSinkRoute
 ) -> None:
     """Configure logging as a node does, then fail in-process and in a child."""
+    # The node forces this start method before it configures logging, so its
+    # queued sinks and its runner children share one context. Where the
+    # platform default is fork, a queued sink built in that context cannot be
+    # handed to a spawned child.
+    multiprocessing.set_start_method("spawn", force=True)
     logger_setup(
         log_file,
         verbosity=verbosity,
@@ -105,8 +110,7 @@ def _run_node(
         # The cluster-synced logging config adds the sink through this call.
         set_structured_stdout(True)
     log_failed_generation(loguru.logger, request_text, NODE_LABEL)
-    # Spawn matches the node, which forces that start method at startup.
-    child = multiprocessing.get_context("spawn").Process(
+    child = multiprocessing.Process(
         target=runner_child, args=(loguru.logger, request_text)
     )
     child.start()

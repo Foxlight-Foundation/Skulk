@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -32,6 +33,7 @@ _PROBE_CALL = "from skulk.shared.tests.traceback_privacy_probe import main\nmain
 # Importing loguru before any Skulk module fixes its import-time defaults from
 # the environment alone, the order an embedding host or a test runner produces.
 _LOGURU_FIRST = "import loguru\n"
+_ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _request_text() -> str:
@@ -194,7 +196,11 @@ def test_unconfigured_process_withholds_local_variable_values(
     )
 
     assert result.returncode == 0, result.stderr
-    _assert_failure_reported(result.stderr, probe.DEFAULT_LABEL, "default handler")
-    assert probe.REQUEST_FRAME_SOURCE in result.stderr
-    assert request_text not in result.stderr
-    assert request_text not in result.stdout
+    # Loguru decides on its own whether to color this handler (it does under
+    # some continuous-integration services even when the stream is a pipe), and
+    # coloring splits a source line into separately styled tokens.
+    plain_stderr = _ANSI_STYLE.sub("", result.stderr)
+    _assert_failure_reported(plain_stderr, probe.DEFAULT_LABEL, "default handler")
+    assert probe.REQUEST_FRAME_SOURCE in plain_stderr
+    for text in (result.stderr, plain_stderr, result.stdout):
+        assert request_text not in text
