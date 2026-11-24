@@ -323,6 +323,10 @@ There are two important paths:
 
 For worker nodes, `node_cache_path` is usually a fast local path such as `~/.skulk/staging`.
 
+When no `node_cache_path` is set, a node stages under `~/.skulk/staging`. The one exception is a
+node started with `SKULK_HOME`, which stages in a `staging` folder inside that home, so a second
+node on the same machine never shares, imports or evicts the first node's staged models.
+
 For the store host, you often point `node_cache_path` at the same directory as `store_path` so the store host can load directly from the shared volume without making another copy.
 
 ### Staging on the store host uses hardlinks
