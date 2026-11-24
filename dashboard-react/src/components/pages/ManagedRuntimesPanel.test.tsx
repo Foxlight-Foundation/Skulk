@@ -351,6 +351,25 @@ it('names a stopped first install by its catalog title and offers its retry on t
   expect(posts).toEqual([]);
 });
 
+it('says what to change when the host found the install path too long for Windows', async () => {
+  strayInstall();
+  installOperation = { ...installOperation!, error_code: 'runtime_path_too_long', path_excess: 9 };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Install needs a retry');
+  await contains("Release 49 downloaded, but its files need a path 9 characters longer than Windows allows on this machine. Switch on long paths in Windows, or keep Skulk's files in a folder with a shorter path, then retry.");
+  expect(host.textContent).not.toContain('preparing its runtime failed');
+});
+
+it('counts one character as one, and falls back to the general failure when the host gave no count', async () => {
+  strayInstall();
+  installOperation = { ...installOperation!, error_code: 'runtime_path_too_long', path_excess: 1 };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('need a path 1 character longer than Windows allows');
+  installOperation = { ...installOperation!, error_code: 'runtime_path_too_long', path_excess: null };
+  await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });
+  await contains('Release 49 downloaded, but preparing its runtime failed. Retry prepares it again and finishes the install.');
+});
+
 it('names a stopped first install by its bundle id when this browser never saw its catalog title', async () => {
   strayInstall();
   await act(async () => { store.dispatch(apiSlice.util.invalidateTags(['Plugins'])); });

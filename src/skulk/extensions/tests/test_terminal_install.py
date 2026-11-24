@@ -1080,6 +1080,33 @@ async def test_download_failure_requires_explicit_same_operation_recovery(
         assert sum(isinstance(r, InstallSubmission) for r in fixture.requests) == 1
 
 
+async def test_a_path_found_too_long_after_the_download_is_named_in_the_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stopped install says what to change, when it stops and when it is read again."""
+    from skulk.extensions.runtime_integrity import path_refusal_sentence
+
+    def too_deep_only_with_the_wheels(
+        _generation: Path, _names: tuple[str, ...], wheels: tuple[bytes, ...] = ()
+    ) -> int:
+        return 9 if wheels else 0
+
+    async with journey(tmp_path, monkeypatch) as fixture:
+        monkeypatch.setattr(
+            "skulk.extensions.runtime_install.runtime_path_excess",
+            too_deep_only_with_the_wheels,
+        )
+        with pytest.raises(ValueError, match="explicit recovery"):
+            await fixture.terminal(fixture.fields("y", "y")).run()
+        assert fixture.output.count(path_refusal_sentence(9)) == 1
+        stopped = fixture.manager.downloads[fixture.identifier].current()
+        assert stopped is not None and stopped.path_excess == 9
+        # Reading the retained install later names it again before asking.
+        await fixture.terminal(iter(["n"])).run(fixture.identifier)
+        assert fixture.output.count(path_refusal_sentence(9)) == 2
+        assert fixture.manager.downloads[fixture.identifier].current() == stopped
+
+
 async def test_invalid_source_credential_and_unknown_identifier_are_not_disclosed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

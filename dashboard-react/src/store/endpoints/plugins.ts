@@ -186,6 +186,8 @@ export interface RuntimeInstallation {
   state: 'accepted' | 'downloading' | 'staging' | 'staged' | 'recovery_required';
   downloaded_bytes: number;
   error_code: string | null;
+  /** With `runtime_path_too_long` only: how many characters too long the runtime's deepest path would be on the host. */
+  path_excess?: number | null;
 }
 
 /** Address an operation already retained by the installed manager. */

@@ -43,6 +43,7 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 from skulk.extensions.runtime_install import RuntimeInstaller, finish_runtime_work
+from skulk.extensions.runtime_integrity import RuntimePathTooLongError
 from skulk.utils.runtime_files import open_private
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -322,11 +323,22 @@ class InstallOperation(BaseModel):
         default=0, ge=0, description="Verified downloaded artifact bytes."
     )
     error_code: (
-        Literal["download_failed", "installation_failed", "installation_interrupted"]
+        Literal[
+            "download_failed",
+            "installation_failed",
+            "installation_interrupted",
+            "runtime_path_too_long",
+        ]
         | None
     ) = Field(
         default=None,
         description="Sanitized local failure class; no raw network or installer output.",
+    )
+    path_excess: int | None = Field(
+        default=None,
+        ge=1,
+        le=32767,
+        description="With runtime_path_too_long only: how many characters too long the runtime's deepest path would be on this host.",
     )
 
     @model_validator(mode="after")
@@ -338,6 +350,10 @@ class InstallOperation(BaseModel):
             or self.downloaded_bytes > self.review.artifact_bytes
         ):
             raise ValueError("installation journal identity differs")
+        if (self.error_code == "runtime_path_too_long") != (
+            self.path_excess is not None
+        ):
+            raise ValueError("installation journal path excess differs")
         return self
 
 
@@ -1029,14 +1045,22 @@ class RuntimeDownloads:
             httpx.HTTPError,
             TimeoutError,
             asyncio.CancelledError,
-        ):
+        ) as error:
+            # Staging refuses a runtime too deep for this host by name; the
+            # retained operation carries that name and its count.
+            too_long = (
+                error.excess if isinstance(error, RuntimePathTooLongError) else None
+            )
             self._save(
                 operation.model_copy(
                     update={
                         "state": "recovery_required",
-                        "error_code": "installation_failed"
+                        "error_code": "runtime_path_too_long"
+                        if too_long is not None
+                        else "installation_failed"
                         if operation.state == "staging"
                         else "download_failed",
+                        "path_excess": too_long,
                     }
                 )
             )
@@ -1091,6 +1115,7 @@ class RuntimeDownloads:
                     "state": "accepted",
                     "downloaded_bytes": 0,
                     "error_code": None,
+                    "path_excess": None,
                 }
             )
             self._save(operation)

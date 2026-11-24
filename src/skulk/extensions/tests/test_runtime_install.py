@@ -461,7 +461,13 @@ async def test_a_runtime_too_deep_for_the_machine_is_refused_before_it_is_built(
         await installer.stage(metadata, source, operation_id="1" * 32)
     assert refused.value.excess == expected
     assert not generation.exists()
-    assert installer.operation("1" * 32).state == "recovery_required"
+    # The retained operation names the refusal and its count.
+    retained = installer.operation("1" * 32)
+    assert retained.state == "recovery_required"
+    assert retained.error_code == "runtime_path_too_long"
+    assert retained.path_excess == expected
+    # Reading it again without recovery changes neither.
+    assert await installer.stage(metadata, source, operation_id="1" * 32) == retained
     # The refusal held nothing: the same operation installs once paths fit.
     monkeypatch.setattr(
         "skulk.extensions.runtime_integrity._paths_are_limited", lambda: False
@@ -470,6 +476,46 @@ async def test_a_runtime_too_deep_for_the_machine_is_refused_before_it_is_built(
         metadata, source, operation_id="1" * 32, recover=True
     )
     assert retried.state == "staged"
+    assert retried.error_code is None and retried.path_excess is None
+
+
+def test_a_staging_record_carries_a_path_excess_only_for_the_path_refusal() -> None:
+    """Records written before the count existed still read; a stray count does not."""
+    from skulk.extensions.runtime_install import RuntimeOperation
+
+    identity = {"operation_id": "1" * 32, "runtime_digest": "a" * 64}
+    earlier = RuntimeOperation.model_validate_json(
+        json.dumps(
+            {
+                **identity,
+                "state": "recovery_required",
+                "error_code": "installation_failed",
+            }
+        )
+    )
+    assert earlier.path_excess is None
+    named = RuntimeOperation.model_validate_json(
+        json.dumps(
+            {
+                **identity,
+                "state": "recovery_required",
+                "error_code": "runtime_path_too_long",
+                "path_excess": 9,
+            }
+        )
+    )
+    assert named.path_excess == 9
+    for stray in (
+        {"error_code": "installation_failed", "path_excess": 9},
+        {"error_code": "runtime_path_too_long"},
+        {"error_code": "runtime_path_too_long", "path_excess": 0},
+        {"error_code": "runtime_path_too_long", "path_excess": 32768},
+        {"error_code": None, "path_excess": 9},
+    ):
+        with pytest.raises(ValueError):
+            RuntimeOperation.model_validate_json(
+                json.dumps({**identity, "state": "recovery_required", **stray})
+            )
 
 
 @pytest.mark.skipif(

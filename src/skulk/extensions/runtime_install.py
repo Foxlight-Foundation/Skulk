@@ -11,10 +11,17 @@ import sys
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from pathlib import Path
-from typing import Literal, cast, final
+from typing import Literal, Self, cast, final
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    model_validator,
+)
 
 from skulk.extensions.managed_limits import MAX_RUNTIME_METADATA_BYTES
 from skulk.extensions.native_inference_contracts import (
@@ -198,12 +205,30 @@ class RuntimeOperation(BaseModel):
     state: Literal["staging", "staged", "recovery_required"] = Field(
         description="Durable progress; interrupted work is never replayed implicitly."
     )
-    error_code: Literal["installation_interrupted", "installation_failed"] | None = (
-        Field(
-            default=None,
-            description="Sanitized failure class; raw output stays host-local.",
-        )
+    error_code: (
+        Literal[
+            "installation_interrupted", "installation_failed", "runtime_path_too_long"
+        ]
+        | None
+    ) = Field(
+        default=None,
+        description="Sanitized failure class; raw output stays host-local.",
     )
+    path_excess: int | None = Field(
+        default=None,
+        ge=1,
+        le=32767,
+        description="With runtime_path_too_long only: how many characters too long the runtime's deepest path would be.",
+    )
+
+    @model_validator(mode="after")
+    def excess_names_one_failure(self) -> Self:
+        """The count belongs to the path refusal and to nothing else."""
+        if (self.error_code == "runtime_path_too_long") != (
+            self.path_excess is not None
+        ):
+            raise ValueError("runtime operation path excess differs")
+        return self
 
 
 async def finish_runtime_work[Value](task: asyncio.Task[Value]) -> Value:
@@ -722,11 +747,20 @@ class RuntimeInstaller:
                     and self.operation(operation.operation_id).state == "staged"
                 )
             ):
+                # A path that is too long is named, with its count, so that
+                # every surface can say what to change. Anything else stays
+                # the general failure.
+                excess = (
+                    error.excess if isinstance(error, RuntimePathTooLongError) else None
+                )
                 self._save(
                     operation.model_copy(
                         update={
                             "state": "recovery_required",
-                            "error_code": "installation_failed",
+                            "error_code": "installation_failed"
+                            if excess is None
+                            else "runtime_path_too_long",
+                            "path_excess": excess,
                         }
                     )
                 )

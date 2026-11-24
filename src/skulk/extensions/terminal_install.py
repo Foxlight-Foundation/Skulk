@@ -119,6 +119,11 @@ class TerminalInstaller:
             raise ValueError("manager request incomplete; inspect retained status")
         return _OBJECT.validate_python(response["result"], strict=True)
 
+    def _name_path_refusal(self, operation: InstallOperation) -> None:
+        """Say what to change when an install stopped because a path is too long."""
+        if operation.path_excess is not None:
+            self.output(path_refusal_sentence(operation.path_excess))
+
     def _confirm(self, question: str) -> bool:
         return self.prompt(question + " [y/N]: ").strip().lower() == "y"
 
@@ -307,6 +312,7 @@ class TerminalInstaller:
         elif operation.state == "recovery_required":
             self._review(operation.review)
             self.output("Interrupted installation: " + operation.request.operation_id)
+            self._name_path_refusal(operation)
             if not self._confirm(
                 "Explicitly recover this retained local installation?"
             ):
@@ -333,6 +339,7 @@ class TerminalInstaller:
             if operation.state == "staged":
                 return operation
             if operation.state == "recovery_required":
+                self._name_path_refusal(operation)
                 raise ValueError("installation needs explicit recovery")
             await self.wait(1)
             current = await self._install_status(identifier)

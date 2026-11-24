@@ -194,9 +194,13 @@ function RuntimeControls({ runtime, installations, unavailable, nodes, details, 
   // stray installation instead of retrying it.
   const neverInstalled = retryNeeded && runtime.selected_digest === null && !runtime.enabled;
   const removable = !!runtime.uninstalled || neverInstalled;
+  const prepareFailed = retryNeeded ? t('plugins.retryPrepareFailed', 'Release {sequence} downloaded, but preparing its runtime failed. Retry prepares it again and finishes the install.', { sequence: installOperation.review.sequence }) : '';
+  // The host names a path too long for Windows with a count; without the count it is the general failure.
+  const pathExcess = retryNeeded ? installOperation.path_excess ?? null : null;
   const retryReason = retryNeeded ? ({
     download_failed: t('plugins.retryDownloadFailed', 'Installing release {sequence} stopped while it downloaded. Retry downloads it again and finishes the install.', { sequence: installOperation.review.sequence }),
-    installation_failed: t('plugins.retryPrepareFailed', 'Release {sequence} downloaded, but preparing its runtime failed. Retry prepares it again and finishes the install.', { sequence: installOperation.review.sequence }),
+    installation_failed: prepareFailed,
+    runtime_path_too_long: pathExcess === null ? prepareFailed : t('plugins.retryPathTooLong', "Release {sequence} downloaded, but its files need a path {excess} character{plural} longer than Windows allows on this machine. Switch on long paths in Windows, or keep Skulk's files in a folder with a shorter path, then retry.", { sequence: installOperation.review.sequence, excess: pathExcess, plural: pathExcess === 1 ? '' : 's' }),
   } as Record<string, string>)[installOperation.error_code ?? ''] ?? t('plugins.retryInterrupted', 'Installing release {sequence} was interrupted before it finished. Retry picks it up and finishes the install.', { sequence: installOperation.review.sequence }) : null;
   const failure = runtime.uninstalled || !runtime.enabled ? null : recordedServiceFailure(runtime);
   const failureReason = failure === null ? null : ({
