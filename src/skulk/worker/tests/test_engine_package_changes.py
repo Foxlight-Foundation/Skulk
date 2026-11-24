@@ -13,6 +13,7 @@ import pytest
 
 import skulk.engines.actions as actions
 import skulk.facts as facts
+from skulk.engines.load_results import EngineLoadResults, LoadObservation
 from skulk.provisioning.engine_packages import EnginePackageRefusedError
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.engine_packages import NodeEnginePackage
@@ -44,7 +45,8 @@ RESOURCES = NodeResources(
 
 def _runner(tag: str | None, build: str | None) -> object:
     return SimpleNamespace(
-        shard_metadata=SimpleNamespace(resolved_backend=tag, resolved_engine_build=build)
+        shard_metadata=SimpleNamespace(resolved_backend=tag, resolved_engine_build=build),
+        load_observation=None,
     )
 
 
@@ -219,3 +221,39 @@ async def test_a_request_past_its_deadline_changes_nothing(
 
     assert called == []
     worker.event_sender.send.assert_not_awaited()
+
+
+def _loaded_runner(at_unix_ms: int) -> object:
+    return SimpleNamespace(
+        shard_metadata=SimpleNamespace(
+            model_card=SimpleNamespace(model_id="org/model"),
+            resolved_backend="tensorfold-rocm",
+            resolved_engine_build=BUILD,
+        ),
+        load_observation=LoadObservation("loaded", None, at_unix_ms),
+    )
+
+
+def test_a_load_that_ended_is_new_once_and_then_already_reported() -> None:
+    """The planning loop asks every tick; only a new result is worth a report."""
+    worker = _worker(_loaded_runner(1000))
+    worker._engine_load_results = EngineLoadResults()
+
+    assert worker._note_engine_package_loads() is True
+    assert worker._note_engine_package_loads() is False
+
+    worker.runners = _runners(_loaded_runner(2000), _runner("llama_server-vulkan", None))
+    assert worker._note_engine_package_loads() is True
+    assert [
+        result.at_unix_ms
+        for result in worker._engine_load_results.for_tag("tensorfold-rocm")
+    ] == [2000]
+
+
+async def test_a_load_report_that_cannot_be_sent_never_reaches_the_planning_loop() -> None:
+    worker = _worker()
+    worker._publish_fresh_node_resources = AsyncMock(side_effect=OSError("no route"))
+
+    await worker._report_engine_package_loads()
+
+    worker._publish_fresh_node_resources.assert_awaited_once()

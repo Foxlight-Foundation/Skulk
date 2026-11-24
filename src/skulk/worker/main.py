@@ -689,8 +689,8 @@ def engine_package_load_results(
         tag, build = shard.resolved_backend, shard.resolved_engine_build
         if (
             observed is None
-            or tag is None
-            or build is None
+            or not isinstance(tag, str)
+            or not isinstance(build, str)
             or package_engine_of(tag) is None
             or len(build) != 64
             or not set(build) <= set("0123456789abcdef")
@@ -1655,10 +1655,30 @@ class Worker:
         self._engine_load_results: EngineLoadResults = PROCESS_ENGINE_LOAD_RESULTS
         self._stopped: anyio.Event = anyio.Event()
 
-    def _note_engine_package_loads(self) -> None:
-        """Record how the engine package loads this worker can see ended."""
+    def _note_engine_package_loads(self) -> bool:
+        """Record how the engine package loads this worker can see ended.
+
+        Returns:
+            Whether a load ended that this node has not reported yet.
+        """
+        changed = False
         for tag, result in engine_package_load_results(self.runners):
-            self._engine_load_results.record(tag, result)
+            changed = self._engine_load_results.record(tag, result) or changed
+        return changed
+
+    async def _report_engine_package_loads(self) -> None:
+        """Advertise this node's resources after an engine package load ended.
+
+        The report is a courtesy to a person reading the engines page. A
+        failure to gather or send it must never reach the planning loop, and
+        the routine reading carries the same facts a little later.
+        """
+        try:
+            await self._publish_fresh_node_resources()
+        except Exception as error:  # noqa: BLE001 - optional report, never fatal
+            logger.warning(
+                f"Engine package load result not reported yet: {type(error).__name__}"
+            )
 
     async def _gather_node_resources(self) -> NodeResources:
         """Compose current facts with this worker's verified native observations.
@@ -4408,6 +4428,11 @@ class Worker:
             self._crash_breaker.retain(self.state.instances)
             self._refresh_in_use_markers()
             self._terminal_load_failures_handled.intersection_update(self.state.instances)
+            if self._note_engine_package_loads():
+                # A load just ended on an engine package. Say so now: the
+                # routine resource reading may be a minute away, and a person
+                # who just launched a model looks at the engines report next.
+                self._tg.start_soon(self._report_engine_package_loads)
             for finished_instance in [
                 instance_id
                 for instance_id in self._engine_install_tasks
@@ -4618,9 +4643,11 @@ class Worker:
                     await self._start_engine_install(task)
                 case Shutdown(runner_id=runner_id):
                     # A runner that failed its load is removed here, possibly
-                    # before the next resource reading would have seen it.
-                    self._note_engine_package_loads()
+                    # before the next reading would have seen it.
+                    removed_load_ended = self._note_engine_package_loads()
                     runner = self.runners.pop(runner_id)
+                    if removed_load_ended:
+                        self._tg.start_soon(self._report_engine_package_loads)
                     shard_for_eviction = runner.shard_metadata
                     # Only evict staged files if the instance has been deleted.
                     # If the instance still exists (e.g., runner crashed but will

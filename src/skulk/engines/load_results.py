@@ -92,7 +92,7 @@ class EngineLoadResults:
         self._lock = threading.Lock()
         self._results: dict[str, dict[str, NodeEngineLoadResult]] = {}
 
-    def record(self, backend_tag: str, result: NodeEngineLoadResult) -> None:
+    def record(self, backend_tag: str, result: NodeEngineLoadResult) -> bool:
         """Keep ``result`` unless a newer one for the same build is held.
 
         Recording the same observation again changes nothing, so a caller may
@@ -101,20 +101,27 @@ class EngineLoadResults:
         Args:
             backend_tag: The backend tag the load was stamped with.
             result: The load result, which names its build.
+
+        Returns:
+            Whether the record changed, so the caller knows there is
+            something new to report.
         """
         with self._lock:
             builds = self._results.get(backend_tag)
             if builds is None:
                 if len(self._results) >= MAX_NODE_ENGINE_PACKAGES:
-                    return
+                    return False
                 builds = self._results[backend_tag] = {}
             held = builds.get(result.build)
-            if held is not None and held.at_unix_ms > result.at_unix_ms:
-                return
+            if held == result or (
+                held is not None and held.at_unix_ms > result.at_unix_ms
+            ):
+                return False
             builds[result.build] = result
             while len(builds) > MAX_REPORTED_ENGINE_BUILDS:
                 oldest = min(builds.values(), key=lambda entry: entry.at_unix_ms)
                 del builds[oldest.build]
+            return True
 
     def for_tag(self, backend_tag: str) -> tuple[NodeEngineLoadResult, ...]:
         """Return the held results for one backend tag, newest first."""

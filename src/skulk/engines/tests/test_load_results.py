@@ -101,10 +101,11 @@ def test_a_change_that_does_not_end_a_load_is_no_observation(
 
 def test_the_record_keeps_the_newest_result_for_each_build() -> None:
     results = EngineLoadResults()
-    results.record(TAG, _result(at=2000, outcome="refused"))
-    results.record(TAG, _result(at=1000))  # an older reading arriving late
-    results.record(TAG, _result(BUILD_B, at=3000))
-    results.record(TAG, _result(BUILD_B, at=3000))  # the same reading again
+    # The answer says whether there is something new to report.
+    assert results.record(TAG, _result(at=2000, outcome="refused")) is True
+    assert results.record(TAG, _result(at=1000)) is False  # an older reading, late
+    assert results.record(TAG, _result(BUILD_B, at=3000)) is True
+    assert results.record(TAG, _result(BUILD_B, at=3000)) is False  # the same again
 
     assert results.for_tag(TAG) == (
         _result(BUILD_B, at=3000),
