@@ -414,6 +414,9 @@ the one that starts `base`; and it takes the base interpreter from
 `service_bootstrap.current_base()`. Never read `layout.unit` or compare
 `sys.executable` anywhere else. Registering the service with Windows is not
 built: there `owner_layout()` refuses by name, nothing reads as registered,
+the status reads `unsupported` from the start (`connected_scope()` asks
+`owner_layout()` before it reads the connection, so the Plugins page starts
+no setup on a host that can never finish one),
 and setup's own steps (its lock, its retained operation, selecting a staged
 copy) are checked on Windows against a stand-in registration.
 Windows limits how long a path may be unless the machine has long paths

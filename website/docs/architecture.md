@@ -3005,7 +3005,8 @@ unattended, through the standalone standard-library-only `service_registration.p
 helper; only that helper runs elevated, and the manager still runs as the existing
 nonroot account. Setup keeps whichever scope a configuration is already connected to. On Windows the
 service cannot be registered yet: setup refuses there by name, before it reads or writes anything, and the
-status route reports that sentence. Retained setup phase is
+status route answers `unsupported` with that sentence whether or not the node was ever set up, so the
+Plugins page starts no setup. Retained setup phase is
 separate from current runtime integrity and manager availability. HTTP lifecycle and dynamic installation registration use this manager; setup progress, runtime integrity and live management availability remain separate observations.
 
 `terminal_install.py` composes the manager's existing operations for the interactive

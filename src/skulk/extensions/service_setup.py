@@ -250,7 +250,16 @@ def connected_scope() -> ServiceScope | None:
 
     Setup keeps the scope a host already uses, so rerunning it repairs that
     service instead of creating a second one beside it.
+
+    Raises:
+        ValueError: On a host where the plugin service cannot be registered,
+            whether or not it was ever set up: such a host is unsupported
+            from the start, not merely without a service yet.
     """
+    scopes: tuple[ServiceScope, ...] = ("user", "system")
+    # Asked before the connection is read, so the refusal does not depend on
+    # a connection existing.
+    roots = {scope: owner_layout(scope).root for scope in scopes}
     try:
         connection = ServiceConnection.model_validate_json(
             read_private(SKULK_CONFIG_HOME / "managed-service" / "connection.json")
@@ -258,9 +267,8 @@ def connected_scope() -> ServiceScope | None:
     except FileNotFoundError:
         return None
     root = Path(connection.manager_root)
-    scopes: tuple[ServiceScope, ...] = ("user", "system")
     for scope in scopes:
-        if owner_layout(scope).root == root:
+        if roots[scope] == root:
             return scope
     return None
 

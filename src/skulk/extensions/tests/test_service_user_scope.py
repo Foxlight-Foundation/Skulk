@@ -295,12 +295,20 @@ def test_the_owners_layout_is_this_accounts(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the Windows refusal")
-def test_windows_has_no_registration_yet(tmp_path: Path) -> None:
+async def test_windows_has_no_registration_yet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Named as unsupported, and nothing reads as registered, until it is built."""
     with pytest.raises(ValueError, match="macOS and Linux only"):
         service_registration.owner_layout("user")
     layout = _user_layout(tmp_path, "macos-arm64")
     assert not service_registration.registered_for(layout, Path(sys.executable))
+
+    # A node that was never set up, with the real registration underneath.
+    _connect(monkeypatch, tmp_path, None)
+    status = await ServiceSetupRunner().status()
+    assert status.state == "unsupported"
+    assert status.error is not None and "macOS and Linux only" in status.error
 
 
 @pytest.mark.parametrize("authority", ["root", "borrowed"])
@@ -325,22 +333,36 @@ async def test_setup_refuses_an_account_that_is_not_the_plain_owner(
         await service_setup.setup_service("user")
 
 
+@pytest.mark.parametrize("connected", [False, True])
 async def test_a_host_that_cannot_register_reads_as_unsupported(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connected: bool
 ) -> None:
-    """The refusal reaches the operator in words, not as a failed setup."""
-    _connect(monkeypatch, tmp_path, tmp_path / "manager")
+    """In words, and from the start: not as a service that is merely absent.
+
+    A host that was never set up has no connection. Were it to read as
+    absent, the Plugins page would start a setup that can only fail and then
+    offer to retry it.
+    """
+    _connect(monkeypatch, tmp_path, tmp_path / "manager" if connected else None)
 
     def refuse(_scope: str) -> ServiceLayout:
         raise ValueError("plugin services are qualified on macOS and Linux only")
 
-    monkeypatch.setattr(service_setup, "owner_layout", refuse)
-    runner = ServiceSetupRunner()
-    runner.start()
+    async def setup(_scope: str | None, _report: object) -> SetupOperation:
+        raise AssertionError("an unsupported host sets up nothing")
 
-    status = await runner.status()
-    assert status.state == "unsupported"
-    assert status.error == "plugin services are qualified on macOS and Linux only"
+    monkeypatch.setattr(service_setup, "owner_layout", refuse)
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    runner = ServiceSetupRunner()
+
+    before = await runner.status()
+    runner.start()
+    await asyncio.sleep(0)
+    after = await runner.status()
+
+    for status in (before, after):
+        assert status.state == "unsupported"
+        assert status.error == "plugin services are qualified on macOS and Linux only"
 
 
 def _connect(
