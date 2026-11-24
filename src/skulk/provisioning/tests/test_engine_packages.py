@@ -105,6 +105,31 @@ def test_valid_manifest_verifies_and_names_its_build(key: Ed25519PrivateKey) -> 
     assert package.digest == hashlib.sha256(canonical_json(claims)).hexdigest()
 
 
+def test_a_requirement_may_name_the_members_a_node_unpacks(
+    key: Ed25519PrivateKey,
+) -> None:
+    """A manifest without the claim keeps its identity; one with it is a new build."""
+    plain = _claims()
+    named = _with(
+        plain,
+        ("external_requirements", 0, "unpack"),
+        {
+            "members": ["_rocm_sdk_core/lib/libamdhip64.so.7"],
+            "unpacked_size": 28_303_953,
+        },
+    )
+
+    whole = verify_engine_manifest(_sign(key, plain), _trust(key), now=NOW)
+    unpacked = verify_engine_manifest(_sign(key, named), _trust(key), now=NOW)
+
+    assert whole.claims.external_requirements[0].unpack is None
+    assert whole.digest == hashlib.sha256(canonical_json(plain)).hexdigest()
+    claim = unpacked.claims.external_requirements[0].unpack
+    assert claim is not None
+    assert claim.members == ("_rocm_sdk_core/lib/libamdhip64.so.7",)
+    assert unpacked.digest != whole.digest
+
+
 def test_build_identity_ignores_key_order_and_whitespace(
     key: Ed25519PrivateKey,
 ) -> None:
@@ -202,6 +227,49 @@ _SCHEMA_VIOLATIONS: list[tuple[ClaimPath, JsonValue]] = [
     (("control_protocol", "minimum"), 3),
     (("external_requirements", 0, "url"), "http://example.invalid/file.whl"),
     (("archive", "filename"), "engine.rar"),
+    # Members can be unpacked only out of a zip distribution, each named once,
+    # into a folder the requirement's own name can be.
+    (("external_requirements", 0, "unpack"), {"members": [], "unpacked_size": 1}),
+    (
+        ("external_requirements", 0, "unpack"),
+        {"members": ["lib/a.so", "lib/a.so"], "unpacked_size": 1},
+    ),
+    (
+        ("external_requirements", 0, "unpack"),
+        {"members": ["../lib/a.so"], "unpacked_size": 1},
+    ),
+    (
+        ("external_requirements", 0, "unpack"),
+        {"members": ["lib/a.so"], "unpacked_size": 0},
+    ),
+    (
+        ("external_requirements",),
+        [
+            {
+                "name": "vendor-runtime",
+                "version": "1.0",
+                "filename": "vendor_runtime-1.0.tar.gz",
+                "size": 10,
+                "sha256": "a" * 64,
+                "url": "https://vendor.example.invalid/vendor_runtime-1.0.tar.gz",
+                "unpack": {"members": ["lib/a.so"], "unpacked_size": 1},
+            }
+        ],
+    ),
+    (
+        ("external_requirements",),
+        [
+            {
+                "name": "..",
+                "version": "1.0",
+                "filename": "vendor_runtime-1.0-py3-none-any.whl",
+                "size": 10,
+                "sha256": "a" * 64,
+                "url": "https://vendor.example.invalid/vendor_runtime-1.0-py3-none-any.whl",
+                "unpack": {"members": ["lib/a.so"], "unpacked_size": 1},
+            }
+        ],
+    ),
     # A package carries an engine and an adapter. Weights stay in the model
     # store, so the schema has no place to put them.
     (("weights",), {"filename": "model.safetensors", "sha256": "f" * 64}),

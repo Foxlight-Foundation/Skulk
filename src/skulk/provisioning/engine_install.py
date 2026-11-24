@@ -2,7 +2,8 @@
 
 A verified manifest and the files it names become a **generation**: a
 directory named by the manifest's digest that holds the unpacked engine, the
-adapter, any pinned requirement files and the signed manifest itself.
+adapter, any pinned requirement files (kept whole, or only the members the
+manifest names) and the signed manifest itself.
 Generations of one engine sit side by side. A small pointer file names the
 one new placements use and the one kept for rollback; changing it touches no
 generation and needs no restart, and anything already running keeps the
@@ -43,6 +44,7 @@ from skulk.provisioning.engine_packages import (
     EnginePackageClaims,
     EnginePackageRefusal,
     EnginePackageRefusedError,
+    EngineRequirementUnpack,
     VerifiedEnginePackage,
     installed_engine_claims,
     verify_engine_file,
@@ -264,7 +266,8 @@ class InstalledEngine:
             build identity stamped on a placement.
         executable: The engine executable.
         adapter: The adapter program.
-        requirements: Pinned requirement files, by file name.
+        requirements: Each pinned requirement by its file name: the kept
+            file, or the folder its named members were unpacked into.
     """
 
     root: Path
@@ -428,20 +431,73 @@ def _unpack_zip(
                         "archive_corrupt",
                         "the archive unpacks to more than the manifest declared",
                     )
-                target.parent.mkdir(parents=True, exist_ok=True)
-                written = 0
-                with archive.open(member) as reader, target.open("wb") as writer:
-                    while block := reader.read(_BLOCK_BYTES):
-                        written += len(block)
-                        if written > member.file_size:
-                            raise _refuse(
-                                "archive_corrupt", "a zip member exceeds its stated size"
-                            )
-                        writer.write(block)
-                target.chmod(0o700 if mode & stat.S_IXUSR else 0o600)
+                _write_zip_member(archive, member, target)
     except (zipfile.BadZipFile, OSError) as error:
         raise _refuse(
             "archive_corrupt", f"the archive could not be unpacked ({type(error).__name__})"
+        ) from None
+
+
+def _write_zip_member(
+    archive: zipfile.ZipFile, member: zipfile.ZipInfo, target: Path
+) -> None:
+    """Write one regular zip member to ``target``, owner-only."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with archive.open(member) as reader, target.open("wb") as writer:
+        while block := reader.read(_BLOCK_BYTES):
+            written += len(block)
+            if written > member.file_size:
+                raise _refuse(
+                    "archive_corrupt", "a zip member exceeds its stated size"
+                )
+            writer.write(block)
+    target.chmod(0o700 if (member.external_attr >> 16) & stat.S_IXUSR else 0o600)
+
+
+def _unpack_members(
+    distribution: Path,
+    destination: Path,
+    unpack: EngineRequirementUnpack,
+    stop: threading.Event,
+) -> None:
+    """Unpack exactly the named members of a pinned zip distribution.
+
+    Nothing else in the distribution is written. A member that is missing,
+    is a directory or is a link refuses the whole installation, as does a
+    total above the size the manifest declared.
+    """
+    total = 0
+    try:
+        with zipfile.ZipFile(distribution) as archive:
+            for name in unpack.members:
+                if stop.is_set():
+                    raise _refuse("install_cancelled", "installation cancelled")
+                relative = _safe_member_path(name)
+                try:
+                    member = archive.getinfo(name)
+                except KeyError:
+                    raise _refuse(
+                        "archive_corrupt",
+                        f"{distribution.name} holds no member {name}",
+                    ) from None
+                if member.is_dir() or stat.S_ISLNK(member.external_attr >> 16):
+                    raise _refuse(
+                        "archive_corrupt",
+                        f"{name} in {distribution.name} is not a regular file",
+                    )
+                total += member.file_size
+                if total > unpack.unpacked_size:
+                    raise _refuse(
+                        "archive_corrupt",
+                        f"the members named in {distribution.name} unpack to "
+                        "more than the manifest declared",
+                    )
+                _write_zip_member(archive, member, destination.joinpath(*relative.parts))
+    except (zipfile.BadZipFile, OSError) as error:
+        raise _refuse(
+            "archive_corrupt",
+            f"{distribution.name} could not be unpacked ({type(error).__name__})",
         ) from None
 
 
@@ -453,7 +509,9 @@ def _installed(generation: Path, claims: EnginePackageClaims, digest: str) -> In
         executable=generation / _ENGINE_DIR / claims.archive.executable,
         adapter=generation / _ADAPTER_DIR / claims.adapter.filename,
         requirements={
-            requirement.filename: generation / _REQUIREMENTS_DIR / requirement.filename
+            requirement.filename: generation
+            / _REQUIREMENTS_DIR
+            / (requirement.filename if requirement.unpack is None else requirement.name)
             for requirement in claims.external_requirements
         },
     )
@@ -574,9 +632,23 @@ def _stage(
     os.replace(fetched[claims.adapter.filename], adapter)
     adapter.chmod(0o700 if claims.adapter.kind == "native" else 0o600)
     for requirement in claims.external_requirements:
-        kept = staging / _REQUIREMENTS_DIR / requirement.filename
-        os.replace(fetched[requirement.filename], kept)
-        kept.chmod(0o600)
+        kept = staging / _REQUIREMENTS_DIR / (
+            requirement.filename if requirement.unpack is None else requirement.name
+        )
+        if kept.exists() or kept.is_symlink():
+            raise _refuse(
+                "manifest_invalid", "two requirements would be kept under one name"
+            )
+        if requirement.unpack is None:
+            os.replace(fetched[requirement.filename], kept)
+            kept.chmod(0o600)
+        else:
+            # Only the named members stay; the distribution goes with the
+            # download folder below.
+            _private_directory(kept)
+            _unpack_members(
+                fetched[requirement.filename], kept, requirement.unpack, stop
+            )
     shutil.rmtree(downloads)
     _write_atomic(staging / _MANIFEST_NAME, package.document)
     inventory = _Inventory(
@@ -641,6 +713,11 @@ def install_engine_package(
         needed = (
             claims.archive.unpacked_size
             + sum(request.size for request in _requests(claims))
+            + sum(
+                requirement.unpack.unpacked_size
+                for requirement in claims.external_requirements
+                if requirement.unpack is not None
+            )
             + _SPACE_RESERVE_BYTES
         )
         free = shutil.disk_usage(lane_directory).free

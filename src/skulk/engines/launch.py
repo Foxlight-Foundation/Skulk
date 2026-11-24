@@ -156,6 +156,9 @@ def plan_adapter_launch(
         "SKULK_ENGINE_STATE": str(state_directory),
     }
     if installed.requirements:
+        # One folder holds every pinned requirement: a file kept whole under
+        # its own file name, or a folder named after a requirement whose
+        # named members were unpacked. The adapter is given that folder.
         first = next(iter(installed.requirements.values()))
         environment["SKULK_ENGINE_REQUIREMENTS"] = str(first.parent)
     return AdapterLaunch(

@@ -14,6 +14,7 @@ from typing import NamedTuple
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from pydantic import JsonValue
 
 from skulk.extensions.runtime_artifacts import RuntimeTrust
 from skulk.provisioning import engine_install
@@ -115,6 +116,8 @@ def _build(
     executable: str = "bin/engine",
     unpacked_size: int = 1_000_000,
     lane: str = "rocm",
+    requirement: bytes = REQUIREMENT,
+    unpack: dict[str, JsonValue] | None = None,
 ) -> _Built:
     """Sign a manifest for real files and lay those files out for import."""
     content = archive if archive is not None else _tar(GOOD_MEMBERS)
@@ -122,7 +125,7 @@ def _build(
     files.mkdir(parents=True, exist_ok=True)
     (files / archive_name).write_bytes(content)
     (files / "adapter.py").write_bytes(ADAPTER)
-    (files / "vendor_runtime-1.0-py3-none-any.whl").write_bytes(REQUIREMENT)
+    (files / "vendor_runtime-1.0-py3-none-any.whl").write_bytes(requirement)
     claims = engine_claims()
     claims["generation"] = generation
     claims["lane"] = lane
@@ -145,9 +148,10 @@ def _build(
             "name": "vendor-runtime",
             "version": "1.0",
             "filename": "vendor_runtime-1.0-py3-none-any.whl",
-            "size": len(REQUIREMENT),
-            "sha256": _sha256(REQUIREMENT),
+            "size": len(requirement),
+            "sha256": _sha256(requirement),
             "url": REQUIREMENT_URL,
+            **({} if unpack is None else {"unpack": unpack}),
         }
     ]
     trust = RuntimeTrust(
@@ -327,6 +331,138 @@ def test_an_archive_without_a_usable_executable_is_refused(
     built = _build(tmp_path, key, archive=_tar(members))
 
     assert _refused(built, packages) == "archive_corrupt"
+
+
+RUNTIME = b"vendor runtime library " * 40
+RUNTIME_TOOL = b"#!/bin/sh\necho vendor tool\n"
+WHEEL_MEMBERS = (
+    _Member("_vendor/lib/libruntime.so.7", RUNTIME),
+    _Member("_vendor/lib/deps/libdep.so.1", LIBRARY),
+    _Member("_vendor/bin/tool", RUNTIME_TOOL, 0o755),
+    _Member("_vendor/include/unused.h", b"not named by the manifest\n" * 100),
+    _Member("vendor_runtime-1.0.dist-info/RECORD", b"record\n"),
+)
+NAMED_MEMBERS: list[JsonValue] = [
+    "_vendor/lib/libruntime.so.7",
+    "_vendor/lib/deps/libdep.so.1",
+    "_vendor/bin/tool",
+]
+NAMED_BYTES = len(RUNTIME) + len(LIBRARY) + len(RUNTIME_TOOL)
+
+
+def _unpack(
+    members: list[JsonValue] | None = None, size: int = NAMED_BYTES
+) -> dict[str, JsonValue]:
+    return {
+        "members": NAMED_MEMBERS if members is None else members,
+        "unpacked_size": size,
+    }
+
+
+def test_only_the_named_members_of_a_pinned_wheel_are_kept(
+    tmp_path: Path, key: Ed25519PrivateKey, packages: Path
+) -> None:
+    """The vendor's file is fetched whole and checked; only what is named stays."""
+    built = _build(tmp_path, key, requirement=_zip(WHEEL_MEMBERS), unpack=_unpack())
+
+    installed = install_engine_package(
+        built.package, DirectoryPackageSource(built.files), root=packages
+    )
+
+    folder = installed.root / "requirements" / "vendor-runtime"
+    assert installed.requirements == {"vendor_runtime-1.0-py3-none-any.whl": folder}
+    kept = sorted(
+        str(path.relative_to(folder)) for path in folder.rglob("*") if path.is_file()
+    )
+    assert kept == sorted(str(name) for name in NAMED_MEMBERS)
+    assert (folder / "_vendor/lib/libruntime.so.7").read_bytes() == RUNTIME
+    assert (folder / "_vendor/lib/deps/libdep.so.1").read_bytes() == LIBRARY
+    assert (folder / "_vendor/bin/tool").stat().st_mode & 0o777 == 0o700
+    assert (folder / "_vendor/lib/libruntime.so.7").stat().st_mode & 0o777 == 0o600
+    # The distribution itself is not kept beside what was taken from it.
+    assert sorted(entry.name for entry in (installed.root / "requirements").iterdir()) == [
+        "vendor-runtime"
+    ]
+    assert verify_installed_engine(installed.root).digest == built.package.digest
+
+
+def test_a_changed_unpacked_member_is_noticed(
+    tmp_path: Path, key: Ed25519PrivateKey, packages: Path
+) -> None:
+    built = _build(tmp_path, key, requirement=_zip(WHEEL_MEMBERS), unpack=_unpack())
+    installed = install_engine_package(
+        built.package, DirectoryPackageSource(built.files), root=packages
+    )
+    member = installed.requirements["vendor_runtime-1.0-py3-none-any.whl"] / (
+        "_vendor/lib/libruntime.so.7"
+    )
+    member.chmod(0o600)
+    member.write_bytes(RUNTIME[:-1] + b"!")
+
+    with pytest.raises(EnginePackageRefusedError) as caught:
+        verify_installed_engine(installed.root)
+
+    assert caught.value.code == "installation_damaged"
+
+
+@pytest.mark.parametrize(
+    ("wheel", "unpack"),
+    [
+        # A named member the distribution does not hold.
+        (WHEEL_MEMBERS, _unpack([*NAMED_MEMBERS, "_vendor/lib/libmissing.so"], 10**6)),
+        # A named member that is a link.
+        (
+            (*WHEEL_MEMBERS, _Member("_vendor/lib/link.so", b"libruntime.so.7", 0o120777)),
+            _unpack(["_vendor/lib/link.so"], 10**6),
+        ),
+        # The named members are larger than the manifest declared.
+        (WHEEL_MEMBERS, _unpack(size=NAMED_BYTES - 1)),
+        # The pinned file is not a zip archive at all.
+        (None, _unpack()),
+    ],
+)
+def test_a_wheel_that_does_not_hold_what_was_named_installs_nothing(
+    tmp_path: Path,
+    key: Ed25519PrivateKey,
+    packages: Path,
+    wheel: tuple[_Member, ...] | None,
+    unpack: dict[str, JsonValue],
+) -> None:
+    content = REQUIREMENT if wheel is None else _zip(wheel)
+    built = _build(tmp_path, key, requirement=content, unpack=unpack)
+
+    assert _refused(built, packages) == "archive_corrupt"
+    assert _leftovers(packages) == ["install.lock"]
+
+
+def test_the_free_space_check_counts_what_will_be_unpacked(
+    tmp_path: Path,
+    key: Ed25519PrivateKey,
+    packages: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Usage(NamedTuple):
+        total: int
+        used: int
+        free: int
+
+    wheel = _zip(WHEEL_MEMBERS)
+    declared = 5 * 1024**3
+    whole = _build(tmp_path / "whole", key, requirement=wheel)
+    unpacked = _build(
+        tmp_path / "unpacked", key, requirement=wheel, unpack=_unpack(size=declared)
+    )
+
+    def room_for_the_kept_file_only(path: Path) -> _Usage:
+        del path
+        return _Usage(total=10**13, used=0, free=declared)
+
+    monkeypatch.setattr(engine_install.shutil, "disk_usage", room_for_the_kept_file_only)
+
+    assert _refused(unpacked, packages) == "insufficient_space"
+    install_engine_package(
+        whole.package, DirectoryPackageSource(whole.files), root=packages
+    )
 
 
 def test_too_little_free_space_is_refused_before_anything_is_fetched(

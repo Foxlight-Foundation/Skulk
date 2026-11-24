@@ -3,6 +3,7 @@
 import stat
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import psutil
@@ -65,6 +66,27 @@ def test_an_installed_adapter_runs_with_only_the_contract_environment(
     assert launch.environment["PATH"] == ADAPTER_PATH
     assert launch.environment["SKULK_ENGINE_EXECUTABLE"] == str(installed.executable)
     assert launch.command[:3] == (sys.executable, "-I", "-B")
+
+
+def test_the_adapter_is_told_where_the_pinned_requirements_are(tmp_path: Path) -> None:
+    """Kept whole or unpacked, a requirement is found under one folder."""
+    installed = install_test_package(tmp_path, tmp_path / "packages")
+    state = engine_state_directory(installed.digest, root=tmp_path / "state")
+    folder = installed.root / "requirements"
+
+    without = plan_adapter_launch(installed, state_directory=state)
+    unpacked = plan_adapter_launch(
+        replace(installed, requirements={"vendor-1.0.whl": folder / "vendor"}),
+        state_directory=state,
+    )
+    whole = plan_adapter_launch(
+        replace(installed, requirements={"vendor-1.0.whl": folder / "vendor-1.0.whl"}),
+        state_directory=state,
+    )
+
+    assert "SKULK_ENGINE_REQUIREMENTS" not in without.environment
+    assert unpacked.environment["SKULK_ENGINE_REQUIREMENTS"] == str(folder)
+    assert whole.environment["SKULK_ENGINE_REQUIREMENTS"] == str(folder)
 
 
 def test_the_generation_is_never_written_and_the_log_is_private(tmp_path: Path) -> None:

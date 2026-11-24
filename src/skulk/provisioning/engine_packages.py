@@ -19,6 +19,7 @@ release can never be accepted as an engine manifest.
 """
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Final, Literal, Self, final
@@ -59,6 +60,14 @@ will fetch, matching the native image packages; it is not a size target."""
 
 MAX_ENGINE_UNPACKED_BYTES: Final = 8 * 1024**3
 """Largest unpacked size a manifest may declare for one archive."""
+
+MAX_REQUIREMENT_MEMBERS: Final = 256
+"""Most members a manifest may name for unpacking out of one pinned
+distribution. A package that needs more should carry its own files."""
+
+REQUIREMENT_UNPACK_SUFFIXES: Final = (".whl", ".zip")
+"""Distribution formats the installer unpacks members from. Both are zip
+archives; the file name states the format."""
 
 MAX_ENGINE_ADAPTER_BYTES: Final = 1024 * 1024
 """Largest adapter program. An adapter is a small translation layer, never an
@@ -235,12 +244,50 @@ class EngineAdapter(_Contract):
 
 
 @final
+class EngineRequirementUnpack(_Contract):
+    """The members of a pinned distribution a node unpacks when it installs.
+
+    A package that needs a few files out of a vendor's distribution names
+    them here. The node takes them from the vendor's own file, whose digest
+    the manifest signs, so the publisher redistributes nothing and the rest
+    of the distribution never stays on the node's disk. The members land
+    under ``requirements/<requirement name>/`` at the paths they have inside
+    the distribution, and the distribution file itself is not kept.
+    """
+
+    members: tuple[RelativePath, ...] = Field(
+        min_length=1,
+        max_length=MAX_REQUIREMENT_MEMBERS,
+        description=(
+            "Exact member paths inside the distribution, each a regular file."
+        ),
+    )
+    unpacked_size: int = Field(
+        ge=1,
+        le=MAX_ENGINE_UNPACKED_BYTES,
+        description=(
+            "Declared total size of the named members in bytes, for the "
+            "free-space check. Unpacking more than this is refused."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def members_are_distinct(self) -> Self:
+        """Refuse a list that names one member twice."""
+        if len(set(self.members)) != len(self.members):
+            raise ValueError("a member is named more than once")
+        return self
+
+
+@final
 class EngineExternalRequirement(_Contract):
     """A file the package needs but does not carry, pinned by digest.
 
     It lets a package depend on a library distribution its publisher may not
     redistribute. The node obtains exactly these bytes from the named address,
-    or from a file on an air-gapped cluster.
+    or from a file on an air-gapped cluster. Without ``unpack`` the file is
+    kept as it came; with it, the named members are unpacked and the file is
+    not kept.
     """
 
     name: Identifier = Field(description="Distribution name, for messages.")
@@ -256,6 +303,29 @@ class EngineExternalRequirement(_Contract):
             "digest, not the address, decides whether the bytes are accepted."
         ),
     )
+    unpack: EngineRequirementUnpack | None = Field(
+        default=None,
+        description=(
+            "Members to unpack out of the file at install. Absent on a "
+            "requirement that is kept whole."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def only_a_zip_distribution_is_unpacked(self) -> Self:
+        """Require a zip file name, and a name usable as a folder, to unpack."""
+        if self.unpack is None:
+            return self
+        if not self.filename.endswith(REQUIREMENT_UNPACK_SUFFIXES):
+            raise ValueError(
+                "only a .whl or .zip requirement can name members to unpack"
+            )
+        # The members are unpacked into a folder with this name.
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", self.name) is None:
+            raise ValueError(
+                "an unpacked requirement's name must be usable as a folder name"
+            )
+        return self
 
 
 @final
