@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC
 from io import TextIOWrapper
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, Final, TextIO
 
 import zstandard
 from hypercorn import Config
@@ -30,6 +30,14 @@ _MAX_LOG_ARCHIVES = 5
 # zstd-compressed). The previous policy rotated only once on startup, so a node
 # that ran for days without restarting grew its log file without bound (#382).
 _MAX_LOG_BYTES = 100 * 1024 * 1024
+# Passed as ``diagnose`` to every sink. Loguru's default annotates each
+# traceback line with the values of the variables on it, and a failing request's
+# frames hold that request: with annotation on, one failed generation wrote the
+# start of a person's prompt to the console stream and the log file. Tracebacks
+# keep their frames, source lines and messages; only the values are withheld.
+# ``skulk/__init__.py`` makes the same choice for handlers this module never
+# adds.
+_ANNOTATE_TRACEBACKS_WITH_VARIABLE_VALUES: Final = False
 _json_sink_id: int | None = None
 _vector_process: subprocess.Popen[bytes] | None = None
 _vector_pipe: TextIOWrapper | None = None
@@ -148,6 +156,25 @@ def _json_sink(message: Message) -> None:
                     logger.remove(_json_sink_id)
                 _json_sink_id = None
             logger.warning("Log shipper disconnected — JSON sink disabled")
+
+
+def _add_json_sink() -> int:
+    """Add the structured JSON sink and return its handler id.
+
+    Startup and the runtime toggle both add the sink here, so the two paths
+    cannot drift apart in what they ship.
+    """
+    # enqueue=True decouples log producers from the JSON sink's I/O so a slow
+    # stdout consumer (e.g. an overloaded launchd log file or a downstream
+    # pipe) can't block inference threads. The sink builds its own exception
+    # text from the standard library, which prints no variable values; loguru
+    # still formats the record for it, so annotation is off here as well.
+    return logger.add(
+        _json_sink,
+        level="INFO",
+        enqueue=True,
+        diagnose=_ANNOTATE_TRACEBACKS_WITH_VARIABLE_VALUES,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +308,7 @@ def logger_setup(
             level="INFO",
             colorize=console_is_tty,
             enqueue=True,
+            diagnose=_ANNOTATE_TRACEBACKS_WITH_VARIABLE_VALUES,
         )
     else:
         logger.add(
@@ -289,6 +317,7 @@ def logger_setup(
             level="DEBUG",
             colorize=console_is_tty,
             enqueue=True,
+            diagnose=_ANNOTATE_TRACEBACKS_WITH_VARIABLE_VALUES,
         )
     if log_file:
         logger.add(
@@ -297,6 +326,7 @@ def logger_setup(
             level="INFO",
             colorize=False,
             enqueue=True,
+            diagnose=_ANNOTATE_TRACEBACKS_WITH_VARIABLE_VALUES,
             rotation=_make_rotation_policy(),
             retention=_MAX_LOG_ARCHIVES,
             compression=_zstd_compress,
@@ -317,14 +347,7 @@ def logger_setup(
             transport_started = False
         if transport_started:
             global _json_sink_id  # noqa: PLW0603
-            # enqueue=True decouples log producers from the JSON sink's
-            # I/O so a slow stdout consumer (e.g. an overloaded launchd
-            # log file or a downstream pipe) can't block inference threads.
-            _json_sink_id = logger.add(
-                _json_sink,
-                level="INFO",
-                enqueue=True,
-            )
+            _json_sink_id = _add_json_sink()
 
 
 def set_structured_stdout(enabled: bool, ingest_url: str = "") -> None:
@@ -348,11 +371,7 @@ def set_structured_stdout(enabled: bool, ingest_url: str = "") -> None:
         else:
             transport_started = False
         if transport_started:
-            _json_sink_id = logger.add(
-                _json_sink,
-                level="INFO",
-                enqueue=True,
-            )
+            _json_sink_id = _add_json_sink()
             logger.info("Structured JSON log shipping enabled")
     elif not enabled and _json_sink_id is not None:
         with contextlib.suppress(ValueError):

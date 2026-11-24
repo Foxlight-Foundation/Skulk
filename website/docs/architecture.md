@@ -2289,6 +2289,11 @@ Traces are intended for targeted debugging: turn on, reproduce, inspect, turn of
 
 ### Centralized logging
 
+Skulk disables Loguru variable-value annotations in exception tracebacks before
+its modules import the logger. Node sinks also set `diagnose=False` explicitly.
+This applies to command-line tools, plugin services and spawned interpreters as
+well as node logging; exception text and stack locations remain available.
+
 Each node can emit structured JSON on stdout alongside the human-readable stderr output. A local Vector agent reads stdout and ships logs to VictoriaLogs. Grafana queries VictoriaLogs for cluster-wide log search. Configuration:
 
 - `src/skulk/shared/logging.py`: loguru setup with the JSON stdout sink
