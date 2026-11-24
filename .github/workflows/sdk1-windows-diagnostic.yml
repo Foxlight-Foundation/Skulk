@@ -1,0 +1,149 @@
+name: SDK1 Windows snapshot diagnostic
+on:
+  push:
+    branches: [diagnose/sdk1-windows-snapshot]
+permissions:
+  contents: read
+jobs:
+  windows-snapshot-diagnostic:
+    # A Windows node is a management node: it installs the published bindings
+    # wheel, imports the same entry point as every other node and never runs
+    # an engine. The full suite stays on macOS; this job runs what only
+    # Windows can check.
+    name: Windows snapshot diagnostic
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Prepare relative-member diagnostics without changing admission
+        shell: bash
+        run: |
+          mkdir -p .runtime
+          cat > .runtime/sdk1-windows-diagnostic.py <<'PYCODE'
+          """Report refused package members without changing the service custody decision."""
+
+          import importlib.util
+          import json
+          import sys
+          import sysconfig
+          from pathlib import Path
+
+          import pytest
+
+          from skulk.utils.dashboard_path import find_resources
+          from skulk.utils.runtime_files import no_other_account_can_change
+
+
+          def source_roots() -> tuple[tuple[str, Path], ...]:
+              """Name only package-relative locations, never runner or account paths."""
+              roots: list[tuple[str, Path]] = []
+              for name in ("skulk", "skulk_pyo3_bindings"):
+                  spec = importlib.util.find_spec(name)
+                  if spec is not None and spec.origin is not None:
+                      roots.append((name, Path(spec.origin).parent))
+              roots.append(("resources", find_resources()))
+              roots.append(("site-packages", Path(sysconfig.get_paths()["purelib"])))
+              return tuple(roots)
+
+
+          def main() -> int:
+              """Run unchanged tests, reporting only the relative member of a failed check."""
+              roots = source_roots()
+
+              def checked(path: Path) -> bool:
+                  """Retain the original gate; identify a refusal without granting access."""
+                  accepted = no_other_account_can_change(path)
+                  if not accepted:
+                      location = "unclassified-package-member"
+                      for label, root in roots:
+                          if path.is_relative_to(root):
+                              location = label + "/" + path.relative_to(root).as_posix()
+                              break
+                      print(
+                          "SDK1_REFUSED_DEPENDENCY "
+                          + json.dumps({"member": location, "accepted": False}),
+                          flush=True,
+                      )
+                  return accepted
+
+              with pytest.MonkeyPatch.context() as patch:
+                  patch.setattr(
+                      "skulk.extensions.service_snapshot.no_other_account_can_change", checked
+                  )
+                  return int(pytest.main(sys.argv[1:]))
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PYCODE
+
+      - name: Import the node entry point
+        # One unguarded POSIX-only import, or a module that needs the native
+        # capability kernel at import time, stops every Windows node here.
+        run: uv run --no-sync python -c "import skulk.main"
+
+      - name: Run the Windows tests
+        # This runner is an administrator, which the plugin installer refuses
+        # as it refuses root, so a test that installs a plugin would be
+        # skipped here. Those tests run in the next step.
+        shell: bash
+        env:
+          SKULK_TESTS: "1"
+        run: >-
+          uv run --no-sync pytest -m "not slow" --import-mode=importlib
+          --basetemp="$RUNNER_TEMP/t"
+          src/skulk/tests/test_platform_participation.py
+          src/skulk/tests/test_windows_bindings_wheel.py
+          src/skulk/shared/tests/test_election.py
+          src/skulk/utils/tests/test_local_transport.py
+          src/skulk/utils/tests/test_local_transport_windows.py
+          src/skulk/utils/tests/test_runtime_files_platforms.py
+          src/skulk/utils/tests/test_windows_account.py
+          src/skulk/utils/tests/test_owned_process.py
+          src/skulk/utils/tests/test_stop_signals.py
+          src/skulk/extensions/tests/test_runtime_manager_platforms.py
+          src/skulk/extensions/tests/test_runtime_catalog.py
+          src/skulk/extensions/tests/test_capability_store.py
+
+      - name: Run the plugin installer tests as an ordinary user
+        # scripts/run_as_ordinary_windows_user.py starts a command with this
+        # account's rights reduced to an ordinary user's, which is the account
+        # the installer accepts. The first command fails the step if the
+        # rights were not reduced: every installing test would then be
+        # skipped, and the step would pass having checked nothing.
+        #
+        # The slow tests are included: one of them copies a standalone Python,
+        # installs through it, moves it and starts the adopted environment,
+        # and another copies this Skulk into a service folder, seals the copy
+        # and starts the plugin manager from it. Nothing else in CI does
+        # either on Windows.
+        #
+        # This runner has long paths switched on, which a Windows machine does
+        # not by default, so the 259-character path limit is not checked here.
+        shell: bash
+        env:
+          SKULK_TESTS: "1"
+        run: |
+          ordinary="uv run --no-sync python scripts/run_as_ordinary_windows_user.py python"
+          $ordinary -c "import sys; from skulk.utils.runtime_files import has_root_authority; sys.exit(has_root_authority())"
+          $ordinary .runtime/sdk1-windows-diagnostic.py -m "slow or not slow" --import-mode=importlib \
+            --basetemp="$RUNNER_TEMP/u" \
+            src/skulk/utils/tests/test_runtime_files_platforms.py \
+            src/skulk/utils/tests/test_owned_process.py \
+            src/skulk/extensions/tests/test_runtime_integrity.py \
+            src/skulk/extensions/tests/test_runtime_install.py \
+            src/skulk/extensions/tests/test_runtime_download.py \
+            src/skulk/extensions/tests/test_runtime_selection.py \
+            src/skulk/extensions/tests/test_local_setup.py \
+            src/skulk/extensions/tests/test_runtime_service.py \
+            src/skulk/extensions/tests/test_runtime_manager_platforms.py \
+            src/skulk/extensions/tests/test_service_snapshot.py
