@@ -34,7 +34,7 @@ from skulk.extensions.runtime_files import (
     write_private,
 )
 from skulk.extensions.runtime_install import RuntimeInstaller
-from skulk.extensions.runtime_integrity import generation_directory
+from skulk.extensions.runtime_integrity import owned_generation
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
 
@@ -207,7 +207,7 @@ def _retained_contract_identity(
     """
     metadata = _JSON_OBJECT.validate_json(
         read_private(
-            generation_directory(root, selected.runtime_digest) / "staged.json",
+            owned_generation(root, selected.runtime_digest) / "staged.json",
             MAX_RUNTIME_METADATA_BYTES,
         )
     )

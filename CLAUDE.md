@@ -1526,7 +1526,11 @@ characters as before, and POSIX folder names are unchanged. Two digests could
 share a short name, so on Windows the folder's first file, `runtime-digest`,
 holds the whole digest, and `claim_generation()` and `check_generation()`
 refuse a folder that belongs to another runtime, or holds something and does
-not say whose it is, before anything in it is read, moved or written. The
+not say whose it is, before anything in it is read, moved or written. Code
+that reads an installed generation gets its folder from `owned_generation()`,
+which makes that check; `generation_directory()` alone is for working out a
+path without touching it. A test that builds a generation by hand claims it
+first, as the installer does. The
 owner runtime must derive the same name from the same digest; that is a
 contract with it (Codex agreed to carry it into the Windows owner release).
 With that name the deepest directory of an installed runtime lies 131

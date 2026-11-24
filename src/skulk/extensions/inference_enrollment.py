@@ -23,7 +23,7 @@ from skulk.extensions.native_inference_contracts import (
 )
 from skulk.extensions.runtime_files import RuntimeLock, read_private, write_private
 from skulk.extensions.runtime_install import finish_runtime_work
-from skulk.extensions.runtime_integrity import generation_directory
+from skulk.extensions.runtime_integrity import owned_generation
 from skulk.extensions.runtime_selection import RuntimeSelector
 
 
@@ -68,7 +68,7 @@ class InferenceEnrollment:
         selection = selector.current()
         if selection is None or selection.runtime_digest != grant.runtime_digest:
             raise ValueError("inference grant requires the selected signed runtime")
-        metadata_path = generation_directory(root, grant.runtime_digest) / "staged.json"
+        metadata_path = owned_generation(root, grant.runtime_digest) / "staged.json"
         metadata = read_private(metadata_path, MAX_RUNTIME_METADATA_BYTES)
         trust = read_private(root / "publisher-trust.json")
         runtime = await finish_runtime_work(

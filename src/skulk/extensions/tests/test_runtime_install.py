@@ -636,6 +636,29 @@ async def test_a_runtime_installs_under_a_short_name_and_another_never_takes_its
             raise AssertionError("another runtime's generation was opened")
     assert tree() == before
     assert not (installer.installer / "recovery").exists()
+    # Readers of the installed generation are refused the same way: none
+    # returns another runtime's metadata under this runtime's digest.
+    from skulk.extensions.runtime_manager import RuntimeManager
+    from skulk.extensions.runtime_selection import (
+        RuntimeSelector,
+        _retained_contract_identity,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    write_private(generation / "runtime-digest", runtime.digest.encode())
+    selector = RuntimeSelector(installer.root)
+    await selector.activate(runtime.digest, expected_revision=0)
+    selection = selector.current()
+    assert selection is not None and selection.runtime_digest == runtime.digest
+    manager = RuntimeManager.__new__(RuntimeManager)
+    manager.release_identities = {}
+    assert _retained_contract_identity(installer.root, selection)
+    assert manager._release_identity(installer.root, runtime.digest) is not None  # pyright: ignore[reportPrivateUsage]
+    manager.release_identities.clear()
+
+    write_private(generation / "runtime-digest", other.encode())
+    with pytest.raises(ValueError, match="belongs to another runtime"):
+        _retained_contract_identity(installer.root, selection)
+    assert manager._release_identity(installer.root, runtime.digest) is None  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_recovery_never_moves_another_runtimes_unfinished_generation(

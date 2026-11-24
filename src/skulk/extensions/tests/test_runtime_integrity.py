@@ -37,6 +37,7 @@ from skulk.extensions.runtime_integrity import (
     environment_command,
     generation_directory,
     generation_name,
+    owned_generation,
     path_refusal,
     path_refusal_payload,
     path_refusal_sentence,
@@ -453,6 +454,38 @@ def test_a_short_named_folder_says_whose_it_is_and_refuses_another_runtime(
         with pytest.raises(ValueError, match="belongs to another runtime"):
             refuse(generation, second)
     assert contents() == before
+
+
+def test_a_reader_is_given_only_its_own_runtimes_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading goes through the same check as writing; a missing folder is just missing."""
+    _short_names(monkeypatch, True)
+    private_directory(tmp_path / "generations")
+    first, second = "a" * 32 + "1" * 32, "a" * 32 + "2" * 32
+    # Not there yet: the reader finds that out from the file it asks for.
+    missing = owned_generation(tmp_path, first)
+    assert missing == generation_directory(tmp_path, first) and not missing.exists()
+    claim_generation(missing, first)
+    write_private(missing / "staged.json", b"the first runtime's record")
+    assert read_private(owned_generation(tmp_path, first) / "staged.json") == (
+        b"the first runtime's record"
+    )
+    # The second runtime shares the folder's name and is never handed it.
+    with pytest.raises(ValueError, match="belongs to another runtime"):
+        owned_generation(tmp_path, second)
+    # Nor is anyone handed a folder that does not say whose it is.
+    unsaid = generation_directory(tmp_path, "c" * 64)
+    private_directory(unsaid)
+    write_private(unsaid / "staged.json", b"somebody's record")
+    with pytest.raises(ValueError, match="unidentified runtime"):
+        owned_generation(tmp_path, "c" * 64)
+    # Where the name is the whole digest, the name is the proof.
+    _short_names(monkeypatch, False)
+    whole = generation_directory(tmp_path, "d" * 64)
+    private_directory(whole)
+    write_private(whole / "staged.json", b"record")
+    assert owned_generation(tmp_path, "d" * 64) == whole
 
 
 def test_a_short_named_folder_with_content_and_no_record_is_nobodys(

@@ -28,7 +28,8 @@ own folder too little room otherwise. Because a short name could in principle
 be shared by two digests, a Windows generation folder also holds the full
 digest it belongs to, and :func:`claim_generation` and
 :func:`check_generation` refuse a folder that belongs to another runtime
-before anything in it is touched.
+before anything in it is touched. Code that reads an installed generation
+gets its folder from :func:`owned_generation`, which makes that check.
 """
 
 import base64
@@ -499,6 +500,30 @@ def check_generation(generation: Path, runtime_digest: str) -> None:
         return
     if recorded != runtime_digest.encode():
         raise ValueError("generation folder belongs to another runtime")
+
+
+def owned_generation(root: Path, runtime_digest: str) -> Path:
+    """The folder a runtime is installed in, for reading what is in it.
+
+    Every reader of an installed generation goes through this, so that none
+    takes another runtime's files for the one it was asked about. A folder
+    that does not exist is returned as it is; the read then fails as it
+    always did.
+
+    Args:
+        root: The installation's root.
+        runtime_digest: The runtime's 64-character digest.
+
+    Returns:
+        The generation's folder, from :func:`generation_directory`.
+
+    Raises:
+        ValueError: As :func:`check_generation`: the folder belongs to
+            another runtime or does not say whose it is.
+    """
+    generation = generation_directory(root, runtime_digest)
+    check_generation(generation, runtime_digest)
+    return generation
 
 
 def claim_generation(generation: Path, runtime_digest: str) -> None:
