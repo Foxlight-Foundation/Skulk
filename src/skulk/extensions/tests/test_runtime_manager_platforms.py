@@ -1,5 +1,11 @@
 """The plugin manager starts, answers and stops on every platform Skulk runs on."""
 
+import asyncio
+import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -11,7 +17,12 @@ from skulk.extensions.runtime_manager import (
     RuntimeManager,
     manager_request,
 )
-from skulk.utils.runtime_files import private_directory, write_private
+from skulk.utils.runtime_files import (
+    RuntimeLock,
+    has_root_authority,
+    private_directory,
+    write_private,
+)
 
 
 @pytest.fixture
@@ -76,3 +87,50 @@ def test_a_manager_refuses_root_authority(
     monkeypatch.setattr(runtime_manager, "has_root_authority", lambda: True)
     with pytest.raises(ValueError, match="without root"):
         RuntimeManager(root)
+
+
+@pytest.mark.skipif(has_root_authority(), reason="the manager refuses root authority")
+def test_the_manager_runs_as_a_program_and_stops_when_asked(root: Path) -> None:
+    """``runtime_manager serve`` answers, and a stop signal ends it in order."""
+    if sys.platform == "win32":
+        import ctypes
+
+        if not ctypes.WinDLL("kernel32").GetConsoleCP():
+            pytest.skip("no console to send Ctrl-Break through")
+        request_to_stop, new_group = (
+            signal.CTRL_BREAK_EVENT,
+            subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    else:
+        request_to_stop, new_group = signal.SIGTERM, 0
+    program = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "skulk.extensions.runtime_manager",
+            "serve",
+            "--root",
+            str(root),
+        ],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        creationflags=new_group,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while True:
+            assert program.poll() is None, "the manager ended early"
+            try:
+                reply = asyncio.run(manager_request(root, InventoryRequest()))
+            except OSError:
+                assert time.monotonic() < deadline, "the manager never answered"
+                time.sleep(0.1)
+                continue
+            assert "result" in reply
+            break
+        os.kill(program.pid, request_to_stop)
+        assert program.wait(60) == 0
+    finally:
+        program.kill()
+        program.wait()
+    # It let go of everything: another manager could start here.
+    RuntimeLock(root, "manager.lock").close()
