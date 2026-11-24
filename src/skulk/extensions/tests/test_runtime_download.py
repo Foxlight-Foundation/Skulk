@@ -185,6 +185,109 @@ async def test_a_path_too_long_refuses_an_install_before_it_is_journaled_or_down
     await downloads.close()
 
 
+def _too_deep_only_with_the_wheels(
+    _generation: Path, _names: tuple[str, ...], wheels: tuple[bytes, ...] = ()
+) -> int:
+    """A runtime whose own files, not ``pip``'s, are too deep: seen only once downloaded."""
+    return 9 if wheels else 0
+
+
+async def test_a_path_found_too_long_after_the_download_is_named_on_the_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The background refusal is retained with its count, and a retry clears it."""
+    downloads, _, _, calls = prepared(tmp_path, monkeypatch)
+    review = await downloads.inspect()
+    request = InstallRequest(
+        operation_id="b" * 32,
+        runtime_digest=review.runtime_digest,
+        expected_source_revision=1,
+    )
+    with monkeypatch.context() as limited:
+        limited.setattr(
+            "skulk.extensions.runtime_install.runtime_path_excess",
+            _too_deep_only_with_the_wheels,
+        )
+        accepted = await downloads.submit(request)
+        assert accepted.state == "accepted"
+        assert downloads.work is not None
+        await downloads.work
+    stopped = downloads.current()
+    assert stopped is not None and stopped.state == "recovery_required"
+    assert stopped.error_code == "runtime_path_too_long" and stopped.path_excess == 9
+    # Everything was downloaded and verified; nothing was built.
+    assert stopped.downloaded_bytes == review.artifact_bytes and len(calls) == 3
+    assert not (downloads.root / "generations" / review.runtime_digest).exists()
+    # The record survives a restart exactly, count included.
+    await downloads.close()
+    restarted = RuntimeDownloads(
+        downloads.root, transport=httpx.MockTransport(lambda _: httpx.Response(500))
+    )
+    assert restarted.current() == stopped
+    # A retry that still does not fit is named again, as a new attempt.
+    restarted.transport = downloads.transport
+    with monkeypatch.context() as limited:
+        limited.setattr(
+            "skulk.extensions.runtime_install.runtime_path_excess",
+            _too_deep_only_with_the_wheels,
+        )
+        again = await restarted.recover(request.operation_id, 1)
+        assert again.error_code is None and again.path_excess is None
+        assert restarted.work is not None
+        await restarted.work
+    refused_again = restarted.current()
+    assert refused_again is not None and refused_again.attempt == 1
+    assert refused_again.error_code == "runtime_path_too_long"
+    assert refused_again.path_excess == 9
+    # Once the path fits, the same operation installs and the name is gone.
+    await restarted.recover(request.operation_id, 1)
+    assert restarted.work is not None
+    await restarted.work
+    staged = restarted.current()
+    assert staged is not None and staged.state == "staged" and staged.attempt == 2
+    assert staged.error_code is None and staged.path_excess is None
+    await restarted.close()
+
+
+def test_an_install_record_carries_a_path_excess_only_for_the_path_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Records written before the count existed still read; a stray count does not."""
+    import json
+
+    from skulk.extensions.runtime_download import InstallOperation
+
+    async def reviewed() -> InstallOperation:
+        downloads, _, _, _ = prepared(tmp_path, monkeypatch)
+        review = await downloads.inspect()
+        await downloads.close()
+        return InstallOperation(
+            request=InstallRequest(
+                operation_id="b" * 32,
+                runtime_digest=review.runtime_digest,
+                expected_source_revision=1,
+            ),
+            review=review,
+            state="recovery_required",
+            error_code="installation_failed",
+        )
+
+    earlier = json.loads(asyncio.run(reviewed()).model_dump_json())
+    # As a build before this one wrote it.
+    del earlier["path_excess"]
+    assert InstallOperation.model_validate_json(json.dumps(earlier)).path_excess is None
+    named = {**earlier, "error_code": "runtime_path_too_long", "path_excess": 9}
+    assert InstallOperation.model_validate_json(json.dumps(named)).path_excess == 9
+    for stray in (
+        {"error_code": "installation_failed", "path_excess": 9},
+        {"error_code": "download_failed", "path_excess": 9},
+        {"error_code": "runtime_path_too_long", "path_excess": None},
+        {"error_code": "runtime_path_too_long", "path_excess": 0},
+    ):
+        with pytest.raises(ValueError):
+            InstallOperation.model_validate_json(json.dumps({**earlier, **stray}))
+
+
 @pytest.mark.parametrize("failure", ["timeout", "shutdown", "expired"])
 async def test_staging_ownership_wait_refuses_without_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str

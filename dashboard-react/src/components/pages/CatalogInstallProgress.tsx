@@ -60,6 +60,8 @@ interface Steps { verified: StepState; downloaded: StepState; prepared: StepStat
 type Failure =
   | { kind: 'detail'; step: keyof Steps; detail: string }
   | { kind: 'stopped'; step: 'downloaded' | 'prepared'; cause: 'download' | 'prepare' | 'interrupted' }
+  /** The host named why preparing cannot work here: a path too long for Windows, and by how much. */
+  | { kind: 'path-too-long'; step: 'prepared'; excess: number }
   | { kind: 'code'; step: keyof Steps; code: 'download-unconfirmed' | 'inventory' | 'activation-unconfirmed' | 'start-slow' | 'unreadable' }
   | { kind: 'code-with-value'; step: keyof Steps; code: 'activation-failed' | 'activation-refused' | 'start-failed'; value: string };
 
@@ -204,7 +206,9 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
               // The host never repeats a stopped install by itself. The journey
               // stays as the consent a retry of this release carries.
               markInterrupted(pluginId);
-              const prepared = operation.error_code === 'installation_failed';
+              const excess = operation.error_code === 'runtime_path_too_long' ? operation.path_excess ?? null : null;
+              if (excess !== null) { mark({ downloaded: 'done' }); fail({ kind: 'path-too-long', step: 'prepared', excess }); return; }
+              const prepared = operation.error_code === 'installation_failed' || operation.error_code === 'runtime_path_too_long';
               if (prepared) mark({ downloaded: 'done' });
               fail({ kind: 'stopped', step: prepared ? 'prepared' : 'downloaded', cause: prepared ? 'prepare' : operation.error_code === 'download_failed' ? 'download' : 'interrupted' });
               return;
@@ -320,6 +324,9 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
         interrupted: t('plugins.catalog.stoppedInterrupted', 'The install was interrupted before it finished. Choose Retry to pick up the same release and finish installing it. Its card under Installed offers the same Retry.'),
       }[value.cause];
     }
+    if (value.kind === 'path-too-long') {
+      return t('plugins.catalog.stoppedPathTooLong', "The download finished, but this plugin's files need a path {excess} character{plural} longer than Windows allows on this machine. Switch on long paths in Windows, or keep Skulk's files in a folder with a shorter path, then choose Retry. Its card under Installed offers the same Retry.", { excess: value.excess, plural: value.excess === 1 ? '' : 's' });
+    }
     if (value.kind === 'code-with-value') {
       if (value.code === 'activation-refused') return t('plugins.catalog.activationRefused', 'The host refused the activation (HTTP {status}). The release stays downloaded; activate it from Installed.', { status: value.value });
       return value.code === 'activation-failed'
@@ -347,7 +354,7 @@ export function CatalogInstallProgress({ title, publisher, sequence, transferByt
   // A stopped install, or a retry that could not start, can be retried again
   // from here with the consent already given; an install the host does not
   // have cannot.
-  const retryable = !!onRetry && (failure?.kind === 'stopped' || (refusal?.stage === 'retry' && refusal.code !== 'nothing-to-retry'));
+  const retryable = !!onRetry && (failure?.kind === 'stopped' || failure?.kind === 'path-too-long' || (refusal?.stage === 'retry' && refusal.code !== 'nothing-to-retry'));
   const message = refusalText ?? (failure ? failureText(failure) : null);
   const rows: { key: keyof Steps; label: string; detail: string }[] = [
     { key: 'verified', label: t('plugins.catalog.stepVerified', 'Signature and compatibility verified'), detail: publisher ? `${publisher} · ${t('plugins.catalog.release', 'release {sequence}', { sequence })}` : '' },

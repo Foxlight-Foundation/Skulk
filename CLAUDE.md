@@ -1535,8 +1535,15 @@ before it is journaled or downloaded (`RuntimeDownloads.submit` and `recover`),
 and in `stage()` with every file of every wheel counted, before the generation
 folder exists. The first travels as the manager error `runtime_path_too_long`
 with one integer, and the dashboard and the terminal installer print
-`path_refusal_sentence()`; the second happens in the background and shows as
-the general `installation_failed`. The plugin tests get a short temporary
+`path_refusal_sentence()`. The second happens in the background, so it is
+retained on the operation: `RuntimeOperation` and `InstallOperation` read
+`recovery_required` with `error_code` `runtime_path_too_long` and
+`path_excess`, the count, which no other record carries (both models refuse
+one without the other, and a record written before the field existed still
+reads). The terminal installer prints the same sentence for such an
+operation and the dashboard words it in both places that explain a stopped
+install; `recover()` clears the code and the count when it accepts a retry.
+The plugin tests get a short temporary
 directory on Windows for this reason (`extensions/tests/conftest.py`), and one
 of them installs at the longest root that fits and one character past it, on
 a machine without long paths only.
