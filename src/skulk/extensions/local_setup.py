@@ -15,7 +15,10 @@ from skulk.extensions.runtime_attachment import (
     ServiceConnection,
 )
 from skulk.extensions.runtime_files import read_private
-from skulk.extensions.runtime_integrity import runtime_interpreter
+from skulk.extensions.runtime_integrity import (
+    owned_generation,
+    runtime_interpreter,
+)
 from skulk.extensions.runtime_selection import RuntimeSelection, RuntimeSelector
 from skulk.shared.constants import SKULK_CONFIG_HOME
 from skulk.utils.owned_process import hand_over
@@ -121,7 +124,7 @@ async def _run_installed_plugin(
     ) as (runtime, _):
         if selector.current() != selection or selector.pending.exists():
             raise ValueError("plugin selection changed or requires recovery")
-        generation = root / "generations" / selection.runtime_digest
+        generation = owned_generation(root, selection.runtime_digest)
         artifact = generation / "artifacts/bundle.pyz"
         entrypoint = "__setup__.py" if action == "setup" else "__manage__.py"
         bootstrap = _SETUP_ENTRYPOINT if action == "setup" else _MANAGEMENT_ENTRYPOINT

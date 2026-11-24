@@ -89,6 +89,7 @@ from skulk.extensions.runtime_files import (
 from skulk.extensions.runtime_install import finish_runtime_work
 from skulk.extensions.runtime_integrity import (
     RuntimePathTooLongError,
+    owned_generation,
     path_refusal_payload,
 )
 from skulk.extensions.runtime_service import RuntimeServiceStatus
@@ -1198,7 +1199,12 @@ class RuntimeManager:
         cached = self.release_identities.get(digest)
         if cached is not None:
             return cached
-        identity = installed_release(root / "generations" / digest / "staged.json")
+        try:
+            generation = owned_generation(root, digest)
+        except ValueError:
+            # Another runtime's folder says nothing about this one.
+            return None
+        identity = installed_release(generation / "staged.json")
         if identity is not None:
             if len(self.release_identities) >= 64:
                 # Bounded: installations are capped at 16, so this only drops
@@ -1353,9 +1359,7 @@ class RuntimeManager:
                 raise ValueError("no selected installed contract")
             document = _OBJECT.validate_json(
                 read_private(
-                    controller.root
-                    / "generations"
-                    / selection.runtime_digest
+                    owned_generation(controller.root, selection.runtime_digest)
                     / "staged.json",
                     _STAGED_METADATA_BYTES,
                 )

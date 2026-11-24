@@ -22,6 +22,7 @@ from skulk.extensions.runtime_artifacts import (
 )
 from skulk.extensions.runtime_attachment import HostSettings
 from skulk.extensions.runtime_files import read_private, write_private
+from skulk.extensions.runtime_integrity import claim_generation, generation_directory
 from skulk.extensions.runtime_selection import RuntimeSelection
 from skulk.extensions.tests.test_inference_runtime import inference_fixture
 from skulk.extensions.tests.test_native_runtime import sign
@@ -63,7 +64,10 @@ def installation(
     path = root / "installations" / "managed.fixture"
     write_private(path / "runtime-selection.json", selected.model_dump_json().encode())
     write_private(path / "publisher-trust.json", trust.model_dump_json().encode())
-    write_private(path / "generations" / runtime.digest / "staged.json", raw)
+    generation = generation_directory(path, runtime.digest)
+    # As the installer makes it: the folder says whose it is before it holds anything.
+    claim_generation(generation, runtime.digest)
+    write_private(generation / "staged.json", raw)
     write_private(
         path
         / ("bundle-" + hashlib.sha256(manifest.bundle_id.encode()).hexdigest()[:24])

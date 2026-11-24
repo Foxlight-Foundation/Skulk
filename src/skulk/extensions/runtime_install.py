@@ -48,7 +48,10 @@ from skulk.extensions.runtime_files import (
 )
 from skulk.extensions.runtime_integrity import (
     RuntimePathTooLongError,
+    check_generation,
+    claim_generation,
     environment_command,
+    generation_directory,
     runtime_interpreter,
     runtime_path_excess,
     seal_runtime,
@@ -423,12 +426,13 @@ class RuntimeInstaller:
         digest = _RUNTIME_DIGEST.validate_python(runtime_digest, strict=True)
         lock = await self._ownership_lock(wait_for_ownership)
         try:
-            generation = self.root / "generations" / digest
+            generation = generation_directory(self.root, digest)
 
             async def inspect() -> tuple[VerifiedRuntime, QualifiedHost]:
                 if not generation.is_dir():
                     raise FileNotFoundError("staged generation is unavailable")
                 private_directory(self.root / "generations")
+                check_generation(generation, digest)
                 private_directory(generation)
                 host = await asyncio.to_thread(measure_host)
                 runtime = self._verify(
@@ -505,7 +509,7 @@ class RuntimeInstaller:
                 content for name, content in supplied.items() if name.endswith(".whl")
             )
         excess = runtime_path_excess(
-            self.root / "generations" / runtime.digest, names, wheels
+            generation_directory(self.root, runtime.digest), names, wheels
         )
         if excess:
             raise RuntimePathTooLongError(excess)
@@ -579,7 +583,10 @@ class RuntimeInstaller:
             self._save(operation)
             record_started = True
             private_directory(self.root / "generations")
-            generation = self.root / "generations" / runtime.digest
+            generation = generation_directory(self.root, runtime.digest)
+            # Before recovery moves an incomplete generation aside, and before
+            # anything is written: a folder another runtime holds is refused.
+            check_generation(generation, runtime.digest)
             if generation.exists() and not (generation / "staged.json").exists():
                 if recover:
                     self._retain_incomplete(generation, prior or operation)
@@ -621,7 +628,7 @@ class RuntimeInstaller:
                     # the generation folder exists.
                     await asyncio.to_thread(self.check_path_room, runtime, supplied)
                     private_directory(self.root / "generations")
-                    private_directory(generation)
+                    claim_generation(generation, runtime.digest)
                     artifact_directory = generation / "artifacts"
                     private_directory(artifact_directory)
                     for name, content in supplied.items():

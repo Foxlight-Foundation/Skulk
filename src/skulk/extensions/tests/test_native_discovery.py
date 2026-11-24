@@ -48,6 +48,7 @@ from skulk.extensions.runtime_files import (
     read_private,
     write_private,
 )
+from skulk.extensions.runtime_integrity import claim_generation, generation_directory
 from skulk.extensions.runtime_selection import RuntimeSelection
 from skulk.extensions.tests.test_call_runtime import call_fixture
 from skulk.extensions.tests.test_native_runtime import OBJECT, sign
@@ -177,12 +178,13 @@ async def owner(
     )
     write_private(root / "runtime-selection.json", selected.model_dump_json().encode())
     write_private(root / "publisher-trust.json", trust.model_dump_json().encode())
-    write_private(root / "generations" / runtime.digest / "staged.json", metadata)
+    generation = generation_directory(root, runtime.digest)
+    # As the installer makes it: the folder says whose it is before it holds anything.
+    claim_generation(generation, runtime.digest)
+    write_private(generation / "staged.json", metadata)
     provision_native_host(root, runtime.digest, secrets.token_hex(16))
     binding = HostBinding.model_validate_json(read_private(root / "core-host.json"))
-    contracts = OBJECT.validate_python(
-        manifest.value()["contracts"], strict=True
-    )
+    contracts = OBJECT.validate_python(manifest.value()["contracts"], strict=True)
     descriptors = TypeAdapter(tuple[NativeDescriptor, ...]).validate_json(
         json.dumps(contracts["descriptors"])
     )

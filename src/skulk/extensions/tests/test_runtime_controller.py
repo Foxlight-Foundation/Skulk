@@ -11,6 +11,7 @@ import pytest
 
 from skulk.extensions.runtime_controller import LifecycleRequest, RuntimeController
 from skulk.extensions.runtime_files import RuntimeLock, write_private
+from skulk.extensions.runtime_integrity import generation_directory
 from skulk.extensions.runtime_service import RuntimeService, ServiceProcessState
 from skulk.extensions.tests.test_runtime_service import installed, running, status
 
@@ -60,7 +61,9 @@ async def test_revision_refusal_preserves_owner_and_disable_reconnect_never_repl
         with pytest.raises(ValueError, match="identity"):
             await controller.submit(request.model_copy(update={"expected_revision": 2}))
         assert selector.current() == complete.selection
-        assert (selector.root / "generations" / selection.runtime_digest).is_dir()
+        assert generation_directory(
+            selector.root, selection.runtime_digest
+        ).is_dir()
     finally:
         await controller.close()
     RuntimeLock(selector.root, "manager.lock").close()
@@ -119,7 +122,9 @@ async def test_uninstall_retains_state_across_restart_until_explicit_reinstallat
         assert not accepted.selection.enabled
         for name, value in retained.items():
             assert (selector.root / name).read_bytes() == value
-        assert (selector.root / "generations" / selection.runtime_digest).is_dir()
+        assert generation_directory(
+            selector.root, selection.runtime_digest
+        ).is_dir()
     finally:
         await resumed.close()
 
@@ -371,7 +376,7 @@ async def test_stopped_selection_recovery_revalidates_runtime(
             pending, payload.model_copy(update={"verify_runtime": False}).model_dump_json().encode()
         )
     elif damage == "artifact":
-        artifact = controller.root / "generations" / digest / "artifacts/bundle.pyz"
+        artifact = generation_directory(controller.root, digest) / "artifacts/bundle.pyz"
         artifact.write_bytes(artifact.read_bytes() + b"tampered")
     elif damage == "revocation":
         path = controller.root / "publisher-trust.json"

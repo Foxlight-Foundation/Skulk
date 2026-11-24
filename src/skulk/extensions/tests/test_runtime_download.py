@@ -20,7 +20,10 @@ from skulk.extensions.runtime_files import (
     read_private,
     write_private,
 )
-from skulk.extensions.runtime_integrity import RuntimePathTooLongError
+from skulk.extensions.runtime_integrity import (
+    RuntimePathTooLongError,
+    generation_directory,
+)
 from skulk.extensions.runtime_selection import RuntimeSelector
 from skulk.extensions.tests.test_runtime_install import artifacts
 
@@ -217,7 +220,7 @@ async def test_a_path_found_too_long_after_the_download_is_named_on_the_operatio
     assert stopped.error_code == "runtime_path_too_long" and stopped.path_excess == 9
     # Everything was downloaded and verified; nothing was built.
     assert stopped.downloaded_bytes == review.artifact_bytes and len(calls) == 3
-    assert not (downloads.root / "generations" / review.runtime_digest).exists()
+    assert not (generation_directory(downloads.root, review.runtime_digest)).exists()
     # The record survives a restart exactly, count included.
     await downloads.close()
     restarted = RuntimeDownloads(
@@ -676,7 +679,7 @@ async def test_interrupted_offline_stage_is_retained_before_explicit_rebuild(
         await downloads.work
     failed = downloads.current()
     assert failed is not None and failed.error_code == "installation_failed"
-    generation = downloads.root / "generations" / review.runtime_digest
+    generation = generation_directory(downloads.root, review.runtime_digest)
     assert generation.is_dir() and not (generation / "staged.json").exists()
     lock = RuntimeLock(downloads.installer.installer)
     try:
@@ -713,7 +716,7 @@ async def test_recovery_never_reseals_completed_or_moves_selected_generation(
     """Explicit recovery cannot bypass immutable completion or active-selection fences."""
     downloads, metadata, source, _ = prepared(tmp_path, monkeypatch)
     staged = await downloads.installer.stage(metadata, source, operation_id="b" * 32)
-    generation = downloads.root / "generations" / staged.runtime_digest
+    generation = generation_directory(downloads.root, staged.runtime_digest)
     if selected:
         selector = RuntimeSelector(downloads.root)
         await selector.activate(
