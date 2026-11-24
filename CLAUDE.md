@@ -7,6 +7,12 @@ does not support Chromium installation on Ubuntu 26.04.
 
 ## Project Overview
 
+The package initializer disables Loguru variable-value traceback annotations
+before logger import; retain this for CLI, plugin and spawned-process privacy.
+Node sinks independently pass `diagnose=False`. A node started with `SKULK_HOME`
+keeps its default staging directory inside that home. Settings broadcasts omit
+staging paths and override fields the operator never set.
+
 Native host stream RPC cancellation uses the selected application's signed cleanup
 grace for readiness, input and output. Owner authority remains effective through
 pending terminal/end delivery after execution-scope cleanup; sibling roots retain

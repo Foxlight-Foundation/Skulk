@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from pydantic import JsonValue, SecretStr, TypeAdapter
 
 from skulk.extensions.runtime_artifacts import RuntimeTrust
 from skulk.extensions.runtime_download import (
@@ -26,6 +26,18 @@ from skulk.extensions.runtime_integrity import (
 )
 from skulk.extensions.runtime_selection import RuntimeSelector
 from skulk.extensions.tests.test_runtime_install import artifacts
+
+
+def _fixed_path_excess(*_paths_and_wheels: object) -> int:
+    """Report the same Windows path excess before and after a retry."""
+    return 12
+
+
+async def _wait_for_current_download(downloads: RuntimeDownloads) -> None:
+    """Observe work again after submission changes the mutable task field."""
+    work = downloads.work
+    assert work is not None
+    await work
 
 
 def prepared(
@@ -156,7 +168,7 @@ async def test_a_path_too_long_refuses_an_install_before_it_is_journaled_or_down
     )
     with monkeypatch.context() as limited:
         limited.setattr(
-            "skulk.extensions.runtime_install.runtime_path_excess", lambda *_: 12
+            "skulk.extensions.runtime_install.runtime_path_excess", _fixed_path_excess
         )
         with pytest.raises(RuntimePathTooLongError) as refused:
             await downloads.submit(request)
@@ -172,14 +184,13 @@ async def test_a_path_too_long_refuses_an_install_before_it_is_journaled_or_down
         lambda _: httpx.Response(200, content=b"truncated")
     )
     await downloads.submit(request)
-    assert downloads.work is not None
-    await downloads.work
+    await _wait_for_current_download(downloads)
     failed = downloads.current()
     assert failed is not None and failed.state == "recovery_required"
     downloads.transport = working
     with monkeypatch.context() as limited:
         limited.setattr(
-            "skulk.extensions.runtime_install.runtime_path_excess", lambda *_: 12
+            "skulk.extensions.runtime_install.runtime_path_excess", _fixed_path_excess
         )
         with pytest.raises(RuntimePathTooLongError):
             await downloads.recover(request.operation_id, 1)
@@ -275,7 +286,9 @@ def test_an_install_record_carries_a_path_excess_only_for_the_path_refusal(
             error_code="installation_failed",
         )
 
-    earlier = json.loads(asyncio.run(reviewed()).model_dump_json())
+    earlier = TypeAdapter(dict[str, JsonValue]).validate_json(
+        asyncio.run(reviewed()).model_dump_json()
+    )
     # As a build before this one wrote it.
     del earlier["path_excess"]
     assert InstallOperation.model_validate_json(json.dumps(earlier)).path_excess is None
