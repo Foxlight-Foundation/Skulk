@@ -38,6 +38,8 @@ runtime could not, and for the same reason."""
 
 _LEGACY_PLATFORMS: dict[str, str] = {"ubuntu-24.04-x86_64": "linux-glibc-x86_64"}
 
+_UNREGISTRABLE = "plugin services are qualified on macOS and Linux only"
+
 # A reverse-DNS bundle identifier as Info.plist carries it; nothing else may
 # reach the launchd definition from the app bundle.
 _BUNDLE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,254}")
@@ -113,7 +115,7 @@ def service_platform() -> ServicePlatform:
             raise ValueError("plugin services on Linux require a running systemd")
         library, _ = platform.libc_ver()
         return f"linux-{library or 'unknown'}-{architecture}"
-    raise ValueError("plugin services are qualified on macOS and Linux only")
+    raise ValueError(_UNREGISTRABLE)
 
 
 @final
@@ -379,6 +381,63 @@ def local_layout(user_id: int, scope: ServiceScope = "system") -> ServiceLayout:
         user_state,
         user_units,
     )
+
+
+def owner_layout(scope: ServiceScope) -> ServiceLayout:
+    """The layout of the service that belongs to the account running this process.
+
+    Args:
+        scope: Where that service is, or would be, registered.
+
+    Returns:
+        The fixed layout for this account in that scope.
+
+    Raises:
+        ValueError: On a host where the plugin service cannot be registered.
+    """
+    if sys.platform == "win32":
+        raise ValueError(_UNREGISTRABLE)
+    return local_layout(os.getuid(), scope)
+
+
+def registered_for(
+    layout: ServiceLayout, base: Path, *, protected: bool = False
+) -> bool:
+    """Whether the registered OS definition is exactly the one that starts ``base``.
+
+    The definition is read as itself, never through a link.
+
+    Args:
+        layout: The service whose registration is read.
+        base: The interpreter the definition must invoke.
+        protected: Also require that only the definition's rightful owner can
+            change it: root for a system service, the account for a user
+            service.
+
+    Returns:
+        False when nothing is registered, when the definition cannot be read
+        or is not protected as asked, and when it differs in any byte.
+
+    Raises:
+        ValueError: When ``base`` is not a path a definition may name.
+    """
+    if sys.platform == "win32":
+        return False
+    try:
+        descriptor = os.open(layout.unit, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    with os.fdopen(descriptor, "rb") as source:
+        if protected:
+            info = os.fstat(source.fileno())
+            owner = 0 if layout.scope == "system" else os.getuid()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != owner
+                or info.st_mode & 0o022
+            ):
+                return False
+        return source.read(65537) == layout.definition(base)
 
 
 def _directory(path: Path) -> int:

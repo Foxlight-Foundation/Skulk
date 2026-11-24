@@ -1431,9 +1431,9 @@ do not run there yet. Plugin-hosting code in `extensions/` never asks who owns
 a file or opens one link-safely by calling the operating system itself: it uses
 `is_private_directory`, `open_private`, `sync_directory`, `examine`,
 `open_unfollowed` and `create_file` from the same module, and a guard in
-`utils/tests/test_runtime_files_platforms.py` lists the modules not yet moved
-(`service_registration.py` and `service_setup.py`). Take a module off that
-list when it is ported; add none. `no_other_account_can_change()` in the same
+`utils/tests/test_runtime_files_platforms.py` lists the one module not yet
+moved (`service_registration.py`). Take it off that list when it is ported;
+add none. `no_other_account_can_change()` in the same
 module is the rule for a file this account did not necessarily create, such
 as one in the Python environment Skulk itself is installed in: on Windows its
 owner, and every account its access list lets change it, must be the account,
@@ -1568,8 +1568,22 @@ Naming a Windows artifact family is a decision for the release schema and the
 owner runtime, not a porting step. Until it is made, the tests give staging a
 stand-in host and a stand-in answer from the copy; everything else in them is
 real, including a copy of the whole installed environment that is sealed,
-verified by the bootstrap and serves as the manager. Registering the service
-with Windows (`service_registration.py`, `service_setup.py`) is not built.
+verified by the bootstrap and serves as the manager.
+Service setup (`extensions/service_setup.py`, and the node's own
+`service_autosetup.py`) no longer asks the operating system who it runs as
+or opens a registered definition itself. It reaches the registration through
+two functions of `service_registration.py`: `owner_layout(scope)`, the layout
+of the service that belongs to the account running this process, and
+`registered_for(layout, base)`, whether the registered definition is exactly
+the one that starts `base`; and it takes the base interpreter from
+`service_bootstrap.current_base()`. Never read `layout.unit` or compare
+`sys.executable` anywhere else. Registering the service with Windows is not
+built: there `owner_layout()` refuses by name, nothing reads as registered,
+the status reads `unsupported` from the start (`connected_scope()` asks
+`owner_layout()` before it reads the connection, so the Plugins page starts
+no setup on a host that can never finish one),
+and setup's own steps (its lock, its retained operation, selecting a staged
+copy) are checked on Windows against a stand-in registration.
 Windows limits how long a path may be unless the machine has long paths
 switched on (off by default): a directory's path may be 247 characters and a
 file's 259. A generation folder on Windows is therefore named by the first 32

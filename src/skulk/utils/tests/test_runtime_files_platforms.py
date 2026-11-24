@@ -52,7 +52,7 @@ _DIRECT_FILE_CUSTODY = frozenset(
 )
 # Plugin-hosting modules not yet moved onto the seam, so not yet able to run on
 # Windows. Remove a module from this list when it is ported; add none.
-_NOT_YET_PORTED = frozenset({"service_registration.py", "service_setup.py"})
+_NOT_YET_PORTED = frozenset({"service_registration.py"})
 # Runs on nothing but the standard library, before anything of Skulk's may be
 # imported, so it cannot use the seam. It restates the seam's rules for both
 # platforms and is held to them by its own tests (``test_service_snapshot.py``).
