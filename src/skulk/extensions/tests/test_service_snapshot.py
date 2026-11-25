@@ -86,6 +86,20 @@ _STOPS_WHEN_ASKED = (
 )
 
 
+# A manager that says which copy it runs, asking the startup file that started
+# it (the copy of it in the service root), and ends.
+_SAYS_WHAT_IT_RUNS = (
+    "import importlib.util, json, os, sys\n"
+    "from pathlib import Path\n"
+    "root = sys.argv[-1]\n"
+    "spec = importlib.util.spec_from_file_location(\n"
+    "    'startup', os.path.join(root, 'service-bootstrap.py'))\n"
+    "startup = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(startup)\n"
+    "print(json.dumps(startup.started_from(Path(root))), flush=True)\n"
+)
+
+
 def _site(runtime: Path) -> Path:
     """Where ``venv`` puts site-packages on this platform."""
     if sys.platform == "win32":
@@ -605,6 +619,60 @@ def test_a_console_request_to_stop_is_the_managers_to_act_on(tmp_path: Path) -> 
         bootstrap.wait()
 
 
+def test_a_manager_the_startup_file_started_knows_which_copy_it_runs(
+    tmp_path: Path,
+) -> None:
+    """The copy the startup file verified is the copy the manager names.
+
+    Started by the real startup file, on its own interpreter, the manager
+    asks where its environment lies and gets the selected generation and the
+    digest of the manifest the startup file checked every file against.
+    """
+    snapshot = staged(tmp_path, _SAYS_WHAT_IT_RUNS)
+    activate_service_runtime(tmp_path, snapshot)
+    result = _run_bootstrap(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [snapshot.generation, snapshot.manifest_sha256]
+
+
+def test_a_process_names_the_copy_it_runs_from_and_not_the_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where the interpreter's environment lies decides, never the pointer."""
+    running = staged(tmp_path)
+    successor = staged(tmp_path, name="b" * 32)
+    activate_service_runtime(tmp_path, successor)
+    generations = tmp_path / "core-runtimes"
+    # This test process runs from no service copy at all.
+    assert service_bootstrap.started_from(tmp_path) is None
+    monkeypatch.setattr(
+        sys, "prefix", str(generations / running.generation / "runtime")
+    )
+    assert service_bootstrap.started_from(tmp_path) == (
+        running.generation,
+        running.manifest_sha256,
+    )
+    monkeypatch.setattr(
+        sys, "prefix", str(generations / successor.generation / "runtime")
+    )
+    assert service_bootstrap.started_from(tmp_path) == (
+        successor.generation,
+        successor.manifest_sha256,
+    )
+    # A copy under another root is not this service's copy.
+    elsewhere = tmp_path / "elsewhere"
+    private_directory(elsewhere)
+    assert service_bootstrap.started_from(elsewhere) is None
+    # Nor is a folder inside a copy, nor a copy whose manifest is gone.
+    monkeypatch.setattr(sys, "prefix", str(generations / running.generation))
+    assert service_bootstrap.started_from(tmp_path) is None
+    monkeypatch.setattr(
+        sys, "prefix", str(generations / running.generation / "runtime")
+    )
+    (generations / running.generation / "snapshot.json").unlink()
+    assert service_bootstrap.started_from(tmp_path) is None
+
+
 def test_what_staging_copies_is_what_the_seal_accepts(tmp_path: Path) -> None:
     """Folders the copy makes on the way down are as private as the files in them."""
     from skulk.extensions import service_snapshot
@@ -747,6 +815,14 @@ async def _serves(root: Path, snapshot: ServiceSnapshot) -> None:
                 await asyncio.sleep(0.2)
                 continue
             assert "result" in reply
+            # The real manager, started by the real startup file, names the
+            # copy that was selected for it.
+            result = reply["result"]
+            assert isinstance(result, dict)
+            assert result.get("runtime") == {
+                "generation": snapshot.generation,
+                "manifest_sha256": snapshot.manifest_sha256,
+            }
             break
         if request_to_stop is not None:
             os.kill(bootstrap.pid, request_to_stop)

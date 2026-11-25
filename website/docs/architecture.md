@@ -2969,6 +2969,19 @@ naming one for Windows is a decision for the release schema and the plugin owner
 runtime. Until then the registration described below refuses too, by asking the
 same question first.
 Core-runtime activation requires a stopped manager and leaves plugin state intact.
+A manager knows which service copy it runs from. It works that out once, when it
+starts, from where its own interpreter's environment lies and from that
+generation's own manifest, and never from the selection, and its inventory reply
+carries the answer (`runtime`: the generation and the SHA-256 of its manifest)
+when it was started from a copy. Local setup counts the service as ready only
+when the manager that answers names exactly the copy setup expects. That matters
+after a refresh: the old manager goes on answering for a moment with its
+successor already selected, and the successor may be a while in coming (ten
+seconds on macOS and Linux, up to a minute on Windows). An answer from the old
+manager, from a manager that names another copy, or from one that names none
+leaves setup waiting within its usual bound, with the registration untouched.
+Running setup again while such a manager still answers waits again; it does not
+register the service a second time.
 Explicit local setup with a changed source can supersede an interrupted operation;
 its journal and logical profile remain retained while a new copy is staged before
 stopping any existing manager. Linux registration emits a literal working directory

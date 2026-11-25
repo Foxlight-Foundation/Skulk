@@ -831,6 +831,43 @@ def selected_base_matches(root: Path, base: Path) -> bool:
         return False
 
 
+def started_from(root: Path) -> tuple[str, str] | None:
+    """The service copy this process runs from: its generation and manifest digest.
+
+    Worked out from where this interpreter's own environment lies, and from
+    that generation's own manifest. The selection (``core-runtime.json``) is
+    never read: a manager that has just selected its successor still runs
+    from the copy it was started on, and has to go on saying so, or whoever
+    asks would take the old manager for the new one.
+
+    Args:
+        root: The service root the caller serves.
+
+    Returns:
+        ``(generation, manifest_sha256)`` when this interpreter's environment
+        is ``<root>/core-runtimes/<generation>/runtime`` and the generation's
+        manifest can be read; None for any other process, such as one started
+        by hand from a development environment.
+    """
+    try:
+        environment = Path(sys.prefix).resolve(strict=True)
+        generations = (root / "core-runtimes").resolve(strict=True)
+    except OSError:
+        return None
+    generation = environment.parent
+    if (
+        environment.name != "runtime"
+        or generation.parent != generations
+        or not _GENERATION.fullmatch(generation.name)
+    ):
+        return None
+    try:
+        raw = private_read(generation / "snapshot.json", _MAXIMUM_MANIFEST)
+    except (OSError, ValueError):
+        return None
+    return generation.name, hashlib.sha256(raw).hexdigest()
+
+
 def manager_command(root: Path, runtime: Path) -> list[str]:
     """The one command this file ever starts: the manager, from ``runtime``."""
     return [

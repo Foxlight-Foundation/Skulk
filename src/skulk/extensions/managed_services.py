@@ -488,6 +488,19 @@ class ManagedInstallation(BaseModel):
     )
 
 
+class ManagedRuntime(BaseModel):
+    """The service copy a manager was started from, as it reports it."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    generation: str = Field(
+        pattern=r"^[a-f0-9]{32}$", description="The staged generation's name."
+    )
+    manifest_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="SHA-256 of that generation's manifest.",
+    )
+
+
 class ManagedInventory(BaseModel):
     """Manager inventory available even when every plugin runtime is disabled or broken."""
 
@@ -498,6 +511,11 @@ class ManagedInventory(BaseModel):
     reload_runtime: bool = Field(
         default=False,
         description="Whether this manager can select a staged runtime and restart on request.",
+    )
+    runtime: ManagedRuntime | None = Field(
+        default=None,
+        description="The service copy this manager was started from; absent "
+        "when it was not started from one or predates reporting it.",
     )
     store_trust_retry: bool = Field(
         default=False,

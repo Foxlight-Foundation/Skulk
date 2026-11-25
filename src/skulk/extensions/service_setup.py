@@ -285,12 +285,38 @@ async def _selected_within(root: Path, generation: str, seconds: float) -> bool:
     return True
 
 
-async def _observe(root: Path) -> bool:
+async def _inventory(root: Path) -> dict[str, JsonValue] | None:
+    """What the manager serving ``root`` answers, or None when none answers."""
     try:
-        result = await manager_request(root, InventoryRequest())
-        return "result" in result and "error" not in result
+        reply = await manager_request(root, InventoryRequest())
     except (OSError, ValueError, TimeoutError):
-        return False
+        return None
+    result = reply.get("result")
+    if "error" in reply or not isinstance(result, dict):
+        return None
+    return result
+
+
+async def _observe(root: Path) -> bool:
+    """Whether any manager answers for ``root``, whichever copy it runs."""
+    return await _inventory(root) is not None
+
+
+async def _serves(root: Path, snapshot: ServiceSnapshot) -> bool:
+    """Whether the manager that answers was started from ``snapshot``.
+
+    An answer alone does not say which manager gave it. After a reload the
+    old manager goes on answering for a moment with its successor already
+    selected, and the successor may be a while in coming. Only a manager
+    that names the copy it was started from, and names this one, is the
+    service setup is waiting for. One that names another copy, or none, is
+    not, however healthy it is.
+    """
+    inventory = await _inventory(root)
+    return inventory is not None and inventory.get("runtime") == {
+        "generation": snapshot.generation,
+        "manifest_sha256": snapshot.manifest_sha256,
+    }
 
 
 def registered_unit_names_base(base: Path) -> bool:
@@ -463,13 +489,38 @@ async def setup_service(
                 and await asyncio.to_thread(
                     _ready_installation, layout, operation.snapshot, base
                 )
-                and await _observe(layout.root)
             ):
-                write_private(connection_path, connection.model_dump_json().encode())
-                if operation.phase == "registered":
-                    operation = operation.model_copy(update={"phase": "ready"})
-                    _save(layout.root, operation)
-                return operation
+                # The selection, its seal and the registration are this
+                # operation's. What is left to know is who answers.
+                registered = operation.snapshot
+                served = await _serves(layout.root, registered)
+                if not served and await _observe(layout.root):
+                    # A manager answers, but not from this copy: the one this
+                    # service replaces has not gone yet, or its successor has
+                    # not come. Nothing is wrong with the registration, so it
+                    # is left alone and the service is waited for. Registering
+                    # again would restart a service that is only on its way,
+                    # and for a system service ask for elevation to do it.
+                    report(_STARTING_MESSAGE)
+                    deadline = time.monotonic() + _READINESS_WAIT_SECONDS
+                    while not (
+                        await _serves(layout.root, registered)
+                        and await asyncio.to_thread(
+                            _ready_installation, layout, registered, base
+                        )
+                    ):
+                        if time.monotonic() >= deadline:
+                            raise ServiceReadinessPendingError(operation.operation_id)
+                        await asyncio.sleep(0.5)
+                    served = True
+                if served:
+                    write_private(
+                        connection_path, connection.model_dump_json().encode()
+                    )
+                    if operation.phase == "registered":
+                        operation = operation.model_copy(update={"phase": "ready"})
+                        _save(layout.root, operation)
+                    return operation
             reply: dict[str, JsonValue] | None = None
             if refresh and operation.snapshot is None:
                 # The OS service is registered and answering; only the Skulk
@@ -514,7 +565,7 @@ async def setup_service(
                 report(_STARTING_MESSAGE)
                 deadline = time.monotonic() + _READINESS_WAIT_SECONDS
                 while not (
-                    await _observe(layout.root)
+                    await _serves(layout.root, selected)
                     and await asyncio.to_thread(
                         _ready_installation, layout, selected, base
                     )
@@ -578,8 +629,10 @@ async def setup_service(
             operation = operation.model_copy(update={"phase": "registered"})
             _save(layout.root, operation)
             report(_STARTING_MESSAGE)
+            installed = operation.snapshot
+            assert installed is not None
             deadline = time.monotonic() + _READINESS_WAIT_SECONDS
-            while not await _observe(layout.root):
+            while not await _serves(layout.root, installed):
                 if time.monotonic() >= deadline:
                     raise ServiceReadinessPendingError(operation.operation_id)
                 await asyncio.sleep(0.5)

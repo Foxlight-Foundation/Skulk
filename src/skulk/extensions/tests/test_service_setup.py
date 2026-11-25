@@ -5,10 +5,12 @@ import os
 import plistlib
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, cast
 
 import pytest
+from pydantic import JsonValue, TypeAdapter
 
 from skulk.extensions import service_bootstrap, service_registration, service_setup
 from skulk.extensions.runtime_artifacts import QualifiedHost
@@ -25,8 +27,17 @@ from skulk.extensions.service_setup import (
     SetupOperation,
     setup_service,
 )
-from skulk.extensions.service_snapshot import ServiceSnapshot
+from skulk.extensions.service_snapshot import ServiceSnapshot, activate_staged_runtime
 from skulk.extensions.tests.test_service_snapshot import staged
+
+
+def _started_on_the_selection(root: Path) -> dict[str, JsonValue]:
+    """What a manager answers that the OS service started on the selected copy."""
+    selected = TypeAdapter(dict[str, JsonValue]).validate_json(
+        read_private(root / "core-runtime.json")
+    )
+    return {"installations": [], "runtime": selected}
+
 
 posix_only = pytest.mark.skipif(
     sys.platform == "win32",
@@ -242,8 +253,10 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
                 raise ValueError("synthetic OS registration failure")
             unit.write_bytes(layout.definition(base))
 
-    async def observe(path: Path) -> bool:
-        return unit.exists() and not fail
+    async def inventory(path: Path) -> dict[str, JsonValue] | None:
+        if not unit.exists() or fail:
+            return None
+        return _started_on_the_selection(path)
 
     def registered_copy(
         actual: ServiceLayout, snapshot: ServiceSnapshot, base: Path
@@ -254,7 +267,7 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
 
     monkeypatch.setattr("skulk.extensions.service_setup.stage_service_runtime", stage)
     monkeypatch.setattr("skulk.extensions.service_setup._elevate", elevate)
-    monkeypatch.setattr("skulk.extensions.service_setup._observe", observe)
+    monkeypatch.setattr("skulk.extensions.service_setup._inventory", inventory)
     monkeypatch.setattr(service_setup, "_READINESS_WAIT_SECONDS", 0.0)
     monkeypatch.setattr(service_setup, "_ready_installation", registered_copy)
     if sys.platform == "win32":
@@ -356,6 +369,224 @@ async def test_setup_resumes_same_snapshot_and_preserves_latest_transport(
         )
         == next_operation
     )
+
+
+class _Service:
+    """A stand-in registration and manager around a real root, selection and seal.
+
+    What stands in: the OS registration (a file), staging (a minimal real
+    environment, sealed), the host measurement, and the manager's two answers
+    setup asks for. ``answer`` is what the manager says to an inventory
+    request; None is a manager that does not answer.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        self.root = tmp_path / "service"
+        self.unit = tmp_path / "system.service"
+        self.build = "b" * 64
+        self.actions: list[str] = []
+        self.stages = 0
+        self.asked = 0
+        self.answer: Callable[[], dict[str, JsonValue] | None] = lambda: None
+        self.after_reload: Callable[[], dict[str, JsonValue] | None] | None = None
+        config = tmp_path / "config"
+        config.mkdir(mode=0o755)
+        layout = ServiceLayout("macos-arm64", *_OWNER, "owner", "owners")
+        base = service_bootstrap.current_base()
+        root, unit = self.root, self.unit
+
+        def service_root(_layout: ServiceLayout) -> Path:
+            return root
+
+        def service_unit(_layout: ServiceLayout) -> Path:
+            return unit
+
+        def fixture_layout(scope: str) -> ServiceLayout:
+            return layout
+
+        async def stage(path: Path) -> ServiceSnapshot:
+            self.stages += 1
+            return staged(path, name=self.build[0] * 32, build=self.build)
+
+        async def elevate(actual: ServiceLayout, action: str) -> None:
+            self.actions.append(action)
+            if action == "prepare":
+                private_directory(root)
+            if action == "install":
+                unit.write_bytes(layout.definition(base))
+
+        def registered_copy(
+            actual: ServiceLayout, snapshot: ServiceSnapshot, interpreter: Path
+        ) -> bool:
+            return unit.exists() and unit.read_bytes() == layout.definition(interpreter)
+
+        def registered(
+            actual: ServiceLayout, interpreter: Path, *, protected: bool = False
+        ) -> bool:
+            del protected
+            return unit.exists() and unit.read_bytes() == actual.definition(interpreter)
+
+        async def inventory(path: Path) -> dict[str, JsonValue] | None:
+            self.asked += 1
+            return self.answer()
+
+        async def reload(
+            path: Path, request: service_setup.ManagerRequest
+        ) -> dict[str, JsonValue]:
+            # What the real manager does: select the staged copy and answer.
+            assert isinstance(request, service_setup.ReloadRuntimeRequest)
+            activate_staged_runtime(
+                path,
+                ServiceSnapshot.model_validate_json(
+                    read_private(
+                        path / "core-runtimes" / request.generation / "staged.json"
+                    )
+                ),
+            )
+            if self.after_reload is not None:
+                self.answer = self.after_reload
+            return {"result": {"generation": request.generation, "restarting": True}}
+
+        monkeypatch.setattr(ServiceLayout, "root", property(service_root))
+        monkeypatch.setattr(ServiceLayout, "unit", property(service_unit))
+        monkeypatch.setattr(service_setup, "owner_layout", fixture_layout)
+        monkeypatch.setattr(service_setup, "SKULK_CONFIG_HOME", config)
+        monkeypatch.setattr(
+            service_setup,
+            "measure_host",
+            lambda: QualifiedHost("macos-arm64", "3.13.13", "1.5.2", self.build),
+        )
+        monkeypatch.setattr(
+            service_setup, "service_source_identity", lambda: self.build
+        )
+        monkeypatch.setattr(service_setup, "stage_service_runtime", stage)
+        monkeypatch.setattr(service_setup, "_elevate", elevate)
+        monkeypatch.setattr(service_setup, "_ready_installation", registered_copy)
+        monkeypatch.setattr(service_setup, "registered_for", registered)
+        monkeypatch.setattr(service_setup, "_inventory", inventory)
+        monkeypatch.setattr(service_setup, "manager_request", reload)
+
+    def started_on_the_selection(self) -> dict[str, JsonValue]:
+        """The manager the OS service started on whatever is selected now."""
+        return _started_on_the_selection(self.root)
+
+    def operation(self) -> SetupOperation:
+        return SetupOperation.model_validate_json(
+            read_private(self.root / "setup.json")
+        )
+
+
+def _nameless() -> dict[str, JsonValue]:
+    """A manager from before managers said which copy they run."""
+    return {"installations": [], "reload_runtime": True}
+
+
+async def test_a_first_setup_is_ready_only_when_its_own_manager_answers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A manager that answers without naming this copy is not this service."""
+    service = _Service(monkeypatch, tmp_path)
+    monkeypatch.setattr(service_setup, "_READINESS_WAIT_SECONDS", 0.6)
+    service.answer = _nameless
+    with pytest.raises(ServiceReadinessPendingError):
+        await setup_service()
+    assert service.operation().phase == "registered"
+    assert service.actions == ["prepare", "stop", "install"]
+    # Asked again while that manager still answers, setup waits again. The
+    # registration is sound, so it is not made again to hurry things.
+    with pytest.raises(ServiceReadinessPendingError):
+        await setup_service()
+    assert service.operation().phase == "registered"
+    assert service.actions == ["prepare", "stop", "install"] and service.stages == 1
+
+    service.answer = service.started_on_the_selection
+    completed = await setup_service()
+    assert completed.phase == "ready"
+    assert completed.operation_id == service.operation().operation_id
+    # Nothing was registered again to get there, and nothing staged again.
+    assert service.actions == ["prepare", "stop", "install"] and service.stages == 1
+    # The same copy, still served by its own manager: nothing to do.
+    assert await setup_service() == completed
+    assert service.actions == ["prepare", "stop", "install"] and service.stages == 1
+
+
+@pytest.mark.parametrize("answering", ["predecessor", "manifest", "nameless", "nobody"])
+async def test_a_refresh_is_ready_only_when_the_successor_answers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, answering: str
+) -> None:
+    """Selecting the successor is not the successor serving.
+
+    After a reload the manager that answers may be the old one, which goes
+    on answering for a moment with its successor already selected; or one
+    that names another copy; or one that names none; or nobody yet. In none
+    of these is the refresh done, and in all of them it stays pending with
+    the registration untouched, and completes when the successor answers.
+    """
+    service = _Service(monkeypatch, tmp_path)
+    service.answer = service.started_on_the_selection
+    first = await setup_service()
+    assert first.phase == "ready" and first.snapshot is not None
+    predecessor = service.started_on_the_selection()
+    registered_once = ["prepare", "stop", "install"]
+    assert service.actions == registered_once
+
+    # The old manager keeps answering as itself until the reload is asked for.
+    def as_predecessor() -> dict[str, JsonValue]:
+        return predecessor
+
+    def as_another_copy() -> dict[str, JsonValue]:
+        return {
+            "installations": [],
+            "runtime": {"generation": "c" * 32, "manifest_sha256": "0" * 64},
+        }
+
+    def nobody() -> dict[str, JsonValue] | None:
+        return None
+
+    answers: dict[str, Callable[[], dict[str, JsonValue] | None]] = {
+        "predecessor": as_predecessor,
+        "manifest": as_another_copy,
+        "nameless": _nameless,
+        "nobody": nobody,
+    }
+    service.answer = as_predecessor
+    service.after_reload = answers[answering]
+    service.build = "c" * 64
+    monkeypatch.setattr(service_setup, "_READINESS_WAIT_SECONDS", 1.2)
+    asked = service.asked
+    with pytest.raises(ServiceReadinessPendingError):
+        await setup_service()
+    # It went on asking for as long as it waited, and took no answer.
+    assert service.asked - asked >= 3
+    pending = service.operation()
+    assert pending.phase == "registered" and pending.snapshot is not None
+    assert pending.snapshot.generation == "c" * 32
+    assert pending.operation_id != first.operation_id
+    assert service.started_on_the_selection()["runtime"] == {
+        "generation": pending.snapshot.generation,
+        "manifest_sha256": pending.snapshot.manifest_sha256,
+    }
+    assert service.actions == registered_once and service.stages == 2
+
+    if answering != "nobody":
+        # Asked again while the wrong manager still answers, setup waits
+        # again: it stops nothing, installs nothing and stages nothing. (With
+        # nobody answering at all, a sound registration is repaired, as it
+        # was before managers said which copy they run.)
+        asked = service.asked
+        with pytest.raises(ServiceReadinessPendingError):
+            await setup_service()
+        assert service.asked - asked >= 3
+        assert service.operation() == pending
+        assert service.actions == registered_once and service.stages == 2
+
+    # The successor comes up on the selection and says so.
+    service.answer = service.started_on_the_selection
+    completed = await setup_service()
+    assert completed.phase == "ready"
+    assert completed.operation_id == pending.operation_id
+    assert completed.snapshot == pending.snapshot
+    assert service.actions == registered_once and service.stages == 2
 
 
 def test_pending_readiness_cli_identifies_retained_operation(
