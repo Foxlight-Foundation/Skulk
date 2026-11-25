@@ -35,6 +35,8 @@ vi.mock('../../hooks/useToast', () => ({
 
 vi.mock('./DevicesPanel', () => ({ DevicesPanel: () => <div>Device actions fixture</div> }));
 
+vi.mock('./EnginesPanel', () => ({ EnginesPanel: () => <div>Engine actions fixture</div> }));
+
 vi.mock('./PairingSettings', () => ({
   PairingSettings: () => <div>Pairing</div>,
 }));
@@ -510,6 +512,24 @@ describe('add-on engine settings', () => {
 
     await save();
 
+    expect(saveFullConfig.mock.calls[0]?.[0]).toMatchObject({
+      engines: { packages_enabled: true, package_channel: 'candidate' },
+    });
+  });
+
+  it('opens the engines on the machines without saving or losing the draft', async () => {
+    const { saveFullConfig, save, control, click } = await renderWithConfig({});
+    await click('Install test builds');
+
+    await click('Engines on your machines');
+    expect(container?.textContent).toContain('Engine actions fixture');
+    expect(container?.querySelector('[role=dialog]')?.getAttribute('aria-label')).toBe('Add-on engines');
+    expect(saveFullConfig).not.toHaveBeenCalled();
+
+    await click('Back to Settings');
+    expect(container?.textContent).not.toContain('Engine actions fixture');
+    expect(control('Install test builds')?.getAttribute('aria-checked')).toBe('true');
+    await save();
     expect(saveFullConfig.mock.calls[0]?.[0]).toMatchObject({
       engines: { packages_enabled: true, package_channel: 'candidate' },
     });

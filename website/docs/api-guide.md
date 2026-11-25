@@ -2940,6 +2940,14 @@ report as JSON, and `--api-port` names the local node's port when it is not
 52415. A command exits 0 when it did what was asked and 1 when the node
 refused or did not answer.
 
+The dashboard reads the same report and makes the same changes under Settings,
+in the Add-on engines section, behind "Engines on your machines". It lists each
+engine, the machines that hold it or are offered it, and the builds on each
+machine's disk. "Use this build" activates a build, including the earlier one,
+and "Remove" deletes one build or the whole engine from a machine after a
+second click. A change there is sent at once; it is not part of the Settings
+draft and needs no Save.
+
 ### Read model capacity requirements
 
 **GET** `/models/requirements`

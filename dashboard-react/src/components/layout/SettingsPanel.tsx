@@ -27,10 +27,11 @@ import { uiActions } from '../../store/slices/uiSlice';
 import type { ThemeName } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { DevicesPanel } from './DevicesPanel';
+import { EnginesPanel } from './EnginesPanel';
 import { InferenceAccessPanel } from './InferenceAccessPanel';
 import { RightDrawer } from '../common/RightDrawer';
 import { CollapsibleSection } from '../common/Surfaces';
-import { FiArrowLeft, FiChevronRight, FiKey, FiSmartphone } from 'react-icons/fi';
+import { FiArrowLeft, FiChevronRight, FiCpu, FiKey, FiSmartphone } from 'react-icons/fi';
 
 /** Visibility and dismissal for the draft-owning Settings drawer. */
 export interface SettingsPanelProps {
@@ -193,15 +194,27 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const seeded = useRef(false);
   const [devicesOpen, setDevicesOpen] = useState(false);
   const [accessOpen, setAccessOpen] = useState(false);
+  const [enginesOpen, setEnginesOpen] = useState(false);
   const [width, setWidth] = useState(420);
   const [devicesWidth, setDevicesWidth] = useState(720);
   const devicesEntry = useRef<HTMLButtonElement>(null);
   const devicesBack = useRef<HTMLButtonElement>(null);
   const accessEntry = useRef<HTMLButtonElement>(null);
+  const enginesEntry = useRef<HTMLButtonElement>(null);
+  // One nested view at a time replaces the Settings body; the draft stays mounted behind it.
+  const nested = devicesOpen || accessOpen || enginesOpen;
+  const nestedTitle = accessOpen
+    ? t('inferenceAccess.title', 'Inference access')
+    : devicesOpen
+      ? t('devices.title', 'Devices & pairing')
+      : enginesOpen
+        ? t('engines.title', 'Add-on engines')
+        : t('settings.title', 'Settings');
   const returnToSettings = () => {
     setDevicesOpen(false);
     setAccessOpen(false);
-    requestAnimationFrame(() => (accessOpen ? accessEntry : devicesEntry).current?.focus());
+    setEnginesOpen(false);
+    requestAnimationFrame(() => (accessOpen ? accessEntry : enginesOpen ? enginesEntry : devicesEntry).current?.focus());
   };
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
     try {
@@ -386,19 +399,20 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   }, [draft, storeDefaults, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, recoveryDraft, enginesDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- Closing the modal resets its nested navigation for the next opening.
-  useEffect(() => { if (!open) { setDevicesOpen(false); setAccessOpen(false); } }, [open]);
+  useEffect(() => { if (!open) { setDevicesOpen(false); setAccessOpen(false); setEnginesOpen(false); } }, [open]);
 
   if (!open) return null;
 
   return (
-    <RightDrawer open={open} onClose={onClose} width={devicesOpen || accessOpen ? devicesWidth : width} minWidth={360} maxWidth={720} onWidthChange={devicesOpen || accessOpen ? setDevicesWidth : setWidth}
-      ariaLabel={accessOpen ? t('inferenceAccess.title', 'Inference access') : devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
-      title={accessOpen ? t('inferenceAccess.title', 'Inference access') : devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
-      headerLeading={devicesOpen || accessOpen ? <Button ref={devicesBack} variant="ghost" size="sm" aria-label={t('devices.backToSettings', 'Back to Settings')} onClick={returnToSettings}><FiArrowLeft /></Button> : undefined}
+    <RightDrawer open={open} onClose={onClose} width={nested ? devicesWidth : width} minWidth={360} maxWidth={720} onWidthChange={nested ? setDevicesWidth : setWidth}
+      ariaLabel={nestedTitle}
+      title={nestedTitle}
+      headerLeading={nested ? <Button ref={devicesBack} variant="ghost" size="sm" aria-label={t('devices.backToSettings', 'Back to Settings')} onClick={returnToSettings}><FiArrowLeft /></Button> : undefined}
       closeLabel={t('settings.close', 'Close settings')} resizeLabel={t('settings.resize', 'Resize settings')}>
       {devicesOpen ? <DevicesPanel /> : null}
       {accessOpen ? <InferenceAccessPanel /> : null}
-        <Body style={{ display: devicesOpen || accessOpen ? 'none' : undefined }}>
+      {enginesOpen ? <EnginesPanel /> : null}
+        <Body style={{ display: nested ? 'none' : undefined }}>
           {loading && <LoadingText>{t('settings.loadingConfig', 'Loading config...')}</LoadingText>}
           {error && <ErrorText>{error}</ErrorText>}
 
@@ -790,6 +804,8 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 />
               </Row>
             )}
+            {/* Changes made there are immediate and are not part of this draft. */}
+            <DevicesEntry ref={enginesEntry} style={{ marginBottom: 0 }} aria-label={t('engines.entry', 'Engines on your machines')} onClick={() => { setEnginesOpen(true); requestAnimationFrame(() => devicesBack.current?.focus()); }}><FiCpu aria-hidden /><span>{t('engines.entry', 'Engines on your machines')}<small>{t('engines.entryHint', 'See which machines have an add-on engine, switch builds or remove one')}</small></span><FiChevronRight size={14} aria-hidden /></DevicesEntry>
           </CollapsibleSection>
 
           {/* Field telemetry: consent lives in skulk.yaml (survives restarts,
@@ -890,7 +906,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
           {configPath && <ConfigPath style={{ marginTop: 16, overflowWrap: 'anywhere' }}>{t('settings.configPath', 'Config: {configPath}', { configPath })}</ConfigPath>}
         </Body>
 
-        <Footer style={{ display: devicesOpen || accessOpen ? 'none' : undefined }}>
+        <Footer style={{ display: nested ? 'none' : undefined }}>
           <Spacer />
           <Button variant="outline" size="md" onClick={onClose}>
             {t('common.cancel', 'Cancel')}
