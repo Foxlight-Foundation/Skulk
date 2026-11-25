@@ -51,7 +51,10 @@ jobs:
         run: npm ci
       - working-directory: dashboard-react
         run: npm run build
+      - run: node --test website/tests/docs-canonical.test.cjs
+      - run: uv run pytest scripts/tests/test_prepare_docs_presentation.py scripts/tests/test_publish_docs_export.py scripts/tests/test_docs_canonicals.py
       - run: uv run python scripts/build_docs.py
+      - run: python3 scripts/check_docs_canonicals.py
       - uses: actions/upload-artifact@v4
         with:
           name: docs-site
@@ -92,19 +95,29 @@ jobs:
         run: npm ci
       - working-directory: dashboard-react
         run: npm run build
+      # Stable may precede the exporter in release history. Take the tooling
+      # and metadata policy from this workflow while retaining its source docs.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .docs-publication-tool
+          sparse-checkout: |
+            scripts/publish_docs_export.py
+            scripts/prepare_docs_presentation.py
+            scripts/check_docs_canonicals.py
+            website/docs-canonical.cjs
+            website/docs-canonical.d.cts
+            website/src/theme/SiteMetadata/index.tsx
+          sparse-checkout-cone-mode: false
+      - name: Apply shared canonical policy to this channel
+        run: python3 .docs-publication-tool/scripts/prepare_docs_presentation.py --repository "$GITHUB_WORKSPACE"
       - name: Build docs site (${{ matrix.channel }})
         env:
           DOCS_BASE_URL: ${{ matrix.base_url }}
           DOCS_CHANNEL: ${{ matrix.channel }}
         run: uv run python scripts/build_docs.py
-      # Stable may precede the exporter in release history. Take the tooling
-      # from the exact workflow revision while exporting the matrix checkout.
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.workflow_sha }}
-          path: .docs-publication-tool
-          sparse-checkout: scripts/publish_docs_export.py
-          sparse-checkout-cone-mode: false
+      - name: Verify initial canonical metadata
+        run: python3 .docs-publication-tool/scripts/check_docs_canonicals.py --base-url "${{ matrix.base_url }}"
       - name: Export immutable documentation inputs
         run: >-
           python3 .docs-publication-tool/scripts/publish_docs_export.py

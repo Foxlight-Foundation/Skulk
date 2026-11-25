@@ -252,6 +252,16 @@ Docs source lives in `website/docs/`. Generated content:
 - `website/static/typedoc/` — TypeDoc HTML reference (gitignored)
 - `website/build/` — final Docusaurus output (gitignored)
 
+Preferred public guides live at `https://docs.foxlight.ai/skulk/` and
+`https://docs.foxlight.ai/skulk/next/`. The Pages workflow copies the current
+`SiteMetadata` wrapper into each channel before building, so even an older
+stable checkout emits the matching preferred canonicals in HTML and client
+navigation. Run `node --test website/tests/docs-canonical.test.cjs` for the
+mapping policy and the focused presentation/export Python tests. The published
+Pages artifact omits duplicate-host sitemaps but retains API exports and TypeDoc.
+After building, run `python3 scripts/check_docs_canonicals.py` with the matching
+`--base-url` to check every rendered page's canonical and Open Graph URL.
+
 Deploy (`.github/workflows/docs.yml`): a push to `main` OR `dev` publishes TWO live sites in one GitHub Pages deploy: the **stable** docs built from `main` at `/Skulk/` and the **next** docs built from `dev` at `/Skulk/next/`. A build matrix builds each branch's current content (baseUrl set via `DOCS_BASE_URL`, channel banner via `DOCS_CHANNEL`), and the deploy job assembles them (stable at root, next under `/next/`). There are no Docusaurus version snapshots to maintain: each site is rebuilt live from its branch, so a push to either rebuilds and redeploys both. PRs build the PR's own docs as a validation artifact only.
 
 Successful push builds additionally export `openapi.json` and `docs-export.json`
