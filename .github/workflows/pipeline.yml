@@ -234,8 +234,11 @@ jobs:
         # and starts the plugin manager from it. Nothing else in CI does
         # either on Windows.
         #
-        # The service setup tests run setup's own steps against a stand-in
-        # registration: registering the service with Windows is not built.
+        # The service task tests register against a stand-in for Task
+        # Scheduler and start the real startup file without a console, as
+        # Task Scheduler starts it. One of them is local setup from nothing to
+        # a manager that answers, on a copy of this whole environment. A real
+        # scheduled task needs a signed-in session, which this runner has not.
         #
         # This runner has long paths switched on, which a Windows machine does
         # not by default, so the 259-character path limit is not checked here.
@@ -258,7 +261,8 @@ jobs:
             src/skulk/extensions/tests/test_runtime_manager_platforms.py \
             src/skulk/extensions/tests/test_service_snapshot.py \
             src/skulk/extensions/tests/test_service_setup.py \
-            src/skulk/extensions/tests/test_service_user_scope.py
+            src/skulk/extensions/tests/test_service_user_scope.py \
+            src/skulk/extensions/tests/test_service_task.py
 
   test:
     name: Test

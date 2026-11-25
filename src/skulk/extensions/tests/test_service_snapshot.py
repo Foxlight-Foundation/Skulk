@@ -1,6 +1,7 @@
 """Pre-site bootstrap integrity, stopped activation and incomplete service copying."""
 
 import asyncio
+import contextlib
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -117,11 +118,28 @@ def _environment(runtime: Path) -> None:
         venv.EnvBuilder(symlinks=True, with_pip=False).create(runtime)
 
 
-def staged(root: Path, manager: str = _MANAGER) -> ServiceSnapshot:
+def _lifetime_lock(root: Path) -> None:
+    """Leave the lock a Windows service holds while it runs, as local setup does.
+
+    The startup file only ever opens it: without it nothing starts there.
+    """
+    if sys.platform == "win32":
+        # Already there, and held, when a service is running from this root.
+        with contextlib.suppress(BlockingIOError):
+            RuntimeLock(root, service_bootstrap.LIFETIME_LOCK).close()
+
+
+def staged(
+    root: Path,
+    manager: str = _MANAGER,
+    name: str = "a" * 32,
+    build: str = "b" * 64,
+) -> ServiceSnapshot:
     """Build a minimal actual venv with a fixed manager fixture and complete seal."""
     private_directory(root)
+    _lifetime_lock(root)
     private_directory(root / "core-runtimes")
-    generation = root / "core-runtimes" / ("a" * 32)
+    generation = root / "core-runtimes" / name
     private_directory(generation)
     runtime = generation / "runtime"
     private_directory(runtime)
@@ -137,7 +155,7 @@ def staged(root: Path, manager: str = _MANAGER) -> ServiceSnapshot:
     base = service_bootstrap.current_base()
     metadata = {
         "protocol": 1,
-        "generation": "a" * 32,
+        "generation": name,
         **service_bootstrap.base_identity(base),
         "bootstrap_sha256": hashlib.sha256(bootstrap).hexdigest(),
         "entries": service_bootstrap.runtime_tree(runtime, base),
@@ -145,9 +163,9 @@ def staged(root: Path, manager: str = _MANAGER) -> ServiceSnapshot:
     payload = json.dumps(metadata, sort_keys=True).encode()
     write_private(generation / "snapshot.json", payload)
     result = ServiceSnapshot(
-        generation="a" * 32,
+        generation=name,
         manifest_sha256=hashlib.sha256(payload).hexdigest(),
-        skulk_build_sha256="b" * 64,
+        skulk_build_sha256=build,
         copied_files=3,
         copied_bytes=32,
     )
@@ -746,6 +764,7 @@ def _service_root(tmp_path: Path) -> Path:
     """A provisioned, owner-only service root, as local setup leaves it."""
     root = tmp_path / "s"
     private_directory(root)
+    _lifetime_lock(root)
     write_private(
         root / "host.json",
         HostSettings(transport_node_id="node-a", profile_id="a" * 32)

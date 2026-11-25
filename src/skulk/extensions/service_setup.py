@@ -53,10 +53,12 @@ from skulk.extensions.runtime_manager import (
     manager_request,
 )
 from skulk.extensions.service_registration import (
+    OwnerLayout,
     ServiceLayout,
     ServiceScope,
     owner_layout,
     registered_for,
+    registrable_scopes,
 )
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
@@ -231,7 +233,7 @@ async def _elevate(
 
 
 async def _register(
-    layout: ServiceLayout, action: Literal["prepare", "stop", "install"]
+    layout: OwnerLayout, action: Literal["prepare", "stop", "install"]
 ) -> None:
     """Perform one registration action in this layout's scope.
 
@@ -239,7 +241,7 @@ async def _register(
     service registers as the owner, with no elevation, so the node itself can
     set it up.
     """
-    if layout.scope == "user":
+    if layout.scope == "user" or not isinstance(layout, ServiceLayout):
         await asyncio.to_thread(service_registration.register_user, layout, action)
         return
     await _elevate(layout, action)
@@ -256,7 +258,7 @@ def connected_scope() -> ServiceScope | None:
             whether or not it was ever set up: such a host is unsupported
             from the start, not merely without a service yet.
     """
-    scopes: tuple[ServiceScope, ...] = ("user", "system")
+    scopes = registrable_scopes()
     # Asked before the connection is read, so the refusal does not depend on
     # a connection existing.
     roots = {scope: owner_layout(scope).root for scope in scopes}
@@ -306,7 +308,7 @@ def registered_unit_names_base(base: Path) -> bool:
 
 
 def _ready_installation(
-    layout: ServiceLayout, snapshot: ServiceSnapshot, base: Path
+    layout: OwnerLayout, snapshot: ServiceSnapshot, base: Path
 ) -> bool:
     try:
         selected = service_bootstrap.document(

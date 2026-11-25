@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast, final
 from uuid import uuid4
+from xml.etree import ElementTree
+from xml.sax.saxutils import escape
 
 if sys.platform != "win32":
     # POSIX account databases. Windows registration is separate work; guarding
@@ -331,6 +333,230 @@ class ServiceLayout:
             raise ValueError("existing service definition differs from fixed contract")
 
 
+_TASK_NAMESPACE = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
+_TASK_MARKER = "skulk-plugin-service-v1 "
+_ACCOUNT_IDENTIFIER = re.compile(r"S-1-[0-9]+(-[0-9]+){1,14}")
+
+# What Task Scheduler leaves out of the copy it hands back because it is the
+# default. They are dropped from both sides of a comparison, so a Windows
+# that prints them compares the same as one that does not.
+_TASK_DEFAULTS = frozenset(
+    {
+        ("Principals/Principal/RunLevel", "LeastPrivilege"),
+        ("Settings/AllowHardTerminate", "true"),
+        ("Settings/AllowStartOnDemand", "true"),
+        ("Settings/Enabled", "true"),
+        ("Settings/Hidden", "false"),
+        ("Settings/RunOnlyIfIdle", "false"),
+        ("Settings/RunOnlyIfNetworkAvailable", "false"),
+        ("Settings/WakeToRun", "false"),
+        ("Triggers/TimeTrigger/Enabled", "true"),
+        ("Triggers/TimeTrigger/Repetition/StopAtDurationEnd", "false"),
+    }
+)
+
+
+def task_fields(definition: str) -> tuple[tuple[str, str], ...]:
+    """Everything a Task Scheduler definition says, in an order-free form.
+
+    Task Scheduler does not keep the bytes it was given: it reorders the
+    elements, drops defaults and adds the task's own name. Two definitions
+    are the same task exactly when this function gives the same answer for
+    both.
+
+    Args:
+        definition: A task definition as text, as written here or as Task
+            Scheduler hands it back.
+
+    Returns:
+        Every attribute and every element that holds text, as sorted
+        ``(path, value)`` pairs, without the task's own name and without
+        values that are the default.
+
+    Raises:
+        ValueError: The text is not one task definition.
+    """
+    if len(definition) > 65536:
+        raise ValueError("service definition exceeds bound")
+    # The declaration names the encoding of bytes this text no longer is.
+    body = (
+        definition.partition("?>")[2] if definition.startswith("<?xml") else definition
+    )
+    try:
+        task = ElementTree.fromstring(body)
+    except ElementTree.ParseError:
+        raise ValueError("invalid service definition") from None
+    if task.tag != _TASK_NAMESPACE + "Task":
+        raise ValueError("invalid service definition")
+    fields: list[tuple[str, str]] = []
+
+    def walk(element: ElementTree.Element, path: str) -> None:
+        for name, value in element.attrib.items():
+            fields.append((f"{path}@{name}", value))
+        children = list(element)
+        if not children:
+            fields.append((path, element.text or ""))
+        for child in children:
+            if not child.tag.startswith(_TASK_NAMESPACE):
+                raise ValueError("invalid service definition")
+            name = child.tag[len(_TASK_NAMESPACE) :]
+            walk(child, f"{path}/{name}" if path else name)
+
+    walk(task, "")
+    return tuple(
+        sorted(
+            field
+            for field in fields
+            if field not in _TASK_DEFAULTS and field[0] != "RegistrationInfo/URI"
+        )
+    )
+
+
+@final
+@dataclass(frozen=True)
+class WindowsServiceLayout:
+    """The plugin service of one Windows account: a task it registers itself.
+
+    Windows has no per-user service manager. Task Scheduler runs a task as the
+    account that registered it, in that account's signed-in session and with
+    its ordinary rights, and the account needs no elevation to register one.
+    A service for the whole machine is not offered on Windows.
+    """
+
+    account: str
+    """The account's security identifier as text, never its name."""
+    user_state: Path
+    """The folder Windows keeps for the account's machine-local program data."""
+
+    def __post_init__(self) -> None:
+        if not _ACCOUNT_IDENTIFIER.fullmatch(self.account):
+            raise ValueError("invalid OS account identity")
+        if not self.user_state.is_absolute():
+            raise ValueError("a user-scope service needs absolute owner directories")
+
+    @property
+    def scope(self) -> ServiceScope:
+        """Always the account's own service."""
+        return "user"
+
+    @property
+    def root(self) -> Path:
+        """Return the service's own folder.
+
+        The name is short on purpose: a machine without long paths switched on
+        limits how deep the copy below it may go.
+        """
+        return self.user_state / "Skulk" / "plugins"
+
+    @property
+    def label(self) -> str:
+        """Return the task's reserved name, which names the account.
+
+        Task names are one namespace for the whole machine, whoever a task
+        runs as, so two accounts on one machine need two names.
+        """
+        return f"foundation.foxlight.skulk.plugins.{self.account}"
+
+    @staticmethod
+    def launcher(python: Path) -> Path:
+        """The program the task runs: the interpreter without a console window.
+
+        A task runs in the signed-in session, where ``python.exe`` would open
+        a console window for as long as the service runs. ``pythonw.exe``
+        beside it is the same interpreter with no console.
+        """
+        return python.with_name("pythonw.exe")
+
+    def definition(self, python: Path) -> bytes:
+        """Render the exact task for ``python``, as the file ``schtasks`` reads.
+
+        The task starts the fixed verified bootstrap and nothing else. It is
+        started every minute and never twice at once: Task Scheduler starts a
+        task again only after a failure, and the manager also ends cleanly
+        when it wants to be started again, so the minute is what restarts it.
+        The same trigger starts it within a minute of the account signing in.
+        """
+        if not python.is_absolute() or any(ord(c) < 32 for c in str(python)):
+            raise ValueError("invalid base interpreter path")
+        arguments = subprocess.list2cmdline(
+            [
+                "-I",
+                "-S",
+                "-B",
+                str(self.root / "service-bootstrap.py"),
+                "--root",
+                str(self.root),
+            ]
+        )
+        description = _TASK_MARKER + json.dumps(str(python))
+        return (
+            '<?xml version="1.0" encoding="UTF-16"?>\n'
+            '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
+            f"<RegistrationInfo><Description>{escape(description)}</Description></RegistrationInfo>\n"
+            "<Triggers><TimeTrigger>"
+            "<StartBoundary>2026-01-01T00:00:00</StartBoundary>"
+            "<Repetition><Interval>PT1M</Interval></Repetition>"
+            "</TimeTrigger></Triggers>\n"
+            '<Principals><Principal id="Author">'
+            f"<UserId>{self.account}</UserId>"
+            "<LogonType>InteractiveToken</LogonType>"
+            "</Principal></Principals>\n"
+            "<Settings>"
+            "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
+            "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+            "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
+            "<StartWhenAvailable>true</StartWhenAvailable>"
+            "<IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd>"
+            "<RestartOnIdle>false</RestartOnIdle></IdleSettings>"
+            # No time limit, and ordinary priority: a task's default is
+            # below normal, which also lowers its disk and memory priority.
+            "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"
+            "<Priority>4</Priority>"
+            "</Settings>\n"
+            '<Actions Context="Author"><Exec>'
+            f"<Command>{escape(str(self.launcher(python)))}</Command>"
+            f"<Arguments>{escape(arguments)}</Arguments>"
+            f"<WorkingDirectory>{escape(str(self.root))}</WorkingDirectory>"
+            "</Exec></Actions>\n"
+            "</Task>\n"
+        ).encode("utf-16")
+
+    def verify_existing(self, content: str) -> None:
+        """Refuse an unrelated task under the reserved name before any OS action.
+
+        Args:
+            content: The task as Task Scheduler hands it back.
+
+        Raises:
+            ValueError: The task was not written by local setup, or differs
+                from the one local setup writes for the interpreter it names.
+                A task that is only switched off is still ours: stopping the
+                service switches it off.
+        """
+        existing = task_fields(content)
+        described = [
+            value for path, value in existing if path == "RegistrationInfo/Description"
+        ]
+        if len(described) != 1 or not described[0].startswith(_TASK_MARKER):
+            raise ValueError("existing service is not managed by local setup")
+        try:
+            python = cast(object, json.loads(described[0][len(_TASK_MARKER) :]))
+        except ValueError:
+            raise ValueError("invalid existing interpreter identity") from None
+        if not isinstance(python, str):
+            raise ValueError("invalid existing interpreter identity")
+        expected = task_fields(self.definition(Path(python)).decode("utf-16"))
+        if (
+            tuple(field for field in existing if field != ("Settings/Enabled", "false"))
+            != expected
+        ):
+            raise ValueError("existing service definition differs from fixed contract")
+
+
+OwnerLayout = ServiceLayout | WindowsServiceLayout
+"""The layout of an account's own service on whichever system this is."""
+
+
 def _systemd_argument(value: str) -> str:
     return (
         '"'
@@ -383,7 +609,15 @@ def local_layout(user_id: int, scope: ServiceScope = "system") -> ServiceLayout:
     )
 
 
-def owner_layout(scope: ServiceScope) -> ServiceLayout:
+def registrable_scopes() -> tuple[ServiceScope, ...]:
+    """The scopes a service can be registered in on this system.
+
+    Windows offers the account's own service only.
+    """
+    return ("user",) if sys.platform == "win32" else ("user", "system")
+
+
+def owner_layout(scope: ServiceScope) -> OwnerLayout:
     """The layout of the service that belongs to the account running this process.
 
     Args:
@@ -393,16 +627,19 @@ def owner_layout(scope: ServiceScope) -> ServiceLayout:
         The fixed layout for this account in that scope.
 
     Raises:
-        ValueError: On a host where the plugin service cannot be registered.
+        ValueError: On a host where the plugin service cannot be registered,
+            or in a scope this system does not offer.
     """
     if sys.platform == "win32":
-        raise ValueError(_UNREGISTRABLE)
+        # Reached only as the account itself and from Skulk, never by path as
+        # another user: Windows registers nothing with elevation.
+        from skulk.extensions import _service_registration_windows as windows
+
+        return windows.owner_layout(scope)
     return local_layout(os.getuid(), scope)
 
 
-def registered_for(
-    layout: ServiceLayout, base: Path, *, protected: bool = False
-) -> bool:
+def registered_for(layout: OwnerLayout, base: Path, *, protected: bool = False) -> bool:
     """Whether the registered OS definition is exactly the one that starts ``base``.
 
     The definition is read as itself, never through a link.
@@ -412,7 +649,9 @@ def registered_for(
         base: The interpreter the definition must invoke.
         protected: Also require that only the definition's rightful owner can
             change it: root for a system service, the account for a user
-            service.
+            service. On Windows the definition is not a file: Task Scheduler
+            holds it and decides who may change it, so there is nothing more
+            to examine.
 
     Returns:
         False when nothing is registered, when the definition cannot be read
@@ -421,7 +660,14 @@ def registered_for(
     Raises:
         ValueError: When ``base`` is not a path a definition may name.
     """
+    if isinstance(layout, WindowsServiceLayout):
+        if sys.platform != "win32":
+            return False
+        from skulk.extensions import _service_registration_windows as windows
+
+        return windows.registered_for(layout, base)
     if sys.platform == "win32":
+        # A launchd or systemd definition is no service of this system's.
         return False
     try:
         descriptor = os.open(layout.unit, os.O_RDONLY | os.O_NOFOLLOW)
@@ -656,14 +902,22 @@ def _existing_user(layout: ServiceLayout) -> bytes | None:
 
 
 def register_user(
-    layout: ServiceLayout, action: Literal["prepare", "stop", "install"]
+    layout: OwnerLayout, action: Literal["prepare", "stop", "install"]
 ) -> None:
     """Perform one fixed user-scope setup action as the owner, with no elevation.
 
     The same three actions as :func:`register`, against the owner's own
     directories and service manager: a launchd agent in the owner's GUI domain
-    (the domain Skulk's own agent uses) or a systemd user unit.
+    (the domain Skulk's own agent uses), a systemd user unit, or on Windows a
+    Task Scheduler task.
     """
+    if isinstance(layout, WindowsServiceLayout):
+        if sys.platform != "win32":
+            raise ValueError(_UNREGISTRABLE)
+        from skulk.extensions import _service_registration_windows as windows
+
+        windows.register_user(layout, action)
+        return
     if layout.scope != "user":
         raise ValueError("system services register through the elevated helper")
     if os.geteuid() == 0 or os.getuid() != layout.user_id:

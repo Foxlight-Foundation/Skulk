@@ -295,10 +295,14 @@ def test_the_owners_layout_is_this_accounts(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the Windows refusal")
-async def test_windows_has_no_registration_yet(
+async def test_windows_registers_nothing_while_its_host_has_no_name(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Named as unsupported, and nothing reads as registered, until it is built."""
+    """Unsupported from the start: no release names a Windows host to install for.
+
+    The registration itself is built (``test_service_task.py``); what refuses
+    here is the runtime installer's own naming of the host, asked first.
+    """
     with pytest.raises(ValueError, match="macOS and Linux only"):
         service_registration.owner_layout("user")
     layout = _user_layout(tmp_path, "macos-arm64")

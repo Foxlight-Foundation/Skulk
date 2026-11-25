@@ -404,6 +404,7 @@ class RuntimeLock:
             "supervisor.lock",
             "service.lock",
             "manager.lock",
+            "bootstrap.lock",
             "attachment.lock",
             "setup.lock",
             "catalog.lock",
