@@ -1,6 +1,7 @@
 """Pre-site bootstrap integrity, stopped activation and incomplete service copying."""
 
 import asyncio
+import contextlib
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -123,15 +124,22 @@ def _lifetime_lock(root: Path) -> None:
     The startup file only ever opens it: without it nothing starts there.
     """
     if sys.platform == "win32":
-        RuntimeLock(root, service_bootstrap.LIFETIME_LOCK).close()
+        # Already there, and held, when a service is running from this root.
+        with contextlib.suppress(BlockingIOError):
+            RuntimeLock(root, service_bootstrap.LIFETIME_LOCK).close()
 
 
-def staged(root: Path, manager: str = _MANAGER) -> ServiceSnapshot:
+def staged(
+    root: Path,
+    manager: str = _MANAGER,
+    name: str = "a" * 32,
+    build: str = "b" * 64,
+) -> ServiceSnapshot:
     """Build a minimal actual venv with a fixed manager fixture and complete seal."""
     private_directory(root)
     _lifetime_lock(root)
     private_directory(root / "core-runtimes")
-    generation = root / "core-runtimes" / ("a" * 32)
+    generation = root / "core-runtimes" / name
     private_directory(generation)
     runtime = generation / "runtime"
     private_directory(runtime)
@@ -147,7 +155,7 @@ def staged(root: Path, manager: str = _MANAGER) -> ServiceSnapshot:
     base = service_bootstrap.current_base()
     metadata = {
         "protocol": 1,
-        "generation": "a" * 32,
+        "generation": name,
         **service_bootstrap.base_identity(base),
         "bootstrap_sha256": hashlib.sha256(bootstrap).hexdigest(),
         "entries": service_bootstrap.runtime_tree(runtime, base),
@@ -155,9 +163,9 @@ def staged(root: Path, manager: str = _MANAGER) -> ServiceSnapshot:
     payload = json.dumps(metadata, sort_keys=True).encode()
     write_private(generation / "snapshot.json", payload)
     result = ServiceSnapshot(
-        generation="a" * 32,
+        generation=name,
         manifest_sha256=hashlib.sha256(payload).hexdigest(),
-        skulk_build_sha256="b" * 64,
+        skulk_build_sha256=build,
         copied_files=3,
         copied_bytes=32,
     )

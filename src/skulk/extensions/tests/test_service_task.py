@@ -8,6 +8,7 @@ where ``SKULK_LIVE_TASK_SCHEDULER`` is set, do the same against the real Task
 Scheduler under a name of their own, and delete what they register.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -58,6 +59,17 @@ _SERVES = (
 )
 # A manager that hears the request and carries on regardless.
 _WILL_NOT_STOP = _SERVES.replace("    raise SystemExit(5)\n", "")
+# A manager that also ends cleanly, by itself, when a file asks it to: what
+# the real manager does after it has selected its successor.
+_RELOADS = _SERVES.replace(
+    "while True:\n    time.sleep(0.05)\n",
+    "while not os.path.exists(os.path.join(root, 'reload')):\n"
+    "    time.sleep(0.05)\n"
+    # The real manager stops half a second after it has answered.
+    "time.sleep(0.5)\n"
+    "os.remove(os.path.join(root, 'ready'))\n"
+    "os.remove(os.path.join(root, 'reload'))\n",
+)
 
 
 def _as_the_scheduler_keeps_it(definition: str, name: str, enabled: bool = True) -> str:
@@ -239,6 +251,14 @@ class _Scheduler:
         else:
             raise AssertionError(action)
         return self._answer(arguments, 0)
+
+    def minute(self, name: str) -> None:
+        """The task's trigger comes round: start it unless it runs or is off."""
+        if name in self.disabled or any(p.poll() is None for p in self.started):
+            return
+        self.run(["schtasks.exe", "/Run", "/TN", name])
+        # Task Scheduler's own doing, not something that was asked of it.
+        self.calls.pop()
 
 
 @pytest.fixture
@@ -616,6 +636,128 @@ def test_the_base_of_a_windowless_start_is_the_interpreter_beside_it(
         assert Path(told.read_text(encoding="utf-8")) == base
     finally:
         told.unlink(missing_ok=True)
+
+
+@windows_only
+@pytest.mark.parametrize("reply", ["answered", "lost"])
+async def test_a_refresh_waits_out_the_minute_and_registers_nothing_again(
+    tmp_path: Path,
+    scheduler: _Scheduler,
+    monkeypatch: pytest.MonkeyPatch,
+    reply: str,
+) -> None:
+    """The successor is selected at once; the next start is the minute's to give.
+
+    launchd and systemd start a manager again ten seconds after it ends.
+    Task Scheduler does it when the minute comes round, here twelve seconds
+    after the manager ended, which is longer than setup waits to see the
+    selection and far shorter than it waits for the manager. Either way setup
+    leaves the registration alone: the service is the same service.
+
+    ``answered``: the manager answers the reload and stops half a second
+    later, as the real one does. ``lost``: its answer never arrives and it is
+    already gone, so setup has only the selection to go by and must sit out
+    the whole gap.
+    """
+    assert sys.platform == "win32"
+    from skulk.extensions import _service_registration_windows as windows
+    from skulk.extensions import service_setup, service_snapshot
+
+    build = "b" * 64
+    monkeypatch.setattr(
+        service_setup,
+        "measure_host",
+        lambda: QualifiedHost("a-named-host", "3.13.13", "1.5.2", build),
+    )
+    monkeypatch.setattr(service_setup, "service_source_identity", lambda: build)
+    monkeypatch.setattr(windows, "current_platform", lambda: "a-named-host")
+    monkeypatch.setattr(windows, "local_data_directory", lambda: str(tmp_path))
+    configuration = tmp_path / "c"
+    configuration.mkdir()
+    monkeypatch.setattr(service_setup, "SKULK_CONFIG_HOME", configuration)
+    layout = service_registration.owner_layout("user")
+    root = layout.root
+
+    async def stage(path: Path) -> service_snapshot.ServiceSnapshot:
+        return staged(path, _RELOADS, build[0] * 32, build)
+
+    async def answers(path: Path) -> bool:
+        # The manager of the service that runs now says it is ready.
+        return (
+            bool(scheduler.started)
+            and scheduler.started[-1].poll() is None
+            and (path / "ready").exists()
+        )
+
+    async def reload(
+        path: Path, request: service_setup.ManagerRequest
+    ) -> dict[str, service_setup.JsonValue]:
+        # What the real manager does with this request: select the staged
+        # copy, answer, and end cleanly to be started again on it.
+        assert isinstance(request, service_setup.ReloadRuntimeRequest)
+        service_snapshot.activate_staged_runtime(
+            path,
+            service_snapshot.ServiceSnapshot.model_validate_json(
+                (
+                    path / "core-runtimes" / request.generation / "staged.json"
+                ).read_bytes()
+            ),
+        )
+        (path / "reload").write_bytes(b"")
+        if reply == "lost":
+            while scheduler.started[0].poll() is None:
+                await asyncio.sleep(0.05)
+            raise OSError("the manager went before its answer arrived")
+        return {"result": {}}
+
+    monkeypatch.setattr(service_setup, "stage_service_runtime", stage)
+    monkeypatch.setattr(service_setup, "_observe", answers)
+    monkeypatch.setattr(service_setup, "manager_request", reload)
+
+    def quiet(_message: str) -> None:
+        return None
+
+    first = await service_setup.setup_service("user", quiet)
+    assert first.phase == "ready" and first.snapshot is not None
+    assert scheduler.calls == ["/Create", "/Run"]
+    (service,) = scheduler.started
+
+    async def the_minute_comes_round() -> None:
+        while service.poll() is None:
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(12)
+        scheduler.minute(layout.label)
+
+    build = "c" * 64
+    began = time.monotonic()
+    minute = asyncio.create_task(the_minute_comes_round())
+    try:
+        second = await asyncio.wait_for(service_setup.setup_service("user", quiet), 180)
+        waited = time.monotonic() - began
+        await minute
+    finally:
+        # A setup that failed never ended the service, so nothing is coming.
+        minute.cancel()
+    try:
+        assert service.returncode == 0
+        if reply == "lost":
+            # Longer than setup waits to see the selection: it went on waiting
+            # for the manager, and did not take the gap for a failed reload.
+            assert waited > service_setup._RELOAD_SETTLE_SECONDS  # pyright: ignore[reportPrivateUsage]
+        assert second.phase == "ready" and second.snapshot is not None
+        assert second.operation_id != first.operation_id
+        assert second.snapshot.generation == "c" * 32
+        # Nothing was registered again, stopped or ended: only the minute ran.
+        assert scheduler.calls == ["/Create", "/Run"]
+        assert len(scheduler.started) == 2
+        _appears(root / "ready", scheduler.started[-1])
+        assert _held(root)
+        assert service_registration.registered_for(
+            layout, service_bootstrap.current_base()
+        )
+    finally:
+        service_registration.register_user(layout, "stop")
+    assert scheduler.started[-1].wait(30) == 5
 
 
 async def _sets_itself_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
