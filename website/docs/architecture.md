@@ -3012,13 +3012,15 @@ unattended, through the standalone standard-library-only `service_registration.p
 helper; only that helper runs elevated, and the manager still runs as the existing
 nonroot account. Setup keeps whichever scope a configuration is already connected to. On Windows the
 service is a Task Scheduler task that the account registers for itself with no elevation: Windows has no
-service manager for an ordinary account. The task runs as that account, in its signed-in session and with its
+service manager for an ordinary account. Its name ends in the account's SID, because task names are shared by
+the whole machine. The task runs as that account, in its signed-in session and with its
 ordinary rights, so the service runs only while the account is signed in, and a service for the whole machine
 is not offered. Task Scheduler restarts a task only after a failure, and the manager also ends cleanly when it
 wants to be started again, so the task is started every minute and never twice at once; a restart there takes
 up to a minute where launchd and systemd take ten seconds. To stop the service, setup switches the task off,
 asks the bootstrap to stop through a file in the service root and waits up to 180 seconds before it ends the
-task. While no release names a Windows host, setup refuses there by name, before it reads or writes anything,
+task. That file stays until the service is installed again, and while it is there a start ends at once.
+While no release names a Windows host, setup refuses there by name, before it reads or writes anything,
 and the status route answers `unsupported` with that sentence whether or not the node was ever set up, so the
 Plugins page starts no setup. Retained setup phase is
 separate from current runtime integrity and manager availability. HTTP lifecycle and dynamic installation registration use this manager; setup progress, runtime integrity and live management availability remain separate observations.

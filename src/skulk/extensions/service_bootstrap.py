@@ -45,8 +45,10 @@ STOP_REQUEST = "service-stop"
 
 Windows has no signal one process can send another to say "stop": the nearest
 thing, Ctrl-Break, reaches only programs on the sender's own console. Setup
-creates this file, the process this file runs passes the request on to the
-manager as Ctrl-Break and waits for it, and setup removes the file.
+creates this file, and the process this file runs passes the request on to
+the manager as Ctrl-Break and waits for it. The file then stays until the
+service is installed again, and while it is there nothing starts: a stop
+holds even where the task that starts the service could not be switched off.
 """
 
 if sys.platform == "win32":
@@ -1028,6 +1030,10 @@ def main() -> None:
             private_directory(root)
             # Held, never closed: the system releases it when this process ends.
             lifetime = _hold_lifetime(root)
+            if os.path.lexists(root / STOP_REQUEST):
+                # Asked before the copy is verified, which takes time: a
+                # stopped service lets go of its lock at once.
+                raise SystemExit(0)
         runtime = verified_runtime(root)
         if sys.platform == "win32":
             code = _run_manager(root, runtime)

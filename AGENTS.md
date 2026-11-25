@@ -423,7 +423,9 @@ On Windows the service is a Task Scheduler task
 (`extensions/_service_registration_windows.py`; the definition is
 `WindowsServiceLayout` in `service_registration.py`). Windows has no service
 manager for an ordinary account, so the account registers one task for itself
-with `schtasks.exe`, with no elevation: it runs as that account, in its
+with `schtasks.exe`, with no elevation. The task's name ends in the account's
+SID, because task names are one namespace for the whole machine and two
+accounts need two. It runs as that account, in its
 signed-in session, with ordinary rights, and only while the account is signed
 in. Only that scope exists there (`registrable_scopes()`); a machine-wide
 service is refused. The task is started every minute and never twice at once:
@@ -447,7 +449,10 @@ otherwise it is created without the replace switch, which Task Scheduler
 refuses over an existing task.
 Stopping has no signal on Windows. Setup switches the task off, creates
 `service-stop` (`service_bootstrap.STOP_REQUEST`) in the service root, and
-waits for the lock. The startup file starts the manager in its own process
+waits for the lock. The file stays until the service is installed again,
+which removes it only once its own task is registered; while it is there a
+start ends at once, so a stop holds even where the task could not be read and
+so was not switched off. The startup file starts the manager in its own process
 group, on a console without a window when it has none itself, and passes any
 request to stop (that file, or Ctrl-C or Ctrl-Break at its own console) to the
 manager's group as Ctrl-Break. Without a console it must first attach to the

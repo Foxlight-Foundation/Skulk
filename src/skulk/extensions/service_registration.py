@@ -450,8 +450,12 @@ class WindowsServiceLayout:
 
     @property
     def label(self) -> str:
-        """Return the task's reserved name, one per account."""
-        return "foundation.foxlight.skulk.plugins"
+        """Return the task's reserved name, which names the account.
+
+        Task names are one namespace for the whole machine, whoever a task
+        runs as, so two accounts on one machine need two names.
+        """
+        return f"foundation.foxlight.skulk.plugins.{self.account}"
 
     @staticmethod
     def launcher(python: Path) -> Path:

@@ -117,6 +117,11 @@ def test_a_task_names_one_interpreter_and_one_root(tmp_path: Path) -> None:
     )
     assert layout.root == tmp_path / "Skulk" / "plugins"
     assert layout.scope == "user"
+    # Task names are one namespace for the whole machine: the name carries
+    # the account, so another account's service is another task.
+    assert layout.label == f"foundation.foxlight.skulk.plugins.{_ACCOUNT}"
+    another = WindowsServiceLayout(_ACCOUNT[:-4] + "1002", tmp_path)
+    assert another.label != layout.label
 
 
 def test_a_path_keeps_every_character_through_the_definition(tmp_path: Path) -> None:
@@ -307,7 +312,8 @@ def test_setup_registers_starts_and_stops_the_service(
     # The startup file waited for the manager and ended with its code.
     assert service.wait(30) == 5
     assert scheduler.calls == ["/Create", "/Run", "/Change"]
-    assert not (layout.root / service_bootstrap.STOP_REQUEST).exists()
+    # The request stays until the service is installed again.
+    assert (layout.root / service_bootstrap.STOP_REQUEST).exists()
     assert not _held(layout.root)
     # Switched off, it starts nothing, so it is not registered for the base.
     assert not service_registration.registered_for(layout, base)
@@ -316,10 +322,61 @@ def test_setup_registers_starts_and_stops_the_service(
     (layout.root / "ready").unlink()
     service_registration.register_user(layout, "install")
     assert scheduler.calls[-2:] == ["/Create", "/Run"]
+    assert not (layout.root / service_bootstrap.STOP_REQUEST).exists()
     assert service_registration.registered_for(layout, base)
     _appears(layout.root / "ready", scheduler.started[-1])
     service_registration.register_user(layout, "stop")
     assert scheduler.started[-1].wait(30) == 5
+
+
+@windows_only
+def test_a_stop_holds_where_the_task_could_not_be_switched_off(
+    tmp_path: Path, scheduler: _Scheduler
+) -> None:
+    """Task Scheduler gave no task to read, so none was switched off; it stays down."""
+    layout = _own_layout(tmp_path)
+    _prepared(layout, _SERVES)
+    service_registration.register_user(layout, "install")
+    (service,) = scheduler.started
+    _appears(layout.root / "ready", service)
+    scheduler.readable = False
+
+    service_registration.register_user(layout, "stop")
+    assert scheduler.calls == ["/Create", "/Run"]
+    assert service.wait(30) == 5
+    (layout.root / "ready").unlink()
+    # The minute comes round with the task still switched on.
+    name = layout.label
+    scheduler.run(["schtasks.exe", "/Run", "/TN", name])
+    assert scheduler.started[-1].wait(60) == 0
+    assert not (layout.root / "ready").exists()
+    assert not _held(layout.root)
+    # Installing over a task that cannot be read is refused, and the request
+    # to stop is still there afterwards.
+    with pytest.raises(ValueError, match="Task Scheduler refused"):
+        service_registration.register_user(layout, "install")
+    assert (layout.root / service_bootstrap.STOP_REQUEST).exists()
+
+
+@windows_only
+def test_two_accounts_on_one_machine_have_a_task_each(
+    tmp_path: Path, scheduler: _Scheduler
+) -> None:
+    """Another account's task is under another name and is not this account's concern."""
+    layout = _own_layout(tmp_path)
+    other = _layout(tmp_path / "other")
+    theirs = other.definition(tmp_path / "other" / "python.exe").decode("utf-16")
+    scheduler.tasks[other.label] = theirs
+    _prepared(layout, _SERVES)
+    base = service_bootstrap.current_base()
+    assert not service_registration.registered_for(layout, base)
+
+    service_registration.register_user(layout, "install")
+    assert service_registration.registered_for(layout, base)
+    _appears(layout.root / "ready", scheduler.started[0])
+    service_registration.register_user(layout, "stop")
+    assert scheduler.tasks[other.label] == theirs
+    assert other.label not in scheduler.disabled
 
 
 @windows_only

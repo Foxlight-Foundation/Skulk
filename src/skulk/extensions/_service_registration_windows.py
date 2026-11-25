@@ -215,15 +215,15 @@ def _stop(layout: WindowsServiceLayout) -> None:
             raise ValueError("existing service state ownership differs")
     except FileNotFoundError:
         return
-    request = layout.root / service_bootstrap.STOP_REQUEST
-    write_private(request, b"")
+    # The request is never taken back here: it stays until the service is
+    # installed again. A task that could not be read was not switched off
+    # either, and its minute must start nothing after this returns.
+    write_private(layout.root / service_bootstrap.STOP_REQUEST, b"")
     if not _stopped_within(layout.root, _STOP_WAIT_SECONDS):
         if registered is not None:
             _schedule("/End", "/TN", layout.label)
         if not _stopped_within(layout.root, _END_WAIT_SECONDS):
-            # The request stays: whatever still runs stops when it can.
             raise ValueError("plugin service has not stopped")
-    remove_private(request)
 
 
 def _install(layout: WindowsServiceLayout) -> None:
@@ -236,10 +236,11 @@ def _install(layout: WindowsServiceLayout) -> None:
         )
     private_directory(layout.root)
     # Setup stops the old service before installing; taking the lock here
-    # also creates the file the service's startup file opens.
-    if not _free(layout.root, service_bootstrap.LIFETIME_LOCK):
+    # also creates the file the service's startup file opens. A task that was
+    # not switched off may be starting this moment, only to find the request
+    # to stop and end, so the lock gets a moment to come free.
+    if not _stopped_within(layout.root, _END_WAIT_SECONDS):
         raise ValueError("plugin service is still running")
-    remove_private(layout.root / service_bootstrap.STOP_REQUEST)
     definition = layout.root / "service-task.xml"
     write_private(definition, layout.definition(base))
     try:
@@ -250,6 +251,9 @@ def _install(layout: WindowsServiceLayout) -> None:
         _schedule("/Create", "/TN", layout.label, "/XML", str(definition), *replace)
     finally:
         remove_private(definition)
+    # Only now, with local setup's own task in place: until here a start
+    # found the request to stop and ended.
+    remove_private(layout.root / service_bootstrap.STOP_REQUEST)
     # The minute would start it too; this does not wait for the minute.
     _schedule("/Run", "/TN", layout.label)
 
