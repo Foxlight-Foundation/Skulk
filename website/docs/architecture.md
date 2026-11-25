@@ -2944,9 +2944,15 @@ bootstrap replaces itself with the manager, so the process the OS service starte
 is the manager. Windows cannot replace a running process, so there the bootstrap
 stays: it joins a Job Object that ends its processes when the bootstrap's own
 handle closes, starts the manager as a child with the same fixed environment,
-and waits. A console request to stop (Ctrl-C or Ctrl-Break) reaches both; the
-bootstrap ignores it and the manager shuts down in order, after which the
-bootstrap exits with the manager's exit code. If the bootstrap is ended outright,
+and waits. The manager runs in its own process group, so a request to stop
+reaches it in one way whoever asks: Ctrl-C or Ctrl-Break at the bootstrap's
+console, or local setup creating `service-stop` in the service root, makes the
+bootstrap send Ctrl-Break to the manager's group. The manager shuts down in
+order, after which the bootstrap exits with the manager's exit code. Started by
+Task Scheduler the bootstrap has no console, so the manager gets one without a
+window and the bootstrap attaches to it to send the request. For as long as it
+runs, the bootstrap holds `bootstrap.lock`, which is how local setup knows a
+Windows service is still there. If the bootstrap is ended outright,
 the manager and everything the manager started end with it, so nothing is left
 serving that the OS service does not know about.
 The seal follows the platform too. A Windows environment contains no link to its
@@ -2957,10 +2963,11 @@ folder, and records the base's library beside its program. Staging there builds
 the environment in a child run on the base interpreter's real path, and refuses
 in advance a copy whose deepest file would not fit below the service root on a
 machine without long paths, saying how many characters too long it is.
-Two parts of this do not run on Windows yet. Staging a real copy starts by
+One part of this does not run on Windows yet. Staging a real copy starts by
 measuring the host, and Skulk names an artifact family for macOS and Linux only;
 naming one for Windows is a decision for the release schema and the plugin owner
-runtime. And nothing registers the service with Windows.
+runtime. Until then the registration described below refuses too, by asking the
+same question first.
 Core-runtime activation requires a stopped manager and leaves plugin state intact.
 Explicit local setup with a changed source can supersede an interrupted operation;
 its journal and logical profile remain retained while a new copy is staged before
@@ -3004,8 +3011,15 @@ instead registers a system LaunchDaemon or systemd service, for hosts that run
 unattended, through the standalone standard-library-only `service_registration.py`
 helper; only that helper runs elevated, and the manager still runs as the existing
 nonroot account. Setup keeps whichever scope a configuration is already connected to. On Windows the
-service cannot be registered yet: setup refuses there by name, before it reads or writes anything, and the
-status route answers `unsupported` with that sentence whether or not the node was ever set up, so the
+service is a Task Scheduler task that the account registers for itself with no elevation: Windows has no
+service manager for an ordinary account. The task runs as that account, in its signed-in session and with its
+ordinary rights, so the service runs only while the account is signed in, and a service for the whole machine
+is not offered. Task Scheduler restarts a task only after a failure, and the manager also ends cleanly when it
+wants to be started again, so the task is started every minute and never twice at once; a restart there takes
+up to a minute where launchd and systemd take ten seconds. To stop the service, setup switches the task off,
+asks the bootstrap to stop through a file in the service root and waits up to 180 seconds before it ends the
+task. While no release names a Windows host, setup refuses there by name, before it reads or writes anything,
+and the status route answers `unsupported` with that sentence whether or not the node was ever set up, so the
 Plugins page starts no setup. Retained setup phase is
 separate from current runtime integrity and manager availability. HTTP lifecycle and dynamic installation registration use this manager; setup progress, runtime integrity and live management availability remain separate observations.
 

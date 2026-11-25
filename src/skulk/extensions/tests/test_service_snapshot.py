@@ -117,9 +117,19 @@ def _environment(runtime: Path) -> None:
         venv.EnvBuilder(symlinks=True, with_pip=False).create(runtime)
 
 
+def _lifetime_lock(root: Path) -> None:
+    """Leave the lock a Windows service holds while it runs, as local setup does.
+
+    The startup file only ever opens it: without it nothing starts there.
+    """
+    if sys.platform == "win32":
+        RuntimeLock(root, service_bootstrap.LIFETIME_LOCK).close()
+
+
 def staged(root: Path, manager: str = _MANAGER) -> ServiceSnapshot:
     """Build a minimal actual venv with a fixed manager fixture and complete seal."""
     private_directory(root)
+    _lifetime_lock(root)
     private_directory(root / "core-runtimes")
     generation = root / "core-runtimes" / ("a" * 32)
     private_directory(generation)
@@ -746,6 +756,7 @@ def _service_root(tmp_path: Path) -> Path:
     """A provisioned, owner-only service root, as local setup leaves it."""
     root = tmp_path / "s"
     private_directory(root)
+    _lifetime_lock(root)
     write_private(
         root / "host.json",
         HostSettings(transport_node_id="node-a", profile_id="a" * 32)

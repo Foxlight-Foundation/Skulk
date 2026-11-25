@@ -69,6 +69,37 @@ _userenv.GetUserProfileDirectoryW.argtypes = (
 _advapi32.ConvertSidToStringSidW.restype = wt.BOOL
 _advapi32.ConvertSidToStringSidW.argtypes = (wt.LPVOID, ctypes.POINTER(wt.LPWSTR))
 
+
+class _FolderIdentifier(ctypes.Structure):
+    """A known folder's identifier (the system's ``GUID``)."""
+
+    _fields_ = (
+        ("first", wt.DWORD),
+        ("second", wt.WORD),
+        ("third", wt.WORD),
+        ("rest", ctypes.c_ubyte * 8),
+    )
+
+
+# FOLDERID_LocalAppData, {F1B32785-6FBA-4FCF-9D55-7B8E7F157091}.
+_LOCAL_DATA = _FolderIdentifier(
+    0xF1B32785,
+    0x6FBA,
+    0x4FCF,
+    (ctypes.c_ubyte * 8)(0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91),
+)
+_shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+_ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+_shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+_shell32.SHGetKnownFolderPath.argtypes = (
+    ctypes.POINTER(_FolderIdentifier),
+    wt.DWORD,
+    wt.HANDLE,
+    ctypes.POINTER(ctypes.c_void_p),
+)
+_ole32.CoTaskMemFree.restype = None
+_ole32.CoTaskMemFree.argtypes = (ctypes.c_void_p,)
+
 # ctypes calls return untyped values. These views give each foreign function
 # the result type its ``restype`` above produces.
 _get_current_process: Callable[..., int] = _kernel32.GetCurrentProcess
@@ -81,6 +112,8 @@ _create_well_known_sid: Callable[..., int] = _advapi32.CreateWellKnownSid
 _check_token_membership: Callable[..., int] = _advapi32.CheckTokenMembership
 _duplicate_token: Callable[..., int] = _advapi32.DuplicateToken
 _profile_directory: Callable[..., int] = _userenv.GetUserProfileDirectoryW
+_known_folder: Callable[..., int] = _shell32.SHGetKnownFolderPath
+_free_folder: Callable[..., None] = _ole32.CoTaskMemFree
 
 
 def _last_error(action: str) -> OSError:
@@ -167,6 +200,25 @@ def profile_directory() -> str:
         return ctypes.wstring_at(buffer)
     finally:
         _close_handle(token)
+
+
+def local_data_directory() -> str:
+    """The folder Windows keeps for this account's machine-local program data.
+
+    Usually ``AppData\\Local`` in the profile. Asked of Windows, like the
+    profile folder, and for the same reason: ``LOCALAPPDATA`` says whatever
+    the program that started this one put there.
+    """
+    address = ctypes.c_void_p()
+    try:
+        if (
+            _known_folder(ctypes.byref(_LOCAL_DATA), 0, None, ctypes.byref(address))
+            or address.value is None
+        ):
+            raise OSError("SHGetKnownFolderPath")
+        return ctypes.wstring_at(address.value)
+    finally:
+        _free_folder(address)
 
 
 def this_process_is_administrator() -> bool:

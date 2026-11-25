@@ -1398,7 +1398,9 @@ bindings are a path source and not a uv workspace member (uv refuses an index
 source for a member). The pin must equal the bindings version
 (`tests/test_windows_bindings_wheel.py`), so a bindings version bump moves the
 pin and needs the Windows wheel published from that branch before `uv lock`. Capability
-hosting, signed installs and an unattended service on Windows are not built yet.
+hosting and signed installs on Windows are not built yet. The plugin service can
+register itself there (see below), but no release names a Windows host, so a
+Windows node still reports the plugin service as unsupported.
 Local streams between the node, the plugin manager and plugin owners go through
 `utils/local_transport.py` (endpoint directory, privacy check, `connect`,
 `serve`, `discard`); it is the only module that opens or binds a local socket
@@ -1431,9 +1433,11 @@ do not run there yet. Plugin-hosting code in `extensions/` never asks who owns
 a file or opens one link-safely by calling the operating system itself: it uses
 `is_private_directory`, `open_private`, `sync_directory`, `examine`,
 `open_unfollowed` and `create_file` from the same module, and a guard in
-`utils/tests/test_runtime_files_platforms.py` lists the one module not yet
-moved (`service_registration.py`). Take it off that list when it is ported;
-add none. `no_other_account_can_change()` in the same
+`utils/tests/test_runtime_files_platforms.py` names the two files that may
+not: `service_bootstrap.py` and `service_registration.py`, which run on the
+standard library alone (the second by path as root, on POSIX only; its
+Windows half is `_service_registration_windows.py`, which uses the seam).
+Add none. `no_other_account_can_change()` in the same
 module is the rule for a file this account did not necessarily create, such
 as one in the Python environment Skulk itself is installed in: on Windows its
 owner, and every account its access list lets change it, must be the account,
@@ -1577,13 +1581,51 @@ of the service that belongs to the account running this process, and
 `registered_for(layout, base)`, whether the registered definition is exactly
 the one that starts `base`; and it takes the base interpreter from
 `service_bootstrap.current_base()`. Never read `layout.unit` or compare
-`sys.executable` anywhere else. Registering the service with Windows is not
-built: there `owner_layout()` refuses by name, nothing reads as registered,
-the status reads `unsupported` from the start (`connected_scope()` asks
-`owner_layout()` before it reads the connection, so the Plugins page starts
-no setup on a host that can never finish one),
-and setup's own steps (its lock, its retained operation, selecting a staged
-copy) are checked on Windows against a stand-in registration.
+`sys.executable` anywhere else. `connected_scope()` asks `owner_layout()`
+before it reads the connection, so a host that cannot register reads
+`unsupported` from the start and the Plugins page starts no setup there.
+On Windows the service is a Task Scheduler task
+(`extensions/_service_registration_windows.py`; the definition is
+`WindowsServiceLayout` in `service_registration.py`). Windows has no service
+manager for an ordinary account, so the account registers one task for itself
+with `schtasks.exe`, with no elevation: it runs as that account, in its
+signed-in session, with ordinary rights, and only while the account is signed
+in. Only that scope exists there (`registrable_scopes()`); a machine-wide
+service is refused. The task is started every minute and never twice at once:
+Task Scheduler restarts a task only after a failure, and the manager also ends
+cleanly when it wants to be started again, so a restart on Windows takes up to
+a minute where launchd and systemd take ten seconds. It runs the base
+`pythonw.exe`, which opens no console window; `current_base()` answers the
+`python.exe` beside it. The service root is `Skulk\plugins` in the account's
+local data folder, short because of the path limit.
+Three rules follow from how `schtasks.exe` behaves, each seen on a real
+machine. It answers in the system's language and reports every failure as exit
+code 1, so nothing reads its words: whether the service still runs is asked of
+`bootstrap.lock` (`service_bootstrap.LIFETIME_LOCK`), which the startup file
+holds for as long as its process lives and setup creates. It prints a task in
+the console's code page, which loses characters a path may hold, so the task
+is read with the code page set to UTF-8 (the module's one use of `cmd.exe`),
+and compared field by field (`task_fields()`), because Task Scheduler rewrites
+what it is given. It cannot tell "no such task" from "could not read it", so a
+task is replaced only after it was read and verified as local setup's own;
+otherwise it is created without the replace switch, which Task Scheduler
+refuses over an existing task.
+Stopping has no signal on Windows. Setup switches the task off, creates
+`service-stop` (`service_bootstrap.STOP_REQUEST`) in the service root, and
+waits for the lock. The startup file starts the manager in its own process
+group, on a console without a window when it has none itself, and passes any
+request to stop (that file, or Ctrl-C or Ctrl-Break at its own console) to the
+manager's group as Ctrl-Break. Without a console it must first attach to the
+manager's, and attaching resets a process's control handlers, so it registers
+one again straight after; without that the request ended the startup file
+itself. After 180 seconds setup ends the task, which ends only the startup
+file; the job the startup file holds ends the manager with it.
+`owner_layout()` on Windows asks `runtime_artifacts.current_platform()` first,
+so while no release names a Windows host the status stays `unsupported` and
+nothing is registered. `extensions/tests/test_service_task.py` holds the
+tests. Those that register a real task run only where
+`SKULK_LIVE_TASK_SCHEDULER` is set, use a task name of their own and delete
+it; the account must be signed in at the machine.
 Windows limits how long a path may be unless the machine has long paths
 switched on (off by default): a directory's path may be 247 characters and a
 file's 259. A generation folder on Windows is therefore named by the first 32
