@@ -1584,6 +1584,18 @@ the one that starts `base`; and it takes the base interpreter from
 `sys.executable` anywhere else. `connected_scope()` asks `owner_layout()`
 before it reads the connection, so a host that cannot register reads
 `unsupported` from the start and the Plugins page starts no setup there.
+Setup counts the service as ready only when the manager that answers is the
+one it waits for (`_serves()` in `service_setup.py`), never because some
+manager answers. A manager records once, when it is constructed, which
+service copy it runs from (`service_bootstrap.started_from(root)`: the
+generation its interpreter's environment lies in, and the digest of that
+generation's own manifest) and reports it in its inventory reply as
+`runtime`. It never reads the selection (`core-runtime.json`) for this: after
+a reload the old manager goes on answering for half a second with its
+successor already selected, and must go on naming the copy it runs. A manager
+that names another copy, or none (one started by hand, or from before this),
+leaves setup waiting within its usual bound and is never taken for the
+service. Do not add a fallback that accepts a bare answer.
 On Windows the service is a Task Scheduler task
 (`extensions/_service_registration_windows.py`; the definition is
 `WindowsServiceLayout` in `service_registration.py`). Windows has no service

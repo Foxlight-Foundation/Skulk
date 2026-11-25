@@ -134,3 +134,53 @@ def test_the_manager_runs_as_a_program_and_stops_when_asked(root: Path) -> None:
         program.wait()
     # It let go of everything: another manager could start here.
     RuntimeLock(root, "manager.lock").close()
+
+
+async def test_a_manager_names_the_copy_it_was_started_from_whatever_it_selects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After selecting its successor, the old manager still answers as itself.
+
+    A reload leaves the old manager answering for a moment with the new copy
+    already selected. What it reports is the copy it runs, taken once when it
+    was constructed, so nobody waiting for the successor takes it for one.
+    """
+    from skulk.extensions.runtime_manager import ReloadRuntimeRequest
+    from skulk.extensions.tests.test_managed_services import manager_fixture
+    from skulk.extensions.tests.test_service_snapshot import staged
+
+    running = staged(tmp_path)
+    successor = staged(tmp_path, name="b" * 32)
+    assert successor.manifest_sha256 != running.manifest_sha256
+    monkeypatch.setattr(
+        sys, "prefix", str(tmp_path / "core-runtimes" / running.generation / "runtime")
+    )
+    manager = manager_fixture(tmp_path, monkeypatch)
+    manager.request_stop = lambda: None
+    as_started = {
+        "generation": running.generation,
+        "manifest_sha256": running.manifest_sha256,
+    }
+    await manager.start()
+    try:
+        before = await manager_request(tmp_path, InventoryRequest())
+        assert before == {
+            "result": {
+                "installations": [],
+                "reload_runtime": True,
+                "runtime": as_started,
+            }
+        }
+        selected = await manager_request(
+            tmp_path,
+            ReloadRuntimeRequest(
+                generation=successor.generation,
+                manifest_sha256=successor.manifest_sha256,
+            ),
+        )
+        assert selected == {
+            "result": {"generation": successor.generation, "restarting": True}
+        }
+        assert await manager_request(tmp_path, InventoryRequest()) == before
+    finally:
+        await manager.close()

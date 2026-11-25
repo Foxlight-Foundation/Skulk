@@ -20,6 +20,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 import pytest
+from pydantic import TypeAdapter
 
 from skulk.extensions import service_bootstrap, service_registration
 from skulk.extensions.runtime_artifacts import QualifiedHost
@@ -47,13 +48,22 @@ _LIVE_NAME = "foundation.foxlight.skulk.plugins.test"
 # A manager that says in the service root that it is ready, and when the
 # console asks it to stop says so there too and ends with a code of its own.
 _SERVES = (
-    "import os, signal, sys, time\n"
+    "import importlib.util, json, os, signal, sys, time\n"
+    "from pathlib import Path\n"
     "root = sys.argv[-1]\n"
+    # Which copy this is, asked of the startup file that started it.
+    "spec = importlib.util.spec_from_file_location(\n"
+    "    'startup', os.path.join(root, 'service-bootstrap.py'))\n"
+    "startup = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(startup)\n"
+    "running = json.dumps(startup.started_from(Path(root)))\n"
     "def stop(*_):\n"
     "    open(os.path.join(root, 'asked'), 'w').close()\n"
     "    raise SystemExit(5)\n"
     "signal.signal(signal.SIGBREAK, stop)\n"
-    "open(os.path.join(root, 'ready'), 'w').close()\n"
+    "with open(os.path.join(root, 'ready.new'), 'w') as told:\n"
+    "    told.write(running)\n"
+    "os.replace(os.path.join(root, 'ready.new'), os.path.join(root, 'ready'))\n"
     "while True:\n"
     "    time.sleep(0.05)\n"
 )
@@ -655,9 +665,11 @@ async def test_a_refresh_waits_out_the_minute_and_registers_nothing_again(
     leaves the registration alone: the service is the same service.
 
     ``answered``: the manager answers the reload and stops half a second
-    later, as the real one does. ``lost``: its answer never arrives and it is
-    already gone, so setup has only the selection to go by and must sit out
-    the whole gap.
+    later, as the real one does. Until it stops it goes on answering as the
+    copy it runs, and setup must not take it for its successor. ``lost``: its
+    answer never arrives and it is already gone, so setup has only the
+    selection to go by. Either way setup sits out the whole gap and completes
+    on the first answer from the successor.
     """
     assert sys.platform == "win32"
     from skulk.extensions import _service_registration_windows as windows
@@ -681,13 +693,24 @@ async def test_a_refresh_waits_out_the_minute_and_registers_nothing_again(
     async def stage(path: Path) -> service_snapshot.ServiceSnapshot:
         return staged(path, _RELOADS, build[0] * 32, build)
 
-    async def answers(path: Path) -> bool:
-        # The manager of the service that runs now says it is ready.
-        return (
-            bool(scheduler.started)
-            and scheduler.started[-1].poll() is None
-            and (path / "ready").exists()
-        )
+    answered: list[str] = []
+
+    async def inventory(path: Path) -> dict[str, service_setup.JsonValue] | None:
+        # What the manager of the service that runs now says of itself: the
+        # copy it was started from, which it asked the startup file for.
+        if not scheduler.started or scheduler.started[-1].poll() is not None:
+            return None
+        try:
+            generation, manifest = TypeAdapter(tuple[str, str]).validate_json(
+                (path / "ready").read_bytes()
+            )
+        except OSError:
+            return None
+        answered.append(generation)
+        return {
+            "installations": [],
+            "runtime": {"generation": generation, "manifest_sha256": manifest},
+        }
 
     async def reload(
         path: Path, request: service_setup.ManagerRequest
@@ -704,6 +727,7 @@ async def test_a_refresh_waits_out_the_minute_and_registers_nothing_again(
             ),
         )
         (path / "reload").write_bytes(b"")
+        answered.clear()
         if reply == "lost":
             while scheduler.started[0].poll() is None:
                 await asyncio.sleep(0.05)
@@ -711,7 +735,7 @@ async def test_a_refresh_waits_out_the_minute_and_registers_nothing_again(
         return {"result": {}}
 
     monkeypatch.setattr(service_setup, "stage_service_runtime", stage)
-    monkeypatch.setattr(service_setup, "_observe", answers)
+    monkeypatch.setattr(service_setup, "_inventory", inventory)
     monkeypatch.setattr(service_setup, "manager_request", reload)
 
     def quiet(_message: str) -> None:
@@ -740,10 +764,14 @@ async def test_a_refresh_waits_out_the_minute_and_registers_nothing_again(
         minute.cancel()
     try:
         assert service.returncode == 0
-        if reply == "lost":
-            # Longer than setup waits to see the selection: it went on waiting
-            # for the manager, and did not take the gap for a failed reload.
-            assert waited > service_setup._RELOAD_SETTLE_SECONDS  # pyright: ignore[reportPrivateUsage]
+        # Longer than setup waits to see the selection: it went on waiting
+        # for the manager, and did not take the gap for a failed reload.
+        assert waited > service_setup._RELOAD_SETTLE_SECONDS  # pyright: ignore[reportPrivateUsage]
+        if reply == "answered":
+            # The old manager went on answering after it had selected its
+            # successor, and setup did not take it for the successor.
+            assert answered[0] == "b" * 32
+        assert answered[-1] == "c" * 32
         assert second.phase == "ready" and second.snapshot is not None
         assert second.operation_id != first.operation_id
         assert second.snapshot.generation == "c" * 32
