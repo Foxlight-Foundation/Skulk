@@ -22,6 +22,8 @@ const Meta = styled.p`
   margin: 0; font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere;
   color: ${({ theme }) => theme.colors.textSecondary};
 `;
+// A refusal or a problem must not read like the explanatory text around it.
+const Problem = styled(Meta)`color: ${({ theme }) => theme.colors.error};`;
 const Mono = styled.span`font: 11.5px ${({ theme }) => theme.fonts.mono}; color: ${({ theme }) => theme.colors.metadataText};`;
 const Group = styled.section`display: flex; flex-direction: column; gap: 10px;`;
 const Machines = styled.div`
@@ -94,7 +96,7 @@ export function EngineMachineRow({ engine, entry, machineName, busy, onChange }:
       {held.status === 'offered' && <Meta>{held.downloadBytes
         ? t('engines.offeredSize', 'This machine installs it the first time a model placed here needs it (about {size} to download).', { size: formatBytes(held.downloadBytes) })
         : t('engines.offered', 'This machine installs it the first time a model placed here needs it.')}</Meta>}
-      {held.status === 'unusable' && <Meta role="alert">{engineProblemSentence(held.problem, t)}</Meta>}
+      {held.status === 'unusable' && <Problem role="alert">{engineProblemSentence(held.problem, t)}</Problem>}
       {lastLoad && <Meta>{loadSentence(lastLoad, t)}</Meta>}
       {builds.length > 0 && <Builds aria-label={t('engines.builds', 'Builds on {machine}', { machine: machineName })}>
         {builds.map(row => <Build key={row.build}>
@@ -159,10 +161,10 @@ export function EnginesPanel() {
     <Meta>{t('engines.intro', 'An add-on engine is installed on each machine that needs it. Here you can see which machines have one, switch a machine to another build it already has, or remove one.')}</Meta>
     {engines.isLoading && <Meta role="status">{t('engines.loading', 'Loading engines…')}</Meta>}
     {engines.isError && !report && <>
-      <Meta role="alert">{engineChangeErrorDetail(engines.error) ?? t('engines.unavailable', 'The list of engines is unavailable.')}</Meta>
+      <Problem role="alert">{engineChangeErrorDetail(engines.error) ?? t('engines.unavailable', 'The list of engines is unavailable.')}</Problem>
       <Actions><Button size="sm" onClick={() => void engines.refetch()}>{t('common.retry', 'Retry')}</Button></Actions>
     </>}
-    {failure && <Meta role="alert">{failure}</Meta>}
+    {failure && <Problem role="alert">{failure}</Problem>}
     {report && !report.packagesEnabled && <Meta>{t('engines.turnedOff', 'Add-on engines are turned off, so machines report none. Turn on "Use add-on engines" in Settings to use them.')}</Meta>}
     {report && report.packagesEnabled && report.engines.length === 0 && <Meta>{t('engines.empty', 'No machine has an add-on engine, and none is offered to one.')}</Meta>}
     {report?.engines.map(engine => <Group key={engine.engineId} aria-label={engine.name}>
