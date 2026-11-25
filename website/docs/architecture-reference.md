@@ -1146,8 +1146,8 @@ before resuming workloads.
 
 - **Role:** the node environment contract, executable: on-demand audit plus safe idempotent remediation over the same `NodeFacts` snapshot the capability pipeline uses
 - **Lives in:** `src/skulk/doctor/` (`checks.py` registry, `cli.py`); subcommand dispatch in `src/skulk/main.py` (before node launch wiring)
-- **Checks:** `engine-available`, `capability-conflicts`, `models-storage` (mirrors node_health's 10/2 GB disk thresholds), `dashboard-assets`. Verdicts `ok`/`degraded`/`fail`; every non-OK `CheckResult` states consequence + remediation. A crashing check degrades into a `fail` verdict rather than killing the audit.
-- **`--fix`:** provisions the pinned llama-server build (Linux, no engine present), installs `nvidia-ml-py` when NVIDIA detection is degraded by its absence, creates the models directory. `--json` for machine output. Exit codes: 0 ok, 2 degraded-only, 1 any fail.
+- **Checks:** `engine-available`, `engine-packages` (every add-on engine the node holds can be used for a new launch, read from the facts snapshot's quick file check, never hashed), `capability-conflicts`, `models-storage` (mirrors node_health's 10/2 GB disk thresholds), `dashboard-assets`. Verdicts `ok`/`degraded`/`fail`; every non-OK `CheckResult` states consequence + remediation. A crashing check degrades into a `fail` verdict rather than killing the audit.
+- **`--fix`:** provisions the pinned llama-server build (Linux, no engine present), installs `nvidia-ml-py` when NVIDIA detection is degraded by its absence, creates the models directory, and switches new launches of an add-on engine whose active build is damaged or no longer runnable to another intact build on the node's disk (the earlier one first; it deletes nothing, because only the running node knows which build a model is using). `--json` for machine output. Exit codes: 0 ok, 2 degraded-only, 1 any fail.
 - **Docs generation:** the check list in `website/docs/node-doctor.md` is GENERATED from `REGISTRY` by `scripts/generate_doctor_docs.py`; edit the registry, not the page.
 
 ### Engine provisioning (managed llama-server, #614 Phase 3)
