@@ -430,7 +430,10 @@ a reload the old manager goes on answering for half a second with its
 successor already selected, and must go on naming the copy it runs. A manager
 that names another copy, or none (one started by hand, or from before this),
 leaves setup waiting within its usual bound and is never taken for the
-service. Do not add a fallback that accepts a bare answer.
+service. Asked again while such a manager still answers, setup waits again:
+a sound registration is never made again to hurry a service along, because
+that would restart it and, for a system service, ask for elevation. Do not
+add a fallback that accepts a bare answer.
 On Windows the service is a Task Scheduler task
 (`extensions/_service_registration_windows.py`; the definition is
 `WindowsServiceLayout` in `service_registration.py`). Windows has no service

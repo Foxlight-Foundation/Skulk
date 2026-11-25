@@ -2980,6 +2980,8 @@ successor already selected, and the successor may be a while in coming (ten
 seconds on macOS and Linux, up to a minute on Windows). An answer from the old
 manager, from a manager that names another copy, or from one that names none
 leaves setup waiting within its usual bound, with the registration untouched.
+Running setup again while such a manager still answers waits again; it does not
+register the service a second time.
 Explicit local setup with a changed source can supersede an interrupted operation;
 its journal and logical profile remain retained while a new copy is staged before
 stopping any existing manager. Linux registration emits a literal working directory

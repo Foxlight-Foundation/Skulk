@@ -489,13 +489,38 @@ async def setup_service(
                 and await asyncio.to_thread(
                     _ready_installation, layout, operation.snapshot, base
                 )
-                and await _serves(layout.root, operation.snapshot)
             ):
-                write_private(connection_path, connection.model_dump_json().encode())
-                if operation.phase == "registered":
-                    operation = operation.model_copy(update={"phase": "ready"})
-                    _save(layout.root, operation)
-                return operation
+                # The selection, its seal and the registration are this
+                # operation's. What is left to know is who answers.
+                registered = operation.snapshot
+                served = await _serves(layout.root, registered)
+                if not served and await _observe(layout.root):
+                    # A manager answers, but not from this copy: the one this
+                    # service replaces has not gone yet, or its successor has
+                    # not come. Nothing is wrong with the registration, so it
+                    # is left alone and the service is waited for. Registering
+                    # again would restart a service that is only on its way,
+                    # and for a system service ask for elevation to do it.
+                    report(_STARTING_MESSAGE)
+                    deadline = time.monotonic() + _READINESS_WAIT_SECONDS
+                    while not (
+                        await _serves(layout.root, registered)
+                        and await asyncio.to_thread(
+                            _ready_installation, layout, registered, base
+                        )
+                    ):
+                        if time.monotonic() >= deadline:
+                            raise ServiceReadinessPendingError(operation.operation_id)
+                        await asyncio.sleep(0.5)
+                    served = True
+                if served:
+                    write_private(
+                        connection_path, connection.model_dump_json().encode()
+                    )
+                    if operation.phase == "registered":
+                        operation = operation.model_copy(update={"phase": "ready"})
+                        _save(layout.root, operation)
+                    return operation
             reply: dict[str, JsonValue] | None = None
             if refresh and operation.snapshot is None:
                 # The OS service is registered and answering; only the Skulk

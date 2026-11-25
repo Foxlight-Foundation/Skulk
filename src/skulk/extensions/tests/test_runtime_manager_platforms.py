@@ -136,6 +136,7 @@ def test_the_manager_runs_as_a_program_and_stops_when_asked(root: Path) -> None:
     RuntimeLock(root, "manager.lock").close()
 
 
+@pytest.mark.skipif(has_root_authority(), reason="the manager refuses root authority")
 async def test_a_manager_names_the_copy_it_was_started_from_whatever_it_selects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

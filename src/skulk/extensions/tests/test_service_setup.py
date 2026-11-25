@@ -492,6 +492,12 @@ async def test_a_first_setup_is_ready_only_when_its_own_manager_answers(
         await setup_service()
     assert service.operation().phase == "registered"
     assert service.actions == ["prepare", "stop", "install"]
+    # Asked again while that manager still answers, setup waits again. The
+    # registration is sound, so it is not made again to hurry things.
+    with pytest.raises(ServiceReadinessPendingError):
+        await setup_service()
+    assert service.operation().phase == "registered"
+    assert service.actions == ["prepare", "stop", "install"] and service.stages == 1
 
     service.answer = service.started_on_the_selection
     completed = await setup_service()
@@ -561,6 +567,18 @@ async def test_a_refresh_is_ready_only_when_the_successor_answers(
         "manifest_sha256": pending.snapshot.manifest_sha256,
     }
     assert service.actions == registered_once and service.stages == 2
+
+    if answering != "nobody":
+        # Asked again while the wrong manager still answers, setup waits
+        # again: it stops nothing, installs nothing and stages nothing. (With
+        # nobody answering at all, a sound registration is repaired, as it
+        # was before managers said which copy they run.)
+        asked = service.asked
+        with pytest.raises(ServiceReadinessPendingError):
+            await setup_service()
+        assert service.asked - asked >= 3
+        assert service.operation() == pending
+        assert service.actions == registered_once and service.stages == 2
 
     # The successor comes up on the selection and says so.
     service.answer = service.started_on_the_selection
