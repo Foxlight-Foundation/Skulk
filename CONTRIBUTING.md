@@ -172,6 +172,15 @@ publication. Do not replace guides, flatten navigation or maintain a second
 copy of normative product documentation in a presentation repository. A failed
 build or obsolete workflow run does not replace the last working publication.
 
+The preferred user documentation is `https://docs.foxlight.ai/skulk/`, with
+development documentation at `/skulk/next/`. GitHub Pages remains a usable
+publication source: its guide canonicals and Open Graph URLs point to the
+matching branded channel, including after client navigation. The workflow
+applies the same metadata wrapper to older stable checkouts without modifying
+their guides or API contracts. Duplicate-host sitemaps are omitted from Pages;
+the branded publisher owns sitemap discovery. TypeDoc is not mirrored there and
+keeps its existing GitHub Pages destination.
+
 ## Development Guidelines
 
 Before starting work:

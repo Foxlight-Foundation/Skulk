@@ -4,7 +4,7 @@ import faulthandler
 import signal
 import sys
 
-STACK_DUMP_SIGNAL = signal.SIGUSR1 if sys.platform != "win32" else None
+STACK_DUMP_SIGNAL: int | None = signal.SIGUSR1 if sys.platform != "win32" else None
 """Signal that makes a Skulk process write its threads' Python stacks to stderr.
 
 ``None`` on Windows, which has neither the signal nor

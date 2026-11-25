@@ -125,13 +125,13 @@ const config: Config = {
         ? {
             id: "channel-next",
             content:
-              'You are viewing the <b>development (next)</b> docs. For the latest release, see the <a href="/Skulk/">stable docs</a>.',
+              'You are viewing the <b>development (next)</b> docs. For the latest release, see the <a href="https://docs.foxlight.ai/skulk/">stable docs</a>.',
             isCloseable: false,
           }
         : {
             id: "channel-stable",
             content:
-              'You are viewing the <b>stable</b> docs. For unreleased changes, see the <a href="/Skulk/next/">development docs</a>.',
+              'You are viewing the <b>stable</b> docs. For unreleased changes, see the <a href="https://docs.foxlight.ai/skulk/next/">development docs</a>.',
             isCloseable: true,
           },
     navbar: {
@@ -180,11 +180,11 @@ const config: Config = {
           items: [
             {
               label: "Stable",
-              href: "https://foxlight-foundation.github.io/Skulk/",
+              href: "https://docs.foxlight.ai/skulk/",
             },
             {
               label: "Next (dev)",
-              href: "https://foxlight-foundation.github.io/Skulk/next/",
+              href: "https://docs.foxlight.ai/skulk/next/",
             },
           ],
         },
