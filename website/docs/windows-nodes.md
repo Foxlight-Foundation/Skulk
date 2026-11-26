@@ -158,9 +158,12 @@ Things to know about the service:
 Skulk has no command for this on Windows yet. By hand:
 
 1. Open **Task Scheduler** and select **Task Scheduler Library**.
-2. Find the task whose name begins `foundation.foxlight.skulk.plugins.`,
-   choose **End**, then **Delete**.
-3. Delete the folder `%LOCALAPPDATA%\Skulk\plugins`.
+2. Find the task whose name begins `foundation.foxlight.skulk.plugins.` and
+   choose **Disable**, then **End**, then **Delete**, in that order. Disabled
+   first, the task is not started again by the next minute; deleting a task
+   does not stop a service it has already started.
+3. Delete the folder `%LOCALAPPDATA%\Skulk\plugins`. If Windows says a file
+   is in use, the service is still running: wait a few seconds and try again.
 
 Opening the Plugins page on the PC again sets the service up again.
 
