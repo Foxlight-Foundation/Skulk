@@ -2160,6 +2160,131 @@ admitted against unified memory, and because macOS has no parent-death
 signal the server runs under the same small parent watchdog the audio.cpp
 engine uses. Intel Macs provision nothing.
 
+### Engine packages (add-on engines)
+
+The engines above are built into Skulk or pinned by it. An **engine package**
+adds an engine Skulk does not name anywhere in its own code: one build of one
+inference engine for one platform and one accelerator class, with a small
+adapter program, described by a manifest that an engine publisher signs. The
+dashboard and the doctor call these **add-on engines**. An engine reaches a
+node only through a manifest, so a new engine, or a new build of one, needs no
+Skulk release.
+
+**What a package is.** The manifest (`provisioning/engine_packages.py`) names
+the engine archive, the adapter (a standard-library Python program or a native
+one) and any pinned requirement files, each with its exact size and digest. A
+requirement is either kept whole or, for a wheel or zip from a third party,
+unpacked to only the members the manifest lists. The manifest also states what
+the build needs from a host: platform, accelerator class (`metal`, `cuda`,
+`rocm`, `vulkan` or `cpu`), device targets, the range of Skulk versions, the
+range of control-protocol versions, the adapter's Python range, and the memory
+the build takes beyond a model's weights. The SHA-256 of the signed claims is
+the **build identity**. It names the build on disk, in a node's telemetry and
+on every placement stamped with it.
+
+**Who may sign one.** The capability store's targets role signs a second
+document, `v1/engine-trust.json`, that lists the engine publishers
+(`provisioning/engine_trust.py`). It is a different signed target from the
+capability publisher trust, read by its own client into its own folder, so a
+key that may sign a capability release cannot sign an engine. An engine
+signature also covers a domain prefix, so a capability signature is never
+accepted as an engine manifest. Engine trust is consulted when a package is
+installed and at no other time: a package that is already installed starts
+without it, and an expired trust document or an unreachable store stops only
+a new installation.
+
+**How a node learns what exists.** The store publishes one signed list of
+every published build, the package index (`provisioning/engine_index.py`,
+`index-v1.json` under the store's `engines/` directory). A node keeps the last
+index it verified; that copy is the revision floor and is all a node reads to
+decide what it offers, so offering needs no network. A worker fetches a newer
+index about a minute after it starts and then hourly. The index decides only
+what a node offers. At install the build's own manifest is fetched and
+verified, and its identity must be the one the index named.
+
+**On disk.** A verified manifest and its files become a **generation**: a
+directory named by the build identity, under the node's engines directory in
+`packages/<engine id>/<accelerator>/`, holding the unpacked engine, the
+adapter, the requirements, the manifest and an inventory of every file
+(`provisioning/engine_install.py`). Generations sit side by side. A small
+record names the one new launches use and the one kept for rollback; changing
+it touches no generation and needs no restart, and a model that is already
+running keeps the generation it started on. A generation appears under its
+final name only when it is complete, and is later checked against its
+inventory, so it keeps working offline and after its manifest expires.
+
+**What a node reports.** A package's backend tag is `<engine name>-<accelerator>`,
+for example `tensorfold-rocm`. A node that holds a usable build advertises
+the tag in its backends and the build identity beside it; a node that holds
+none but could install one from its kept index advertises the tag as
+installable on demand, the way the built-in on-demand engines are. Each node
+also reports one entry per package it holds or is offered, with the builds on
+its disk and how the last model load on each ended, for `GET /v1/engines`. A
+build whose files are damaged, or that the running Skulk can no longer run, is
+reported as unusable with a short reason and is not offered. A tag that two
+installed engines claim is offered by neither, and a package can never take a
+built-in engine's tag.
+
+**Which engine runs a model.** Several engines can often run one model. The
+first of three levels that has an answer for a node decides: a person's own
+order for that model (`State.model_engine_orders`, set only by an explicit
+request and saved on every node), the model card's default order, then the
+built-in fallback, in which installed engine packages come after the built-in
+engines. A launch may also carry an order for that launch only, which is
+stamped on the instance so a repair ranks engines the way the launch did. An
+order only ranks: entries a node does not have are skipped, so an order can
+never make a model impossible to launch.
+
+**A launch on a package.** Admission counts the model's weights plus the memory
+the build declares. If the chosen node only offers the build, the worker's
+`InstallEngine` task installs and activates exactly that build beside the model
+download, and the load waits for it. Just before it dispatches the load, the
+worker asks the package's adapter what this exact load needs
+(`engines/estimate.py`). The worker's own memory check uses the larger figure,
+and the master records it (`EnginePackageNeedStated`,
+`State.engine_package_needs`) so a later placement on that node is not
+admitted against memory the engine is about to take. An engine that does not
+know changes nothing.
+
+**The runner.** One generic runner serves every package
+(`worker/runner/engine_package/`). It starts the adapter in its own process
+group with an environment built from nothing (`engines/launch.py`): the
+package's own locations and identity, a private state directory, and a minimal
+`PATH`. Nothing is inherited from the host. Host and adapter speak a strict
+framed control protocol over the adapter's standard input and output
+(`engines/protocol.py`): hello, describe, probe, estimate, load, health,
+cancel, unload and stop. Unknown fields and unknown message types are refused.
+Tokens never travel that channel: a successful load returns a loopback port
+that serves one pinned chat dialect, and the runner proxies generation to it.
+Any failure of the channel ends the session and its whole process group. An
+engine's typed refusal of a load is not a crash: the worker gives that
+instance up at once, because loading again on the same node and build would
+repeat it, and the node stays eligible for other models.
+
+**Changing what a node holds.** A person can make another build on a node's
+disk the one new launches use, return to the earlier build, or remove a build
+or the whole package, from the dashboard (Settings, Add-on engines), from
+`skulk engines`, or through the routes under `/v1/engines`. Only the node that
+holds the package can change it, so the request is a command
+(`ChangeEnginePackage`) that the master orders and the target node's worker
+carries out and answers with its fresh facts. A build a model is running on is
+never removed. `skulk doctor` reports an engine a node cannot use and, with
+`--fix`, switches new launches to another intact build on disk; it deletes
+nothing.
+
+**Turning them off.** Two cluster settings in the `engines` section of
+`skulk.yaml` govern packages, because a packaged Skulk has no launch
+environment a person can change. `packages_enabled` (on by default) decides
+whether nodes use packages at all: turned off, every node offers none,
+installs none and loads no model on one, while packages on disk stay there and
+a model already running keeps running. `package_channel` decides whether nodes
+also install builds still being tested. A worker re-reads both about once a
+minute. `SKULK_ENGINE_PACKAGES_DISABLE=1` turns packages off on one node at
+launch, whatever the setting says.
+
+A node with no engine package and none offered behaves exactly as it did
+before packages existed, down to the bytes of its telemetry.
+
 ### Packaged apps and the source installer
 
 The recommended desktop distribution freezes one reviewed Skulk commit with
@@ -3522,9 +3647,12 @@ src/skulk/
 │   │   ├── runner_supervisor.py # parent-side lifecycle for one mp.Process runner
 │   │   ├── llm_inference/      # text generation runner
 │   │   ├── embeddings/         # embedding runner
+│   │   ├── engine_package/     # the one runner for any installed engine package
 │   │   └── image_models/       # image generation runner
 │   └── engines/
 │       └── mlx/        # MLX engine (auto_parallel, generator, vision, KV cache backends)
+├── engines/            # engine packages: launch contract, control protocol, inventory, changes, engine orders
+├── provisioning/       # managed engines; engine package manifests, trust, index and install
 ├── routing/            # libp2p pub/sub topics, event router
 ├── shared/             # types, capability resolver, tracing, election
 │   ├── types/          # Pydantic models (events, commands, tasks, chunks, state, diagnostics)
