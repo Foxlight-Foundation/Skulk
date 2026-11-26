@@ -39,7 +39,6 @@ from pathlib import Path
 from typing import Literal
 
 from skulk.extensions import service_bootstrap
-from skulk.extensions.runtime_artifacts import current_platform
 from skulk.extensions.service_registration import (
     ServiceScope,
     WindowsServiceLayout,
@@ -147,16 +146,13 @@ def owner_layout(scope: ServiceScope) -> WindowsServiceLayout:
     """The layout of the plugin service that belongs to this account.
 
     Raises:
-        ValueError: For a machine-wide service, which Windows is not offered,
-            and on a host the runtime installer cannot name: a service that
-            could never be given a runtime is not registered either.
+        ValueError: For a machine-wide service, which Windows is not offered.
     """
     if scope != "user":
         raise ValueError(
             "on Windows the plugin service belongs to one account; "
             "a service for the whole machine is not offered"
         )
-    current_platform()
     return WindowsServiceLayout(this_account(), Path(local_data_directory()))
 
 

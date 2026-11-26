@@ -39,27 +39,6 @@ from skulk.utils.runtime_files import has_root_authority
 windows_only = pytest.mark.skipif(
     sys.platform != "win32", reason="examines a Windows access list or process"
 )
-# Host measurement names an artifact family, and Skulk names none for Windows:
-# no plugin runtime is published for it. Until one is, nothing can measure a
-# Windows host, so a real service copy cannot be staged there.
-names_this_platform = pytest.mark.skipif(
-    sys.platform == "win32", reason="host measurement names no Windows platform"
-)
-
-
-@pytest.fixture
-def measured_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give staging a host to copy from on a platform Skulk does not name.
-
-    The tests that use this exercise staging's own steps, which run on
-    Windows; only the measurement in front of them does not.
-    """
-    if sys.platform == "win32":
-        host = QualifiedHost("macos-arm64", "3.13.13", "1.5.2", "a" * 64)
-        monkeypatch.setattr(
-            "skulk.extensions.service_snapshot.measure_host", lambda: host
-        )
-
 
 _MANAGER = "print('verified-manager')\n"
 # A manager that never stops by itself: it adds a byte to ``beats`` in the
@@ -357,7 +336,6 @@ def test_bootstrap_refuses_tampering_before_site_startup(
     assert not marker.exists()
 
 
-@pytest.mark.usefixtures("measured_host")
 async def test_interrupted_copy_does_not_publish_over_existing_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -381,7 +359,6 @@ async def test_interrupted_copy_does_not_publish_over_existing_selection(
     RuntimeLock(tmp_path).close()
 
 
-@pytest.mark.usefixtures("measured_host")
 async def test_staging_refuses_a_copy_the_volume_has_no_room_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -436,7 +413,6 @@ async def test_staging_refuses_a_copy_whose_paths_would_not_fit(
     RuntimeLock(tmp_path).close()
 
 
-@pytest.mark.usefixtures("measured_host")
 async def test_source_editable_dependency_is_not_silently_borrowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -476,7 +452,6 @@ def test_the_runtime_check_ignores_what_finder_leaves_behind(tmp_path: Path) -> 
     assert service_bootstrap.runtime_tree(runtime, base) != sealed
 
 
-@names_this_platform
 def test_a_browsed_core_build_measures_as_the_same_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -854,34 +829,16 @@ def _service_root(tmp_path: Path) -> Path:
 @pytest.mark.slow
 @pytest.mark.skipif(has_root_authority(), reason="staging refuses root authority")
 async def test_a_copy_of_this_skulk_is_sealed_and_starts_its_manager_on_windows(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    """Everything real but the measurement, which names no Windows host yet.
+    """Nothing stands in: the host is measured and the copy answers for itself.
 
     The environment the tests run in is copied file by file into a service
-    root and sealed; the bootstrap verifies the copy on the base interpreter
-    and starts the manager from it; the manager answers. What stands in is
-    the host measurement and the copy's own answer to it, because Skulk has
-    no name for a Windows artifact family: until it has, a node cannot stage
-    this copy for itself.
+    root and sealed. The copy's own interpreter is then asked what it is, and
+    its answer has to be this host's measurement. The bootstrap verifies the
+    copy on the base interpreter and starts the manager from it, and the
+    manager answers and names the copy it runs.
     """
-    from skulk.extensions import service_snapshot
-
-    host = QualifiedHost("macos-arm64", "3.13.13", "1.5.2", "a" * 64)
-    monkeypatch.setattr(service_snapshot, "measure_host", lambda: host)
-
-    async def measured_alike(_runtime: Path, _lock: RuntimeLock) -> bytes:
-        return json.dumps(
-            {
-                "platform": host.platform,
-                "python_version": host.python_version,
-                "skulk_version": host.skulk_version,
-                "skulk_build_sha256": host.skulk_build_sha256,
-                "inventory": service_snapshot._distributions(),  # pyright: ignore[reportPrivateUsage]
-            }
-        ).encode()
-
-    monkeypatch.setattr(service_snapshot, "_qualify", measured_alike)
     root = _service_root(tmp_path)
     snapshot = await stage_service_runtime(root)
     assert snapshot.copied_files > 1000

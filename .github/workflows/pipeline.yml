@@ -230,9 +230,9 @@ jobs:
         #
         # The slow tests are included: one of them copies a standalone Python,
         # installs through it, moves it and starts the adopted environment,
-        # and another copies this Skulk into a service folder, seals the copy
-        # and starts the plugin manager from it. Nothing else in CI does
-        # either on Windows.
+        # and another measures this host, copies this Skulk into a service
+        # folder, seals the copy, asks the copy what it is and starts the
+        # plugin manager from it. Nothing else in CI does either on Windows.
         #
         # The service task tests register against a stand-in for Task
         # Scheduler and start the real startup file without a console, as
@@ -262,7 +262,8 @@ jobs:
             src/skulk/extensions/tests/test_service_snapshot.py \
             src/skulk/extensions/tests/test_service_setup.py \
             src/skulk/extensions/tests/test_service_user_scope.py \
-            src/skulk/extensions/tests/test_service_task.py
+            src/skulk/extensions/tests/test_service_task.py \
+            src/skulk/extensions/tests/test_runtime_platform.py
 
   test:
     name: Test

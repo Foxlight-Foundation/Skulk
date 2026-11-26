@@ -15,6 +15,7 @@ import re
 import stat
 import subprocess
 import sys
+import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast, final
@@ -117,6 +118,15 @@ def service_platform() -> ServicePlatform:
             raise ValueError("plugin services on Linux require a running systemd")
         library, _ = platform.libc_ver()
         return f"linux-{library or 'unknown'}-{architecture}"
+    if sys.platform == "win32":
+        # The machine's name only, asked of the interpreter and not of the
+        # environment; see runtime_artifacts.current_platform().
+        built_for = {"win-amd64": "x86_64", "win-arm64": "aarch64"}.get(
+            sysconfig.get_platform()
+        )
+        if built_for is None:
+            raise ValueError("Skulk on Windows needs a 64-bit Python (x86-64 or ARM64)")
+        return f"windows-{built_for}"
     raise ValueError(_UNREGISTRABLE)
 
 

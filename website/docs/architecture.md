@@ -2963,11 +2963,15 @@ folder, and records the base's library beside its program. Staging there builds
 the environment in a child run on the base interpreter's real path, and refuses
 in advance a copy whose deepest file would not fit below the service root on a
 machine without long paths, saying how many characters too long it is.
-One part of this does not run on Windows yet. Staging a real copy starts by
-measuring the host, and Skulk names an artifact family for macOS and Linux only;
-naming one for Windows is a decision for the release schema and the plugin owner
-runtime. Until then the registration described below refuses too, by asking the
-same question first.
+Staging a copy starts by measuring the host, and a Windows host has a name for
+that: `windows-x86_64` or `windows-aarch64`, taken from what the Python
+interpreter was built for, because the usual question is answered from the
+environment on Windows and the plugin manager runs with a fixed one. The name
+describes the machine. It
+is what lets a Windows node keep its own plugin service, and it admits nothing
+else: a release says for itself which systems it may be installed on, the
+release schema names macOS and Linux only, and so every install on Windows is
+still refused. Only x86_64 has been run.
 Core-runtime activation requires a stopped manager and leaves plugin state intact.
 A manager knows which service copy it runs from. It works that out once, when it
 starts, from where its own interpreter's environment lies and from that
@@ -3033,9 +3037,10 @@ wants to be started again, so the task is started every minute and never twice a
 up to a minute where launchd and systemd take ten seconds. To stop the service, setup switches the task off,
 asks the bootstrap to stop through a file in the service root and waits up to 180 seconds before it ends the
 task. That file stays until the service is installed again, and while it is there a start ends at once.
-While no release names a Windows host, setup refuses there by name, before it reads or writes anything,
-and the status route answers `unsupported` with that sentence whether or not the node was ever set up, so the
-Plugins page starts no setup. Retained setup phase is
+A Windows node that was never set up reads `absent`, like any other, and the Plugins page starts local setup
+there. A host on a system Skulk has no name for refuses by name, before setup reads or writes anything, and the
+status route answers `unsupported` with that sentence whether or not the node was ever set up, so the Plugins
+page starts no setup there. Retained setup phase is
 separate from current runtime integrity and manager availability. HTTP lifecycle and dynamic installation registration use this manager; setup progress, runtime integrity and live management availability remain separate observations.
 
 `terminal_install.py` composes the manager's existing operations for the interactive
