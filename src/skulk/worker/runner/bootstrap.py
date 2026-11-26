@@ -627,6 +627,7 @@ def entrypoint(
     context_token_limit: int | None = None,
     separation_context: SeparationRunnerContext | None = None,
     native_music_context: NativeMusicRunnerContext | None = None,
+    engine_package_awaited: bool = False,
 ) -> None:
     global logger
     logger = _logger
@@ -681,12 +682,30 @@ def entrypoint(
         require_remote_code_approval(shard.model_card)
         # Also before dispatch, for every model type: several branches below
         # send an engine they do not recognize to a default runner.
-        from skulk.shared.backends import unknown_engine_refusal
-
-        engine_package = installed_engine_package(
-            shard.resolved_backend, shard.resolved_engine_build
+        from skulk.shared.backends import (
+            engine_packages_disabled,
+            package_engine_of,
+            unknown_engine_refusal,
         )
-        if engine_package is not None:
+
+        def find_engine_package() -> "InstalledEngine | None":
+            return installed_engine_package(
+                shard.resolved_backend, shard.resolved_engine_build
+            )
+
+        engine_package = find_engine_package()
+        # The worker starts a runner before it installs an engine the node
+        # only offers, so the model downloads meanwhile, and holds the load
+        # until the install has finished. Such a runner must not refuse its
+        # engine as unknown at start: it reads the package at load.
+        awaited = (
+            engine_package is None
+            and engine_package_awaited
+            and shard.resolved_backend is not None
+            and package_engine_of(shard.resolved_backend) is not None
+            and not engine_packages_disabled()
+        )
+        if engine_package is not None or awaited:
             # A backend an installed engine package offers. One generic runner
             # serves every package; nothing below knows the engine's name.
             from skulk.worker.runner.engine_package.runner import (
@@ -700,6 +719,7 @@ def entrypoint(
                 cancel_receiver,
                 engine_package,
                 context_token_limit=context_token_limit,
+                find_installed=find_engine_package,
             ).main()
             return
         unknown_engine = unknown_engine_refusal(shard.resolved_backend)

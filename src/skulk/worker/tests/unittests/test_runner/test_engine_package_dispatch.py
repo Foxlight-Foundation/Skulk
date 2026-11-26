@@ -1,8 +1,13 @@
-"""A placement on a held engine package reaches the generic runner; a refused load is given up."""
+"""A placement on a held engine package reaches the generic runner; a refused load is given up.
+
+So does a placement whose package the worker is still installing: the runner
+starts first, so the model downloads meanwhile, and reads the package at load.
+"""
 
 from __future__ import annotations
 
 import multiprocessing as mp
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -25,7 +30,7 @@ from skulk.shared.types.diagnostics import RunnerDiagnosticUpdate
 from skulk.shared.types.engine_packages import NodeEngineLoadResult
 from skulk.shared.types.events import Event, RunnerStatusUpdated
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.tasks import Task, TaskId
+from skulk.shared.types.tasks import CreateRunner, Task, TaskId
 from skulk.shared.types.worker.instances import BoundInstance, InstanceId
 from skulk.shared.types.worker.runners import (
     RunnerFailed,
@@ -37,11 +42,12 @@ from skulk.shared.types.worker.runners import (
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import channel, mp_channel
 from skulk.worker.main import (
+    Worker,
     _engine_load_refused_instance_failure_message,  # pyright: ignore[reportPrivateUsage]
     engine_load_refused_live_instances,
     engine_package_load_results,
 )
-from skulk.worker.runner import bootstrap
+from skulk.worker.runner import bootstrap, runner_supervisor
 from skulk.worker.runner.engine_package import runner as runner_module
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 from skulk.worker.tests.unittests.conftest import get_mlx_ring_instance
@@ -85,11 +91,14 @@ def _run_entrypoint(
     bound: BoundInstance,
     lookup: object,
     runner_class: type,
+    *,
+    awaited: bool = False,
 ) -> list[Event]:
     """Run the runner entry point in process and return the events it sent.
 
     ``lookup`` stands in for the installed-package lookup and ``runner_class``
     for the generic runner. Reaching built-in engine resolution fails the test.
+    ``awaited`` is what the worker says when it is installing the package.
     """
     events: list[Event] = []
 
@@ -128,6 +137,7 @@ def _run_entrypoint(
             audio_receiver,
             loguru.logger,
             context_token_limit=4096,
+            engine_package_awaited=awaited,
         )
     finally:
         for channel_end in (
@@ -169,6 +179,7 @@ def test_a_placement_on_a_held_package_reaches_the_generic_runner(
             _cancels: object,
             installed: object,
             context_token_limit: int | None = None,
+            find_installed: object = None,
         ) -> None:
             self.installed = installed
             self.context_token_limit = context_token_limit
@@ -180,12 +191,187 @@ def test_a_placement_on_a_held_package_reaches_the_generic_runner(
 
     assert looked_up == [("tensorfold-rocm", BUILD)]
     assert started == [(package, 4096)]
-    assert not [
-        event
+    assert not _failures(events)
+
+
+def _failures(events: list[Event]) -> list[RunnerFailed]:
+    return [
+        event.runner_status
         for event in events
         if isinstance(event, RunnerStatusUpdated)
         and isinstance(event.runner_status, RunnerFailed)
     ]
+
+
+class _UnreachableRunner:
+    """The generic runner must not be built for a placement that is refused."""
+
+    def __init__(self, *_arguments: object, **_keywords: object) -> None:
+        raise AssertionError("the generic runner was built for a refused placement")
+
+
+def test_a_runner_started_while_its_package_installs_finds_it_at_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker starts the runner, then installs: the start must not refuse the engine."""
+    package = object()
+    on_disk: list[object] = []
+    seen: list[tuple[object, object]] = []
+
+    def lookup(_backend: str | None, _build: str | None) -> object | None:
+        return on_disk[0] if on_disk else None
+
+    class WaitingRunner:
+        """Stand in for the generic runner; the install lands before its load."""
+
+        def __init__(
+            self,
+            _bound_instance: BoundInstance,
+            _events: object,
+            _tasks: object,
+            _cancels: object,
+            installed: object,
+            context_token_limit: int | None = None,
+            find_installed: object = None,
+        ) -> None:
+            self.installed = installed
+            self.find_installed = cast("Callable[[], object]", find_installed)
+
+        def main(self) -> None:
+            on_disk.append(package)
+            seen.append((self.installed, self.find_installed()))
+
+    events = _run_entrypoint(
+        monkeypatch, _bound(), lookup, WaitingRunner, awaited=True
+    )
+
+    assert seen == [(None, package)]
+    assert not _failures(events)
+
+
+def test_a_package_nobody_is_installing_is_refused_at_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the worker's word, a missing package is an unknown engine, at once."""
+
+    def lookup(_backend: str | None, _build: str | None) -> None:
+        return None
+
+    events = _run_entrypoint(monkeypatch, _bound(), lookup, _UnreachableRunner)
+
+    failures = _failures(events)
+    assert len(failures) == 1
+    assert (failures[0].error_message or "").startswith(
+        f"{ENGINE_UNKNOWN_FAILURE_MARKER}: "
+    )
+
+
+def test_packages_turned_off_refuse_a_package_that_was_being_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The off switch wins over an install the worker began before it was set."""
+
+    def lookup(_backend: str | None, _build: str | None) -> None:
+        return None
+
+    monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, "1")
+
+    events = _run_entrypoint(
+        monkeypatch, _bound(), lookup, _UnreachableRunner, awaited=True
+    )
+
+    failures = _failures(events)
+    assert len(failures) == 1
+    assert f"{ENGINE_PACKAGES_DISABLE_ENV}=1" in (failures[0].error_message or "")
+
+
+class _RecordedProcess:
+    """Stand in for the runner process: keep what it would be started with."""
+
+    def __init__(self, **started_with: object) -> None:
+        self.started_with = started_with
+
+
+def _process_keywords(
+    monkeypatch: pytest.MonkeyPatch, *, awaited: bool | None
+) -> object:
+    """The keyword arguments a supervisor gives its runner's entry point."""
+    monkeypatch.setattr(runner_supervisor.mp, "Process", _RecordedProcess)
+    event_sender, _ = channel[Event](1)
+    bound = _bound()
+    supervisor = (
+        RunnerSupervisor.create(bound_instance=bound, event_sender=event_sender)
+        if awaited is None
+        else RunnerSupervisor.create(
+            bound_instance=bound,
+            event_sender=event_sender,
+            engine_package_awaited=awaited,
+        )
+    )
+    process = cast("_RecordedProcess", cast(object, supervisor.runner_process))
+    assert process.started_with["target"] is runner_supervisor.entrypoint
+    return process.started_with["kwargs"]
+
+
+@pytest.mark.asyncio
+async def test_a_supervisor_tells_its_runner_the_package_is_on_its_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _process_keywords(monkeypatch, awaited=True) == {
+        "engine_package_awaited": True
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("awaited", [None, False])
+async def test_any_other_runner_is_started_with_the_arguments_it_always_had(
+    monkeypatch: pytest.MonkeyPatch, awaited: bool | None
+) -> None:
+    assert _process_keywords(monkeypatch, awaited=awaited) == {}
+
+
+@pytest.mark.parametrize(
+    ("on_demand", "awaited"),
+    [
+        (frozenset({"tensorfold-rocm"}), True),
+        # Held already, or not offered here at all: nothing is on its way.
+        (frozenset[str](), False),
+        (frozenset({"tensorfold-cuda", "llama_server-vulkan"}), False),
+    ],
+)
+def test_the_worker_says_so_only_for_a_package_this_node_still_has_to_install(
+    monkeypatch: pytest.MonkeyPatch, on_demand: frozenset[str], awaited: bool
+) -> None:
+    created: list[dict[str, object]] = []
+
+    def create(**keywords: object) -> object:
+        created.append(keywords)
+        return SimpleNamespace(run=None)
+
+    monkeypatch.setattr(RunnerSupervisor, "create", create)
+    bound = _bound()
+    event_sender, _ = channel[Event](1)
+    runners: dict[RunnerId, object] = {}
+    worker = SimpleNamespace(
+        event_sender=event_sender,
+        runners=runners,
+        _data_sender=None,
+        _trace_data_sender=None,
+        _on_demand_backends=on_demand,
+        _schedule_video_output_transfer=None,
+        _schedule_music_output_transfer=None,
+        _schedule_music_edit_output_transfer=None,
+        _schedule_separation_output_transfer=None,
+        _tg=SimpleNamespace(start_soon=_skip_process_setup),
+    )
+
+    _ = Worker._create_supervisor(  # pyright: ignore[reportPrivateUsage]
+        cast("Worker", cast(object, worker)),
+        CreateRunner(instance_id=bound.instance.instance_id, bound_instance=bound),
+    )
+
+    assert [made["engine_package_awaited"] for made in created] == [awaited]
+    assert list(runners) == [RUNNER]
 
 
 def test_packages_turned_off_refuse_a_placement_on_a_held_package(
@@ -200,12 +386,6 @@ def test_packages_turned_off_refuse_a_placement_on_a_held_package(
     def lookup(backend: str | None, build: str | None) -> object:
         return real_lookup(backend, build, packages_root=packages)
 
-    class UnreachableRunner:
-        """The generic runner must not be built while packages are off."""
-
-        def __init__(self, *_arguments: object, **_keywords: object) -> None:
-            raise AssertionError("a package ran while engine packages were turned off")
-
     held = real_lookup(tag, installed.digest, packages_root=packages)
     assert held is not None and held.digest == installed.digest
 
@@ -216,15 +396,10 @@ def test_packages_turned_off_refuse_a_placement_on_a_held_package(
     # packages are on; turned off, the node does not look at all.
     assert real_lookup(tag, "f" * 64, packages_root=packages) is None
     events = _run_entrypoint(
-        monkeypatch, _bound(installed.digest), lookup, UnreachableRunner
+        monkeypatch, _bound(installed.digest), lookup, _UnreachableRunner
     )
 
-    failures = [
-        event.runner_status
-        for event in events
-        if isinstance(event, RunnerStatusUpdated)
-        and isinstance(event.runner_status, RunnerFailed)
-    ]
+    failures = _failures(events)
     assert len(failures) == 1
     message = failures[0].error_message or ""
     assert message.startswith(f"{ENGINE_UNKNOWN_FAILURE_MARKER}: ")

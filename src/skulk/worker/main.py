@@ -266,7 +266,7 @@ from skulk.worker.native_music_media import (
     local_native_music_task,
 )
 from skulk.worker.native_music_output import NativeMusicTask
-from skulk.worker.plan import plan
+from skulk.worker.plan import awaited_engine_package, plan
 from skulk.worker.runner.ace_step.context import NativeMusicRunnerContext
 from skulk.worker.runner.ace_step.resources import NativeMusicHostGuard
 from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
@@ -5932,6 +5932,10 @@ class Worker:
             separation_context=separation_context,
             native_music_context=native_music_context,
             context_token_limit=context_token_limit,
+            engine_package_awaited=awaited_engine_package(
+                shard, self._on_demand_backends
+            )
+            is not None,
             data_sender=self._data_sender.clone()
             if self._data_sender is not None
             else None,

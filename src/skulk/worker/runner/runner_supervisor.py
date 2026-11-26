@@ -274,12 +274,18 @@ class RunnerSupervisor:
         on_separation_output: "Callable[[CommandId, NodeId | None, SeparationChunk], None] | None" = None,
         separation_context: SeparationRunnerContext | None = None,
         native_music_context: NativeMusicRunnerContext | None = None,
+        engine_package_awaited: bool = False,
     ) -> Self:
         """Spawn the runner subprocess for one shard of a placed instance.
 
         ``context_token_limit`` is the instance's static context-admission
         ceiling (#145), threaded through the local (same-binary) process
         boundary precisely so no gossiped type needs a new field.
+
+        ``engine_package_awaited`` says the shard's backend is an engine
+        package this node offers and has yet to install. The runner then
+        starts without the package and reads it when the model loads, which
+        the worker allows only after the install has finished.
         """
         if separation_context is not None and native_music_context is not None:
             raise ValueError("one runner cannot own both native model contexts")
@@ -322,6 +328,9 @@ class RunnerSupervisor:
                 if separation_context is not None
                 else ()
             ),
+            # Passed only when set, so a runner for any other placement is
+            # started with exactly the arguments it always had.
+            kwargs={"engine_package_awaited": True} if engine_package_awaited else {},
             daemon=True,
         )
 

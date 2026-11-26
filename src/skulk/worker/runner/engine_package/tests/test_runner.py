@@ -224,6 +224,7 @@ class _Harness:
         mode: str,
         *,
         task: ModelTask = ModelTask.TextGeneration,
+        installing: bool = False,
     ) -> None:
         self.model_directory = tmp_path / "model"
         self.model_directory.mkdir()
@@ -256,13 +257,17 @@ class _Harness:
             self._task_sender,
             self.cancel_sender,
         )
+        # ``installing`` is a runner the worker started before the package was
+        # on disk: it is handed no package and finds it when asked to load.
+        self.on_disk: InstalledEngine | None = None if installing else self.installed
         self.runner = Runner(
             _bound(task),
             event_sender,
             task_receiver,
             cancel_receiver,
-            self.installed,
+            None if installing else self.installed,
             context_token_limit=8192,
+            find_installed=lambda: self.on_disk,
             state_root=self.state_root,
         )
 
@@ -373,6 +378,57 @@ def test_a_package_loads_serves_text_and_stops(
     ).exists() or not any(
         (harness.state_root / harness.installed.digest / "instances").iterdir()
     )
+
+
+def test_a_runner_started_before_its_package_was_installed_loads_once_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker starts the runner, installs the package, then asks for the load."""
+    harness = _Harness(tmp_path, monkeypatch, "normal", installing=True)
+    # Nothing is read from disk, and no directory is made, before the load.
+    assert not harness.state_root.exists()
+    harness.on_disk = harness.installed
+    harness.load()
+    pid = harness.adapter_pid()
+    instances = harness.state_root / harness.installed.digest / "instances"
+    try:
+        assert isinstance(harness.runner.current_status, RunnerReady)
+        assert [entry.name for entry in instances.iterdir()] == [str(INSTANCE)]
+        harness.runner._generate(_generation(max_output_tokens=32))
+        chunks = [chunk for chunk in harness.chunks() if isinstance(chunk, TokenChunk)]
+        assert "".join(c.text for c in chunks if not c.is_thinking) == "Hello world"
+    finally:
+        harness.close()
+
+    assert _gone(pid)
+    assert not any(instances.iterdir())
+
+
+def test_a_load_whose_package_never_arrived_is_a_missing_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker gives such an instance up once; it does not relaunch the runner."""
+    harness = _Harness(tmp_path, monkeypatch, "normal", installing=True)
+    try:
+        with pytest.raises(RuntimeError) as failed:
+            harness.load()
+    finally:
+        harness.close()
+
+    assert str(failed.value).startswith(f"{ENGINE_UNAVAILABLE_FAILURE_MARKER}: ")
+    assert "tensorfold-rocm" in str(failed.value)
+    assert not _retried_on_failure(RunnerFailed(error_message=str(failed.value)))
+    assert harness.record() == []
+    assert not harness.state_root.exists()
+
+
+def test_a_runner_needs_a_package_or_a_way_to_find_one() -> None:
+    event_sender, _ = mp_channel[Event]()
+    _, task_receiver = mp_channel[Task]()
+    _, cancel_receiver = mp_channel[TaskId]()
+
+    with pytest.raises(ValueError, match="a package or a lookup"):
+        _ = Runner(_bound(), event_sender, task_receiver, cancel_receiver, None)
 
 
 def test_a_refused_load_is_terminal_and_carries_only_the_code(

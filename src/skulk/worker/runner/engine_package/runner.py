@@ -40,6 +40,7 @@ import json
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
@@ -58,7 +59,10 @@ from skulk.engines.launch import (
     plan_adapter_launch,
 )
 from skulk.provisioning.engine_install import InstalledEngine
-from skulk.shared.backends import engine_load_refusal
+from skulk.shared.backends import (
+    ENGINE_UNAVAILABLE_FAILURE_MARKER,
+    engine_load_refusal,
+)
 from skulk.shared.constants import CONTEXT_LENGTH_EXCEEDED_PREFIX
 from skulk.shared.models.model_cards import card_serves_speech
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk
@@ -297,17 +301,26 @@ class Runner(ServedConcurrentDispatch):
         event_sender: MpSender[Event],
         task_receiver: MpReceiver[Task],
         cancel_receiver: MpReceiver[TaskId],
-        installed: InstalledEngine,
+        installed: InstalledEngine | None,
         context_token_limit: int | None = None,
         *,
+        find_installed: Callable[[], InstalledEngine | None] | None = None,
         state_root: Path = ENGINE_STATE_DIR,
     ) -> None:
         """Prepare a runner for one placement. Nothing is started until ``LoadModel``.
 
+        ``installed`` is ``None`` when the worker is still installing the
+        package: it starts the runner first so the model downloads meanwhile,
+        and sends ``LoadModel`` only once the install has finished. The
+        package is then read with ``find_installed`` at load.
+
         Raises:
             RuntimeError: Marked as a refused load when the placement is of a
                 kind a packaged engine does not serve.
+            ValueError: When neither a package nor a way to find one is given.
         """
+        if installed is None and find_installed is None:
+            raise ValueError("an engine package runner needs a package or a lookup")
         self.event_sender = event_sender
         self.task_receiver = task_receiver
         self.cancel_receiver = cancel_receiver
@@ -322,13 +335,11 @@ class Runner(ServedConcurrentDispatch):
         if unsupported is not None:
             raise RuntimeError(engine_load_refusal("unsupported_task", unsupported))
         self._installed = installed
+        self._find_installed = find_installed
+        self._state_root = state_root
         self._instance_key = str(self.instance.instance_id)
-        # One directory per instance, so two instances of one build never
-        # share a home, a temporary directory or a log.
         self._state_directory = (
-            engine_state_directory(installed.digest, root=state_root)
-            / "instances"
-            / self._instance_key
+            None if installed is None else self._instance_state_directory(installed)
         )
         self.setup_start_time = time.time()
         self.cancelled_tasks: set[TaskId] = set()
@@ -341,11 +352,55 @@ class Runner(ServedConcurrentDispatch):
         self._control_lock = threading.Lock()
         self.base_url: str | None = None
         self.current_status: RunnerStatus = RunnerIdle()
-        logger.info(
-            f"engine package runner created for {installed.claims.engine_id} "
-            f"({installed.claims.lane}, build {installed.digest[:12]})"
-        )
+        if installed is None:
+            logger.info(
+                "engine package runner created; its engine package is still "
+                "being installed"
+            )
+        else:
+            logger.info(
+                f"engine package runner created for {installed.claims.engine_id} "
+                f"({installed.claims.lane}, build {installed.digest[:12]})"
+            )
         self.update_status(RunnerIdle())
+
+    def _instance_state_directory(self, installed: InstalledEngine) -> Path:
+        """One directory per instance, so two instances of one build never
+        share a home, a temporary directory or a log."""
+        return (
+            engine_state_directory(installed.digest, root=self._state_root)
+            / "instances"
+            / self._instance_key
+        )
+
+    def _package(self) -> tuple[InstalledEngine, Path]:
+        """The installed package and this instance's directory, found at load if need be.
+
+        Raises:
+            RuntimeError: Marked as a missing engine, which the worker gives
+                up on instead of relaunching, when the package the worker
+                installed for this placement cannot be found.
+        """
+        installed = self._installed
+        if installed is None and self._find_installed is not None:
+            installed = self._find_installed()
+            if installed is not None:
+                logger.info(
+                    "engine package runner found its package: "
+                    f"{installed.claims.engine_id} ({installed.claims.lane}, "
+                    f"build {installed.digest[:12]})"
+                )
+        if installed is None:
+            backend = self.shard_metadata.resolved_backend or ""
+            raise RuntimeError(
+                f"{ENGINE_UNAVAILABLE_FAILURE_MARKER}: the engine package for "
+                f"backend {backend[:64]!r} was not installed when its model "
+                "was loaded"
+            )
+        self._installed = installed
+        if self._state_directory is None:
+            self._state_directory = self._instance_state_directory(installed)
+        return installed, self._state_directory
 
     # --- runner-contract plumbing ---------------------------------------------
 
@@ -395,6 +450,7 @@ class Runner(ServedConcurrentDispatch):
     def _load_model(self, task: Task) -> None:
         self.update_status(RunnerLoading())
         self.acknowledge_task(task)
+        installed, state_directory = self._package()
         model, settings = package_load_request(
             self.shard_metadata, self.context_token_limit
         )
@@ -404,12 +460,12 @@ class Runner(ServedConcurrentDispatch):
                 detail="engine_package_load",
                 task_id=task.task_id,
                 attrs={
-                    "engine": self._installed.claims.engine_id,
+                    "engine": installed.claims.engine_id,
                     "n_ctx": settings.context_tokens,
                 },
             ):
                 launch = plan_adapter_launch(
-                    self._installed, state_directory=self._state_directory
+                    installed, state_directory=state_directory
                 )
                 session = self._stack.enter_context(adapter_session(launch))
                 self._session = session
@@ -492,7 +548,8 @@ class Runner(ServedConcurrentDispatch):
             )
             return
         # A stopped instance keeps nothing; a failed stop keeps its log.
-        shutil.rmtree(self._state_directory, ignore_errors=True)
+        if self._state_directory is not None:
+            shutil.rmtree(self._state_directory, ignore_errors=True)
 
     # --- generation -----------------------------------------------------------
 
