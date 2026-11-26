@@ -66,7 +66,8 @@ cd ..
 ```
 
 Check out the same branch or commit your other nodes run. `uv sync --locked`
-installs exactly the packages the checkout names and builds nothing. On the
+installs exactly the packages the checkout names. It needs no compiler,
+because the networking component is installed as a prebuilt package. On the
 test machine it took 17 seconds.
 
 Use an ordinary PowerShell window, not one opened with **Run as
@@ -104,11 +105,15 @@ the cluster and exits within a few seconds.
 
 | What | Where |
 | --- | --- |
-| Settings, data and cache | `.skulk` in your user folder (`%USERPROFILE%\.skulk`) |
+| The cluster's settings, `skulk.yaml` | The folder you start Skulk from |
+| The node's own settings, data and cache | `.skulk` in your user folder (`%USERPROFILE%\.skulk`) |
 | The plugin service | `%LOCALAPPDATA%\Skulk\plugins` |
 
-Set `SKULK_HOME` to keep a node's settings, data and cache somewhere else, for
-example to run a second node on one machine.
+Set `SKULK_HOME`, to a folder name inside your user folder or to a full path,
+to keep the node's own settings, data and cache somewhere else. It moves
+nothing else: `skulk.yaml` is still read from the folder you start Skulk in,
+the ports stay the same, and your account still has one plugin service, which
+belongs to the first configuration that set it up.
 
 ## Plugins on Windows
 
