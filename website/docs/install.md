@@ -20,6 +20,7 @@ Choose the path that matches the machine:
 | Ubuntu or Debian desktop, `amd64` or `arm64` | Skulk app and runtime through the Foxlight APT repository |
 | Headless Ubuntu or Debian, `amd64` or `arm64` | Runtime-only APT package |
 | Contributor workstation, development branch, or another Linux distribution | [Source installer](#source-and-development-installs) |
+| Windows 11 PC, as a node that runs no models | [Source checkout](windows-nodes.md), development branch only |
 
 ## macOS
 
