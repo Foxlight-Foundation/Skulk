@@ -1,4 +1,3 @@
-import socket
 import time
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Sequence
@@ -716,51 +715,46 @@ class TelemetryTopicRouter(TopicRouter[NodeTelemetry]):
         return len(self._pending)
 
 
-def why_no_peer_listener(port: int) -> str:
-    """Say why the node could not listen for peers, which libp2p does not.
+PEER_LISTENER_REFUSED = "could not listen for peers on "
+"""How the network layer's error begins when it could not listen for peers.
 
-    When libp2p cannot take its TCP port, its error has no text at all (the
-    transport's own failure prints as an empty string), and it has already
-    logged "listening on" by then, because it logs before it binds. The node
-    then ends with a bare ``RuntimeError`` that names neither the port nor the
-    reason. The usual reason is that another program holds the port: the
-    default lies inside the range an operating system hands out to programs
-    that ask for any free port, on Windows, macOS and Linux alike.
+``LISTEN_FAILURE_PREFIX`` in ``rust/networking/src/swarm.rs`` is the same
+text; the two change together.
+"""
 
-    The operating system is asked afterwards, with a plain bind, what it has
-    against the port now. That is a second question and not libp2p's own
-    answer: it can find the port free again.
+
+def peer_listener_refused(said: str, port: int) -> str:
+    """Put the network layer's reason before the owner, with what to do about it.
+
+    The network layer names the port it could not listen on and gives
+    libp2p's own reason, which is the operating system's. The usual reason is
+    that another program holds the port: the default lies inside the range an
+    operating system hands out to programs that ask for any free port, on
+    Windows, macOS and Linux alike.
+
+    Bindings before 0.2.12 passed libp2p's error on as it was, and it prints
+    as nothing, so a node ended with a ``RuntimeError`` that had no message.
+    For a while this module then asked the operating system about the port a
+    second time, with a plain bind. That could find the port free again, it
+    would have blamed the port for any other failure that came without words,
+    and its answer was not libp2p's: on Windows a plain bind to a held port is
+    refused with error 10048 and libp2p's bind with 10013.
 
     Args:
+        said: The network layer's error, which begins with
+            ``PEER_LISTENER_REFUSED``.
         port: The TCP port the node was told to listen on; 0 for one chosen
             by the operating system.
 
     Returns:
-        One sentence for the owner: the port, what the operating system says
-        about it, and what to do.
+        The same words as a sentence for the owner, and, where the owner
+        chose the port, what to do.
     """
     if port == 0:
-        return (
-            "Skulk could not start listening for peers on a TCP port of the "
-            "operating system's choosing, and the network layer gave no reason."
-        )
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        probe.bind(("0.0.0.0", port))
-    except OSError as reason:
-        return (
-            f"Skulk could not listen for peers on TCP port {port}: {reason}. "
-            "Another program is most likely using that port. Stop it, or give "
-            "Skulk another port with --libp2p-port or SKULK_LIBP2P_PORT."
-        )
-    finally:
-        probe.close()
+        return f"Skulk {said}."
     return (
-        f"Skulk could not start listening for peers on TCP port {port}, and "
-        "the network layer gave no reason. The port is free now, so another "
-        "program may have held it for a moment: start Skulk again. If it "
-        "keeps happening, choose another port with --libp2p-port or "
-        "SKULK_LIBP2P_PORT."
+        f"Skulk {said}. If another program is using that port, stop it, or "
+        "give Skulk another port with --libp2p-port or SKULK_LIBP2P_PORT."
     )
 
 
@@ -815,9 +809,10 @@ class Router:
         try:
             handle = NetworkingHandle(identity, list(bootstrap_peers), listen_port)
         except RuntimeError as failure:
-            if str(failure):
+            said = str(failure)
+            if not said.startswith(PEER_LISTENER_REFUSED):
                 raise
-            raise RuntimeError(why_no_peer_listener(listen_port)) from failure
+            raise RuntimeError(peer_listener_refused(said, listen_port)) from failure
         return cls(handle=handle, zenoh=zenoh, node_id=resolved_node_id)
 
     def __init__(

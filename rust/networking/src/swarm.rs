@@ -411,8 +411,45 @@ pub fn create_swarm(
         .with_behaviour(|keypair| Behaviour::new(keypair, parsed_bootstrap_peers))?
         .build();
 
-    swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{listen_port}").parse()?)?;
+    swarm
+        .listen_on(format!("/ip4/0.0.0.0/tcp/{listen_port}").parse()?)
+        .map_err(|error| listen_failure(listen_port, &error))?;
     Ok(Swarm { swarm, from_client })
+}
+
+/// How every [`listen_failure`] message begins. The Python side recognises
+/// a refused listener by it, so the two change together.
+const LISTEN_FAILURE_PREFIX: &str = "could not listen for peers on ";
+
+/// Say which port the swarm could not listen on, and why.
+///
+/// libp2p reports a port it could not take as `TransportError::Other`,
+/// which prints as nothing at all: the reason is the error's source. Passed
+/// on as it was, a node that found its peer port in use ended with an error
+/// that had no message. The reasons along the source chain are joined here,
+/// and the port is named.
+fn listen_failure(listen_port: u16, error: &(dyn std::error::Error + 'static)) -> alias::AnyError {
+    let mut reasons: Vec<String> = Vec::new();
+    let mut link = Some(error);
+    while let Some(current) = link {
+        let said = current.to_string();
+        // A wrapper commonly repeats its source's words; say them once.
+        if !said.is_empty() && reasons.last() != Some(&said) {
+            reasons.push(said);
+        }
+        link = current.source();
+    }
+    let port = if listen_port == 0 {
+        "a TCP port of the system's choosing".to_owned()
+    } else {
+        format!("TCP port {listen_port}")
+    };
+    let reason = if reasons.is_empty() {
+        "the network layer gave no reason".to_owned()
+    } else {
+        reasons.join(": ")
+    };
+    format!("{LISTEN_FAILURE_PREFIX}{port}: {reason}").into()
 }
 
 mod transport {
@@ -596,11 +633,60 @@ mod behaviour {
 #[cfg(test)]
 mod tests {
     use super::{
-        ELECTION_TOPIC, TELEMETRY_TOPIC, TelemetryNoPeerReporter, TelemetrySubscriberSnapshot,
-        behaviour::Behaviour, telemetry_subscriber_snapshot,
+        ELECTION_TOPIC, LISTEN_FAILURE_PREFIX, TELEMETRY_TOPIC, TelemetryNoPeerReporter,
+        TelemetrySubscriberSnapshot, behaviour::Behaviour, create_swarm, listen_failure,
+        telemetry_subscriber_snapshot,
     };
     use libp2p::{gossipsub, identity};
     use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn a_held_port_is_named_with_the_systems_reason() {
+        // Another program on the port: a plain listener on every interface.
+        let holder = std::net::TcpListener::bind("0.0.0.0:0").expect("a free port");
+        let port = holder.local_addr().expect("a bound listener").port();
+        let (_to_swarm, from_client) = tokio::sync::mpsc::channel(1);
+        let Err(error) = create_swarm(
+            identity::Keypair::generate_ed25519(),
+            from_client,
+            Vec::new(),
+            port,
+        ) else {
+            panic!("the swarm listened on a port another listener holds");
+        };
+        let message = error.to_string();
+        let named = format!("{LISTEN_FAILURE_PREFIX}TCP port {port}: ");
+        let reason = message
+            .strip_prefix(named.as_str())
+            .expect("the port is named first");
+        // The operating system's own error, in whatever words it uses. Which
+        // error is the platform's business: Windows refuses libp2p's bind
+        // with 10013 where it refuses a plain bind with 10048.
+        assert!(reason.contains("(os error "), "{message}");
+        drop(holder);
+    }
+
+    #[test]
+    fn a_failure_that_says_nothing_still_names_the_port() {
+        #[derive(Debug)]
+        struct Silent;
+        impl std::fmt::Display for Silent {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                Ok(())
+            }
+        }
+        impl std::error::Error for Silent {}
+
+        assert_eq!(
+            listen_failure(52416, &Silent).to_string(),
+            "could not listen for peers on TCP port 52416: the network layer gave no reason"
+        );
+        assert_eq!(
+            listen_failure(0, &Silent).to_string(),
+            "could not listen for peers on a TCP port of the system's choosing: \
+             the network layer gave no reason"
+        );
+    }
 
     #[test]
     fn connected_no_peer_warning_waits_for_startup_grace() {
