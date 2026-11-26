@@ -1,6 +1,7 @@
 """The restart recovery record: derivation, round trip, and restored proposals."""
 
 import json
+import sys
 from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
@@ -96,8 +97,23 @@ def test_record_round_trips_through_disk(tmp_path: Path) -> None:
     write_record(path, record)
 
     assert read_record(path) == record
-    assert path.stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        # A mode says who may read a file on POSIX only.
+        assert path.stat().st_mode & 0o777 == 0o600
     assert not any(child.name.endswith(".tmp") for child in path.parent.iterdir())
+
+    # Written again over itself, as a running node does every few minutes:
+    # the second write replaces the first and leaves nothing beside it.
+    later = record.model_copy(
+        update={
+            "stamp": record.stamp.model_copy(
+                update={"written_at": NOW + timedelta(seconds=60)}
+            )
+        }
+    )
+    write_record(path, later)
+    assert read_record(path) == later
+    assert [child.name for child in path.parent.iterdir()] == [path.name]
 
 
 def test_a_leftover_staging_file_never_exposes_the_record(tmp_path: Path) -> None:
@@ -114,7 +130,8 @@ def test_a_leftover_staging_file_never_exposes_the_record(tmp_path: Path) -> Non
         ),
     )
 
-    assert path.stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert path.stat().st_mode & 0o777 == 0o600
     assert not leftover.exists()
     assert read_record(path) is not None
 
