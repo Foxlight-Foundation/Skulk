@@ -914,6 +914,32 @@ def without_engine_builds(
     return {**node_resources, **changed} if changed else node_resources
 
 
+def without_engine_packages(
+    node_resources: Mapping[NodeId, NodeResources],
+) -> Mapping[NodeId, NodeResources]:
+    """Return ``node_resources`` with no engine package on offer.
+
+    Every engine package tag, held or installable, is taken out of the
+    backends each node advertises. Built-in engines are never touched, and a
+    cluster with no package gets back the mapping it passed.
+    """
+    changed: dict[NodeId, NodeResources] = {}
+    for node_id, resources in node_resources.items():
+        dropped = {
+            tag
+            for tag in resources.backends | resources.on_demand_backends
+            if package_engine_of(tag) is not None
+        }
+        if dropped:
+            changed[node_id] = resources.model_copy(
+                update={
+                    "backends": resources.backends - dropped,
+                    "on_demand_backends": resources.on_demand_backends - dropped,
+                }
+            )
+    return {**node_resources, **changed} if changed else node_resources
+
+
 def _cycle_built_in_engine_score(
     cycle: Cycle,
     card: ModelCard,
@@ -1340,6 +1366,12 @@ def place_instance(
             node_resources, command.model_card.model_id
         )
         node_resources = without_engine_builds(node_resources, unsupporting_builds)
+        if command.system_role is not None:
+            # A system placement runs every turn with tools, and the chat
+            # dialect of an engine package carries none. A card, an order or
+            # a signed registry entry may make a package eligible for the
+            # model; none of them makes it able to serve this role.
+            node_resources = without_engine_packages(node_resources)
     native_music = command.model_card.music is not None and command.model_card.music.native is not None
     if native_music and command.sharding != Sharding.Pipeline:
         raise PlacementError("Native music requires single-host pipeline placement")

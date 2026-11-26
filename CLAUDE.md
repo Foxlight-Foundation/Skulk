@@ -1214,6 +1214,16 @@ group; calls are never replayed), `estimate.py`, `actions.py`,
 runner, `worker/runner/engine_package/`, serves every package: lifecycle on the
 control channel, tokens on the loopback port a load returns.
 
+A package is eligible for a model when the card names it in
+`placement.compatible_backends` or the registry's signed engine-support list
+names it for the card (`registry_compatible_backends_for_node`: a supported
+upstream-compatibility entry matching the card's architecture, artifact format,
+quantization and a claimed capability). A signed card without a curated
+architecture carries `unknown:<card id>`, so an entry for it covers that card
+only. A placement with a `system_role` is never put on a package
+(`without_engine_packages` in `place_instance`): the steward runs with tools and
+the package chat dialect has none. Keep that guard.
+
 Which engine runs a model is decided by the first of three levels with an answer
 for a node: a person's order for the model (`State.model_engine_orders`, set
 only by `SetModelEngineOrder`, saved on each node), the card's

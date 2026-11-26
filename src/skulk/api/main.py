@@ -4916,7 +4916,9 @@ class API:
                     resources = self._telemetry_view.node_resources.get(node_id)
                     if backend is None or resources is None:
                         continue
-                    engine = engine_of(backend)
+                    # An engine package has no built-in engine name; a signed
+                    # entry may still name it without a compute lane.
+                    engine = engine_of(backend) or package_engine_of(backend)
                     for claim in matching_engine_support:
                         if (
                             claim.status == "supported"

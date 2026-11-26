@@ -24,15 +24,22 @@ Three things have to be true before a model runs on an add-on engine:
    system and CPU and one kind of accelerator: Apple GPU, NVIDIA GPU, AMD GPU
    (ROCm), GPU through Vulkan, or processor only. Some builds also need an
    exact GPU family. A machine is offered only builds it can run.
-3. **The model's card names the engine.** A card lists the engines that can
-   run the model in `placement.compatible_backends`, for example `tensorfold`
-   or, for one accelerator only, `tensorfold-metal`. A model whose card does
-   not name an add-on engine is never placed on one. See
-   [Model cards](model-cards.md).
+3. **The engine is listed for the model.** There are two ways:
+   - The model's card names the engine in `placement.compatible_backends`,
+     for example `tensorfold` or, for one accelerator only,
+     `tensorfold-metal`. This is how you list an engine for a card you add
+     yourself. See [Model cards](model-cards.md).
+   - The Foxlight model registry lists the engine for the model in its signed
+     engine-support list. This is how an engine is listed for a model from
+     the registry, whose card you cannot edit. Skulk reads the list with the
+     catalog; there is nothing to set.
+
+   A model that neither names an add-on engine nor is listed for one is never
+   placed on one.
 
 ## What happens the first time
 
-1. You choose a model whose card names an add-on engine and a machine that
+1. You choose a model an add-on engine is listed for and a machine that
    could run it but does not have the engine yet.
 2. The launch preview says that the engine will be installed with the model
    and how much there is to download.
@@ -185,6 +192,10 @@ engine:
 - An add-on engine runs text generation on one machine. It does not split a
   model across machines and does not serve embeddings, images, speech, music
   or video.
+- A request that carries tools or images is refused when the model runs on an
+  add-on engine, even when the model itself supports them. The reply says so.
+  For the same reason the model behind [Talk to Skulk](steward.md), which
+  works through tools, is never placed on an add-on engine.
 - What a machine has learned about a build (its last load results and the
   models it cannot load) is kept in memory and cleared by a restart.
 - A status of *Installed* says the build is intact and this version of Skulk
