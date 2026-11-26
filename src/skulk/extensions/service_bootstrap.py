@@ -78,6 +78,7 @@ if sys.platform == "win32":
     _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
     _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
     _LOCKFILE_EXCLUSIVE_NOW = 0x00000002 | 0x00000001
+    _ERROR_LOCK_VIOLATION = 33
     _CTRL_BREAK_EVENT = 1
     _CREATE_NEW_PROCESS_GROUP = 0x00000200
     _CREATE_NO_WINDOW = 0x08000000
@@ -920,14 +921,17 @@ if sys.platform == "win32":
             return subprocess.DEVNULL
         return descriptor
 
-    def _hold_lifetime(root: Path) -> int:
+    def _hold_lifetime(root: Path) -> int | None:
         """Take this process's lifetime lock; it is released when the process ends.
 
-        The descriptor is returned so that it stays open, and is never closed.
+        Returns:
+            The descriptor, so that it stays open; it is never closed. None
+            when another process holds the lock: a service is already
+            running from this root, and this start has nothing to do.
 
         Raises:
-            OSError: The lock file is missing, or another process holds the
-                lock: a service is already running from this root.
+            OSError: The lock file is missing, or could not be locked for
+                another reason.
             ValueError: The lock file is not protected.
         """
         descriptor = _open_entry(root / LIFETIME_LOCK)
@@ -950,7 +954,10 @@ if sys.platform == "win32":
                 0,
                 ctypes.byref(region),
             ):
-                raise _failure()
+                if ctypes.get_last_error() != _ERROR_LOCK_VIOLATION:
+                    raise _failure()
+                os.close(descriptor)
+                return None
         except BaseException:
             os.close(descriptor)
             raise
@@ -1067,6 +1074,11 @@ def main() -> None:
             private_directory(root)
             # Held, never closed: the system releases it when this process ends.
             lifetime = _hold_lifetime(root)
+            if lifetime is None:
+                # The service is running. Its task is started every minute,
+                # and each of those starts ends here, with success: Task
+                # Scheduler shows a failed start beside the running service.
+                raise SystemExit(0)
             if os.path.lexists(root / STOP_REQUEST):
                 # Asked before the copy is verified, which takes time: a
                 # stopped service lets go of its lock at once.

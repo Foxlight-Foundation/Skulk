@@ -345,6 +345,12 @@ class ServiceLayout:
 
 _TASK_NAMESPACE = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
 _TASK_MARKER = "skulk-plugin-service-v1 "
+_TASK_INSTANCES_FIELD = "Settings/MultipleInstancesPolicy"
+_TASK_INSTANCES = "Parallel"
+# What local setup wrote before a start was allowed beside a running one. A
+# task that differs from today's in this one value is still local setup's
+# own, so that setup can replace it; it is not the registered service.
+_TASK_INSTANCES_BEFORE = "IgnoreNew"
 _ACCOUNT_IDENTIFIER = re.compile(r"S-1-[0-9]+(-[0-9]+){1,14}")
 
 # What Task Scheduler leaves out of the copy it hands back because it is the
@@ -481,10 +487,18 @@ class WindowsServiceLayout:
         """Render the exact task for ``python``, as the file ``schtasks`` reads.
 
         The task starts the fixed verified bootstrap and nothing else. It is
-        started every minute and never twice at once: Task Scheduler starts a
-        task again only after a failure, and the manager also ends cleanly
-        when it wants to be started again, so the minute is what restarts it.
-        The same trigger starts it within a minute of the account signing in.
+        started every minute: Task Scheduler starts a task again only after
+        a failure, and the manager also ends cleanly when it wants to be
+        started again, so the minute is what restarts it. The same trigger
+        starts it within a minute of the account signing in.
+
+        A start is allowed beside a running one. The bootstrap's own lock
+        decides which is the service, and a start that finds it held ends at
+        once with success. Task Scheduler could be told to refuse the second
+        start itself, and was at first: it then shows the refusal
+        (``0x800710E0``) as the task's last result, beside a healthy service,
+        for as long as the service runs. Told to keep the start waiting, it
+        keeps one more every minute, without limit.
         """
         if not python.is_absolute() or any(ord(c) < 32 for c in str(python)):
             raise ValueError("invalid base interpreter path")
@@ -512,7 +526,7 @@ class WindowsServiceLayout:
             "<LogonType>InteractiveToken</LogonType>"
             "</Principal></Principals>\n"
             "<Settings>"
-            "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
+            f"<MultipleInstancesPolicy>{_TASK_INSTANCES}</MultipleInstancesPolicy>"
             "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
             "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
             "<StartWhenAvailable>true</StartWhenAvailable>"
@@ -541,7 +555,8 @@ class WindowsServiceLayout:
             ValueError: The task was not written by local setup, or differs
                 from the one local setup writes for the interpreter it names.
                 A task that is only switched off is still ours: stopping the
-                service switches it off.
+                service switches it off. So is one that differs only in
+                refusing a second start, as local setup first wrote it.
         """
         existing = task_fields(content)
         described = [
@@ -556,10 +571,14 @@ class WindowsServiceLayout:
         if not isinstance(python, str):
             raise ValueError("invalid existing interpreter identity")
         expected = task_fields(self.definition(Path(python)).decode("utf-16"))
-        if (
-            tuple(field for field in existing if field != ("Settings/Enabled", "false"))
-            != expected
-        ):
+        found = tuple(
+            (path, _TASK_INSTANCES)
+            if (path, value) == (_TASK_INSTANCES_FIELD, _TASK_INSTANCES_BEFORE)
+            else (path, value)
+            for path, value in existing
+            if (path, value) != ("Settings/Enabled", "false")
+        )
+        if found != expected:
             raise ValueError("existing service definition differs from fixed contract")
 
 
