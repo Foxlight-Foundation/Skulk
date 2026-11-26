@@ -91,6 +91,7 @@ def install_test_package(
     protocol: tuple[int, int] = (1, 2),
     python_requires: str = ">=3.12",
     activate: bool = True,
+    drafting: bool = False,
 ) -> InstalledEngine:
     """Sign a manifest for real files, install it under ``root`` and activate it.
 
@@ -104,6 +105,8 @@ def install_test_package(
         protocol: Lowest and highest control-protocol version the manifest declares.
         python_requires: The interpreter range the adapter declares.
         activate: Whether to make the generation the active one.
+        drafting: Whether the manifest says the build drafts. Left out of the
+            claims when false, as a publisher leaves it out.
     """
     content = _archive()
     files = work / f"import-{engine_id}-{lane}-{generation}"
@@ -131,6 +134,8 @@ def install_test_package(
         "python_requires": python_requires,
     }
     claims["external_requirements"] = []
+    if drafting:
+        claims["drafting"] = True
     key = Ed25519PrivateKey.generate()
     trust = RuntimeTrust(
         revision=1, expires_at=NOW + 86_400, publishers={PUBLISHER: public_hex(key)}

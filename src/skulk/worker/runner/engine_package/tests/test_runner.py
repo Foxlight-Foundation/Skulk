@@ -225,6 +225,7 @@ class _Harness:
         *,
         task: ModelTask = ModelTask.TextGeneration,
         installing: bool = False,
+        drafting: bool = False,
     ) -> None:
         self.model_directory = tmp_path / "model"
         self.model_directory.mkdir()
@@ -233,7 +234,7 @@ class _Harness:
             json.dumps({"mode": mode, "record": str(self.record_path)})
         )
         self.installed: InstalledEngine = install_test_package(
-            tmp_path, tmp_path / "packages", adapter=ENGINE_ADAPTER
+            tmp_path, tmp_path / "packages", adapter=ENGINE_ADAPTER, drafting=drafting
         )
         self.state_root = tmp_path / "state"
         self.events: list[Event] = []
@@ -324,6 +325,25 @@ def _gone(pid: int, timeout: float = 5.0) -> bool:
             return True
         time.sleep(0.05)
     return False
+
+
+def test_a_build_that_says_it_drafts_is_loaded_with_drafting_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the installed build's signed manifest turns drafting on."""
+    harness = _Harness(tmp_path, monkeypatch, "normal", drafting=True)
+    harness.load()
+    try:
+        assert isinstance(harness.runner.current_status, RunnerReady)
+        load = cast("dict[str, dict[str, object]]", harness.record()[0]["load"])
+        assert load["settings"] == {
+            "context_tokens": serving_n_ctx(8192, logits_all=False),
+            "parallel_streams": 1,
+            "cache_precision": "default",
+            "drafting": True,
+        }
+    finally:
+        harness.close()
 
 
 def test_a_package_loads_serves_text_and_stops(

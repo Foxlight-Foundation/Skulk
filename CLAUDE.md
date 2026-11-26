@@ -1233,6 +1233,11 @@ Admission counts weights plus the build's declared overhead; the worker asks the
 adapter what the exact load needs before dispatch and the master reserves the
 larger figure (`EnginePackageNeedStated`, `State.engine_package_needs`). An
 engine reports need only, never what is free.
+A load states its settings outright (`worker/runner/engine_package/request.py`).
+Drafting is on only when the installed build's signed manifest says so
+(`EnginePackageClaims.drafting`, absent means off): whether drafting helps is a
+property of an engine build, so never add a Skulk-wide or per-engine switch
+for it.
 
 A load an engine package refuses falls back to the next engine. The worker
 sends `RefuseInstancePlacement` with `engine_refusal_code`; the master

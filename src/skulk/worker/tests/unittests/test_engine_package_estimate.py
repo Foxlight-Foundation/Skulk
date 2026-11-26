@@ -69,6 +69,7 @@ class _Asked:
     def __init__(self, answer: EngineNeed | None) -> None:
         self.answer = answer
         self.calls: list[dict[str, object]] = []
+        self.requested: list[tuple[object, ...]] = []
 
     def __call__(self, installed: object, **request: object) -> EngineNeed | None:
         self.calls.append({"installed": installed, **request})
@@ -146,9 +147,17 @@ def asked(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Asked:
         return tmp_path
 
     def held(*_arguments: object, **_keywords: object) -> InstalledEngine:
-        return cast(InstalledEngine, cast(object, SimpleNamespace(digest="a" * 64)))
+        # The held build's manifest says it drafts.
+        return cast(
+            InstalledEngine,
+            cast(
+                object,
+                SimpleNamespace(digest="a" * 64, claims=SimpleNamespace(drafting=True)),
+            ),
+        )
 
-    def request(*_arguments: object) -> tuple[ModelIdentity, LoadSettings]:
+    def request(*arguments: object) -> tuple[ModelIdentity, LoadSettings]:
+        recorder.requested.append(arguments)
         return _MODEL, _SETTINGS
 
     def wireable(_cls: type[MemoryUsage]) -> MemoryUsage:
@@ -219,6 +228,9 @@ async def test_a_load_the_engine_says_fits_is_dispatched(
     assert asked.calls[0]["instance_id"] == str(_INSTANCE)
     assert asked.calls[0]["model"] == _MODEL
     assert asked.calls[0]["settings"] == _SETTINGS
+    # The request is built with what the held build's manifest says about
+    # drafting, so the engine prices the load the runner will then state.
+    assert [arguments[2] for arguments in asked.requested] == [True]
 
 
 async def test_a_load_the_engine_says_this_node_cannot_hold_is_refused(

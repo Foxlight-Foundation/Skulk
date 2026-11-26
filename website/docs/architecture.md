@@ -2265,6 +2265,14 @@ and the master records it (`EnginePackageNeedStated`,
 admitted against memory the engine is about to take. An engine that does not
 know changes nothing.
 
+A load states its settings outright: the stamped window, one stream, the
+engine's default cache precision, and whether to draft. Drafting is on only
+when the installed build's signed manifest carries `drafting: true`. Whether
+drafting helps is a property of an engine build (measured: a gain on one
+accelerator's build, a small loss on another's), so the build's publisher
+states it and no setting in Skulk does. With it on, the engine drafts with
+what the model's own files bring and checks each drafted token.
+
 **The runner.** One generic runner serves every package
 (`worker/runner/engine_package/`). It starts the adapter in its own process
 group with an environment built from nothing (`engines/launch.py`): the

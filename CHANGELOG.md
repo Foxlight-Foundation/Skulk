@@ -62,6 +62,8 @@ This project records release notes here and mirrors public-facing notes in
   engine that can run it, on the same machine when it has one. An engine that says it cannot
   run the model at all is not given that model again until the machine restarts or the engine
   is replaced.
+- The publisher of an add-on engine build can say that the build drafts. Skulk then loads
+  models on it with drafting on, so a model that ships with a draft head uses it.
 - **Settings** has a new **Add-on engines** section: **Use add-on engines** (on by default),
   **Install test builds** (off by default), and **Engines on your machines**, where you can
   switch a machine to another build it already has or remove one. `skulk engines` does the

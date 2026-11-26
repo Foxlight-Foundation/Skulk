@@ -2301,7 +2301,7 @@ class Worker:
                 if installed is None:
                     return None
                 model, settings = package_load_request(
-                    shard, instance.context_token_limit
+                    shard, instance.context_token_limit, installed.claims.drafting
                 )
             except (RuntimeError, ValueError, OSError) as error:
                 # The runner's own load reports a missing package or model.

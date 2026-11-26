@@ -101,6 +101,16 @@ machine. Before the model loads, the machine also asks the engine what this
 exact load needs and reserves the larger of the two figures. The engines panel
 shows the declared amount for each build.
 
+## Drafting
+
+Some models come with a small draft head, which guesses several tokens ahead
+so the model only has to check them. Drafting makes replies faster on some
+engine builds and slightly slower on others, so each build's publisher says
+whether that build drafts, as part of what they sign. Skulk follows that, and
+there is nothing to set. On a build that drafts, the engine uses whatever the
+model's own files bring and checks every drafted token against the model; a
+model that brings nothing to draft with runs as it does without.
+
 ## See and manage engines
 
 ### In the dashboard

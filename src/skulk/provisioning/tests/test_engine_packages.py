@@ -130,6 +130,24 @@ def test_a_requirement_may_name_the_members_a_node_unpacks(
     assert unpacked.digest != whole.digest
 
 
+def test_a_build_may_say_that_it_drafts(key: Ed25519PrivateKey) -> None:
+    """A manifest without the claim keeps its identity and states drafting off."""
+    plain = _claims()
+    drafting = _with(plain, ("drafting",), True)
+
+    without = verify_engine_manifest(_sign(key, plain), _trust(key), now=NOW)
+    stated = verify_engine_manifest(_sign(key, drafting), _trust(key), now=NOW)
+
+    assert without.claims.drafting is False
+    assert without.digest == hashlib.sha256(canonical_json(plain)).hexdigest()
+    assert stated.claims.drafting is True
+    assert stated.digest != without.digest
+    # The claim is a JSON boolean and nothing else.
+    assert _refusal(_sign(key, _with(plain, ("drafting",), "yes")), _trust(key)) == (
+        "manifest_invalid"
+    )
+
+
 def test_build_identity_ignores_key_order_and_whitespace(
     key: Ed25519PrivateKey,
 ) -> None:
