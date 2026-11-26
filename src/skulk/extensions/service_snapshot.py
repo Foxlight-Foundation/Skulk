@@ -66,6 +66,12 @@ def _require_path_room(runtime: Path, members: Iterable[str]) -> None:
     switched on. Without this the copy stops partway with an error that names
     one file and says nothing of why.
 
+    Only Windows has the limit, so the refusal is worded for Windows. There
+    the plugin service's folder is inside the account's own folder and cannot
+    be put elsewhere, so the refusal does not send the owner looking for a
+    shorter folder, as it first did: long paths are the way out, and the only
+    other is an account folder with a shorter name.
+
     Args:
         runtime: Where the environment would be built.
         members: The ``/``-separated paths the copy creates below it.
@@ -75,8 +81,10 @@ def _require_path_room(runtime: Path, members: Iterable[str]) -> None:
         characters = "1 character" if excess == 1 else f"{excess} characters"
         raise ValueError(
             f"Skulk's own files need a path {characters} longer than Windows allows "
-            "on this machine. Switch on long paths in Windows, or keep Skulk's "
-            "plugin service in a folder with a shorter path."
+            "on this machine. Switch on long paths in Windows, which needs an "
+            "administrator. The plugin service is kept inside your user folder "
+            "and cannot be moved, so the only other way is a user folder with a "
+            "shorter name."
         )
 
 
