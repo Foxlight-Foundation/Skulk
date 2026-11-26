@@ -309,9 +309,10 @@ def engine_packages_off_phrase() -> str:
 
 ENGINE_LOAD_REFUSED_FAILURE_MARKER: Final = "engine-load-refused"
 """Marks a runner whose engine package refused to load its model. The refusal
-is the engine's answer for this build and checkpoint, so the worker gives the
-instance up at once: loading again on the same node and build repeats it. The
-node stays eligible for other models."""
+is the engine's answer for this build and checkpoint, so the worker does not
+relaunch it: loading again on the same node and build repeats it. It reports
+the refusal and the master places the model on the next engine. The node
+stays eligible for other models."""
 
 
 def engine_load_refusal(code: str, reason: str) -> str:

@@ -155,6 +155,15 @@ describe('the engines panel', () => {
     expect(host.textContent).not.toContain('No machine has an add-on engine');
   });
 
+  it('says which models the build in use cannot load', async () => {
+    const refused = (build: string, modelId: string) => ({ build, outcome: 'refused' as const, code: 'unsupported_model', modelId, atUnixMs: 1_800_000_000_000 });
+    report = reportOf({ nodeId: 'node-a', package: held({ unsupportedModels: [refused(SECOND, 'org/small'), refused(SECOND, 'org/tiny'), refused(FIRST, 'org/old')] }) });
+    await render();
+    await shows('This engine cannot load org/small, org/tiny. Skulk runs them on another engine.');
+    // An earlier build's answer does not decide where a model goes now.
+    expect(host.textContent).not.toContain('org/old');
+  });
+
   it('names the machine, the hardware and each build with what it is', async () => {
     report = reportOf({ nodeId: 'node-a', package: held({ loadResults: [{ build: SECOND, outcome: 'refused', code: 'load_refused', modelId: 'org/model', atUnixMs: 1_800_000_000_000 }] }) });
     await render();

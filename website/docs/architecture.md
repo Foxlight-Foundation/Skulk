@@ -2224,7 +2224,8 @@ the tag in its backends and the build identity beside it; a node that holds
 none but could install one from its kept index advertises the tag as
 installable on demand, the way the built-in on-demand engines are. Each node
 also reports one entry per package it holds or is offered, with the builds on
-its disk and how the last model load on each ended, for `GET /v1/engines`. A
+its disk, how the last model load on each ended and the models a build could
+not load, for `GET /v1/engines`. A
 build whose files are damaged, or that the running Skulk can no longer run, is
 reported as unusable with a short reason and is not offered. A tag that two
 installed engines claim is offered by neither, and a package can never take a
@@ -2261,10 +2262,28 @@ framed control protocol over the adapter's standard input and output
 cancel, unload and stop. Unknown fields and unknown message types are refused.
 Tokens never travel that channel: a successful load returns a loopback port
 that serves one pinned chat dialect, and the runner proxies generation to it.
-Any failure of the channel ends the session and its whole process group. An
-engine's typed refusal of a load is not a crash: the worker gives that
-instance up at once, because loading again on the same node and build would
-repeat it, and the node stays eligible for other models.
+Any failure of the channel ends the session and its whole process group.
+
+**When an engine refuses a model.** An engine's typed refusal of a load is not
+a crash, and loading again on the same build would repeat it. The worker
+reports the refusal to the master (`RefuseInstancePlacement` with the engine's
+code), and the master places the model again without the build that refused,
+so the next engine in the model's order serves it. The machine the model was
+on is tried first, because the model's files are already there; the rest of
+the cluster is searched only when that machine has no other engine for the
+model. The instance that was refused leaves with a failure record that says
+what happened, and when no other engine can take the model the record says
+that instead. The node stays eligible for other models.
+
+One refusal is also remembered: `unsupported_model`, the engine saying it
+cannot load this model at all. That answer depends on the build and the model
+only, so the node keeps it and reports it with its engines, and placement
+stops offering that build for that model on every node, for launches, repairs
+and previews alike. A different build of the same engine (an update, or the
+build for another accelerator) has not answered and is still tried. The node
+forgets the answer when it restarts or when the build leaves it. A model whose
+only engine is such a build is refused at launch, before anything is
+downloaded.
 
 **Changing what a node holds.** A person can make another build on a node's
 disk the one new launches use, return to the earlier build, or remove a build

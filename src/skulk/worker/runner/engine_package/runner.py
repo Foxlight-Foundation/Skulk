@@ -30,9 +30,9 @@ request asking for one is answered with a clear error instead of a degraded
 reply. An engine that speaks differently is translated by its own adapter.
 
 A load the engine refuses, or one that took settings other than the admitted
-ones, fails with ``ENGINE_LOAD_REFUSED_FAILURE_MARKER`` so the worker gives the
-instance up without relaunching: loading again on this node and build repeats
-the answer.
+ones, fails with ``ENGINE_LOAD_REFUSED_FAILURE_MARKER`` so the worker does not
+relaunch it: loading again on this node and build repeats the answer. The
+worker reports the refusal and the master places the model on another engine.
 """
 
 import contextlib

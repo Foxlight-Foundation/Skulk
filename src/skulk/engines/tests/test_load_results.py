@@ -14,6 +14,7 @@ from skulk.shared.backends import engine_load_refusal
 from skulk.shared.types.engine_packages import (
     MAX_NODE_ENGINE_PACKAGES,
     MAX_REPORTED_ENGINE_BUILDS,
+    MAX_REPORTED_UNSUPPORTED_MODELS,
     NodeEngineLoadResult,
     NodeEnginePackage,
 )
@@ -128,6 +129,96 @@ def test_the_record_is_bounded_and_the_oldest_result_leaves_first() -> None:
         results.record(f"engine{index}-cpu", _result())
     assert results.for_tag(f"engine{MAX_NODE_ENGINE_PACKAGES + 4}-cpu") == ()
     assert results.for_tag(TAG) == held
+
+
+def _refusal(
+    model: str = "org/model",
+    build: str = BUILD_A,
+    *,
+    at: int = 1000,
+    code: str = "unsupported_model",
+) -> NodeEngineLoadResult:
+    return NodeEngineLoadResult.model_validate(
+        {
+            "build": build,
+            "outcome": "refused",
+            "code": code,
+            "modelId": model,
+            "atUnixMs": at,
+        }
+    )
+
+
+def _loaded(model: str, build: str = BUILD_A, *, at: int) -> NodeEngineLoadResult:
+    return NodeEngineLoadResult.model_validate(
+        {"build": build, "outcome": "loaded", "modelId": model, "atUnixMs": at}
+    )
+
+
+def test_a_model_a_build_cannot_load_is_kept_after_the_build_loads_another() -> None:
+    """The last result per build would forget it; placement must not."""
+    results = EngineLoadResults()
+    assert results.record(TAG, _refusal("org/small", at=1000)) is True
+    assert results.record(TAG, _loaded("org/other", at=2000)) is True
+
+    assert results.for_tag(TAG) == (_loaded("org/other", at=2000),)
+    assert results.unsupported_for_tag(TAG) == (_refusal("org/small", at=1000),)
+    # Reporting the same refusal again is nothing new.
+    assert results.record(TAG, _refusal("org/small", at=1000)) is False
+
+
+def test_only_an_unsupported_model_is_remembered() -> None:
+    """Any other refusal may depend on the settings or on memory at the time."""
+    results = EngineLoadResults()
+    results.record(TAG, _refusal("org/a", at=1000, code="load_refused"))
+    results.record(TAG, _result(at=2000, outcome="failed"))
+
+    assert results.unsupported_for_tag(TAG) == ()
+
+
+def test_a_later_load_of_the_same_model_on_the_same_build_clears_it() -> None:
+    results = EngineLoadResults()
+    results.record(TAG, _refusal("org/a", at=1000))
+    results.record(TAG, _refusal("org/a", BUILD_B, at=1000))
+    assert results.record(TAG, _loaded("org/a", at=500)) is False  # older, late
+    assert len(results.unsupported_for_tag(TAG)) == 2
+
+    assert results.record(TAG, _loaded("org/a", at=2000)) is True
+
+    assert results.unsupported_for_tag(TAG) == (_refusal("org/a", BUILD_B, at=1000),)
+
+
+def test_unsupported_models_are_bounded_and_the_oldest_leaves_first() -> None:
+    results = EngineLoadResults()
+    for index in range(MAX_REPORTED_UNSUPPORTED_MODELS + 3):
+        results.record(TAG, _refusal(f"org/model-{index}", at=index))
+
+    held = results.unsupported_for_tag(TAG)
+    assert len(held) == MAX_REPORTED_UNSUPPORTED_MODELS
+    assert held[0].model_id == f"org/model-{MAX_REPORTED_UNSUPPORTED_MODELS + 2}"
+    assert held[-1].model_id == "org/model-3"
+
+
+def test_unsupported_models_join_their_lane_for_builds_it_still_names() -> None:
+    results = EngineLoadResults()
+    results.record(TAG, _refusal("org/a", at=1000))
+    results.record(TAG, _refusal("org/b", BUILD_B, at=2000))  # build no longer held
+    results.record(TAG, _loaded("org/c", at=3000))
+
+    (reported,) = with_load_results((_package(),), results)
+
+    assert reported.unsupported_models == (_refusal("org/a", at=1000),)
+    assert reported.load_results == (_loaded("org/c", at=3000),)
+    wire = reported.model_dump(mode="json", by_alias=True)
+    assert wire["unsupportedModels"] == [
+        {
+            "build": BUILD_A,
+            "outcome": "refused",
+            "code": "unsupported_model",
+            "modelId": "org/a",
+            "atUnixMs": 1000,
+        }
+    ]
 
 
 def test_a_node_that_loaded_nothing_reports_what_it_did_before() -> None:

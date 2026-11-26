@@ -51,6 +51,11 @@ export interface EnginePackage {
   downloadBytes?: number | null;
   overheadBytes?: number | null;
   loadResults?: EngineLoadResult[];
+  /**
+   * Models a build of this engine said it cannot load. Skulk does not give
+   * such a build that model again; the next engine that can run it is used.
+   */
+  unsupportedModels?: EngineLoadResult[];
 }
 
 /** One machine's entry for an engine. */

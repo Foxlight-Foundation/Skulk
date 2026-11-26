@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Literal, cast, final
+from typing import Final, Literal, cast, final
 from uuid import UUID
 
 import anyio
@@ -24,8 +24,10 @@ from skulk.master.placement import (
     get_transition_events,
     place_instance,
     replacement_command_for_download_failed_instance,
+    replacement_command_for_engine_refused_instance,
     replacement_command_for_refused_instance,
     require_instance_model_card_identity,
+    without_engine_builds,
 )
 from skulk.master.placement_utils import (
     carve_first_gpu_node_ids,
@@ -59,6 +61,7 @@ from skulk.recovery.restore import (
     unrestored_intents,
 )
 from skulk.shared.apply import apply
+from skulk.shared.backends import package_engine_of
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
 from skulk.shared.log_summaries import summarize_command_for_log
 from skulk.shared.models.capabilities import resolve_model_capability_profile
@@ -391,6 +394,49 @@ def _node_unavailable_failure_message(node_id: NodeId, reason: str) -> str:
         0, _INSTANCE_FAILURE_MESSAGE_LIMIT - len(prefix) - len(suffix)
     )
     return f"{prefix}{str(node_id)[:available_node_characters]}{suffix}"
+
+
+ENGINE_REFUSAL_LINEAGE_LIMIT: Final = 256
+"""Most engine-refusal repair lineages the master keeps. The oldest leaves
+first; a lineage lost this way can only cost one more refused load."""
+
+
+def engine_package_builds_of(instance: Instance) -> frozenset[str]:
+    """The engine package builds an instance's shards were placed on."""
+    return frozenset(
+        shard.resolved_engine_build
+        for shard in instance.shard_assignments.runner_to_shard.values()
+        if shard.resolved_engine_build is not None
+        and shard.resolved_backend is not None
+        and package_engine_of(shard.resolved_backend) is not None
+    )
+
+
+def engine_refusal_failure_message(
+    model_id: ModelId, code: str, unplaced_because: str | None
+) -> str:
+    """The operator record for a placement an engine package refused to load.
+
+    Args:
+        model_id: The model that was refused.
+        code: The engine's typed refusal code. Its own explanation may name
+            local paths, so it stays in the refusing node's log.
+        unplaced_because: Why no other engine took the model, or ``None``
+            when the model was placed again.
+
+    Returns:
+        A bounded message that says what Skulk did next.
+    """
+    if unplaced_because is None:
+        return (
+            f"An add-on engine refused to load {model_id} ({code}), so Skulk "
+            "placed it again on the next engine that can run it. The engine's "
+            "own reason is in the node's log."
+        )[:2048]
+    return (
+        f"An add-on engine refused to load {model_id} ({code}) and no other "
+        f"engine could take it: {unplaced_because}"
+    )[:2048]
 
 
 def instance_failure_event(
@@ -1609,6 +1655,17 @@ class Master:
         # later absence reads as a deletion rather than a pending creation
         # (see retire_download_failure_lineages).
         self._download_failure_lineage_seen: set[InstanceId] = set()
+        # Engine package builds that already refused a model in a repair
+        # lineage, keyed by the replacement an engine refusal minted. Each hop
+        # takes the refusing build off offer, and without this the next hop
+        # would forget the earlier ones: two builds that both refuse would
+        # hand the model back and forth forever. Excluding the accumulated set
+        # bounds a lineage to one attempt per build. A node also reports the
+        # builds that refused a model as unsupported, which placement reads
+        # for later launches; this covers the hops before that report arrives
+        # and the refusals a node does not keep. Master-local like the maps
+        # above, and bounded (see ENGINE_REFUSAL_LINEAGE_LIMIT).
+        self._engine_refusal_lineage: dict[InstanceId, frozenset[str]] = {}
         # Steward invariant pacing: at most one placement attempt per minute,
         # so an unplaceable steward (no eligible node yet) logs and retries
         # calmly instead of hammering the planner every 10s tick.
@@ -4395,6 +4452,17 @@ class Master:
                             # fit, place_instance raises PlacementError and we
                             # stop at the deletion — that terminal case bounds
                             # the refuse→re-place loop to the cluster size.
+                            #
+                            # An engine package's refusal is a different
+                            # thing, handled whole by the call below, which
+                            # marks the instance as replaced so the memory
+                            # path that follows ignores the command. (It is a
+                            # call and not a branch here because one more
+                            # branch in this match is past what the type
+                            # checker can follow.)
+                            generated_events.extend(
+                                await self._replace_engine_refused_instance(command)
+                            )
                             refused = self.state.instances.get(command.instance_id)
                             if (
                                 command.instance_id in self._fallback_placed_instances
@@ -4974,6 +5042,148 @@ class Master:
                 await self._maintain_steward_placement()
 
             await anyio.sleep(10)
+
+    async def _replace_engine_refused_instance(
+        self, command: RefuseInstancePlacement
+    ) -> list[Event]:
+        """Place a model again after an engine package refused to load it.
+
+        The refused instance is deleted and the model is placed at the same
+        width with the refusing build, and every build that refused earlier in
+        the same repair lineage, taken off offer, so the model's engine order
+        picks the next engine. The nodes the refused instance was on are tried
+        first: the model's files are already there and the person may have
+        chosen them. Only when they have no other engine for the model is the
+        rest of the cluster searched.
+
+        One refusal is handled once, whichever rank reports it and however
+        often it is delivered. When no other engine can take the model the
+        instance is torn down with a failure record that says so.
+
+        A memory refusal (no ``engine_refusal_code``) is not this method's:
+        it returns nothing and leaves the command to the caller. An engine
+        refusal is always consumed here: the instance is marked as replaced
+        and taken out of the memory path's own bookkeeping, so the caller's
+        memory handling sees a command that was already dealt with.
+
+        Args:
+            command: The worker's report.
+
+        Returns:
+            The failure record for the refused instance and the transition to
+            the placement without it, with its replacement when one was found;
+            nothing for a memory refusal or a refusal already handled.
+        """
+        code = command.engine_refusal_code
+        if code is None:
+            return []
+        refused = self.state.instances.get(command.instance_id)
+        handled = command.instance_id in self._refusal_replaced
+        self._refusal_replaced.add(command.instance_id)
+        self._fallback_placed_instances.discard(command.instance_id)
+        if refused is None or handled:
+            logger.info(
+                f"Engine refusal for {command.instance_id} already handled or "
+                "its instance is gone"
+            )
+            return []
+        model_id = refused.shard_assignments.model_id
+        after_delete = delete_instance(
+            DeleteInstance(instance_id=command.instance_id), self.state.instances
+        )
+        refusing_builds = engine_package_builds_of(refused)
+        refused_builds = (
+            self._engine_refusal_lineage.pop(command.instance_id, frozenset())
+            | refusing_builds
+        )
+        final_placement = after_delete
+        outcome = "no engine package build was stamped on the refused placement"
+        if refusing_builds:
+            offered = without_engine_builds(
+                self._telemetry_view.node_resources, refused_builds
+            )
+            same_nodes = set(refused.shard_assignments.node_to_runner)
+            for required_nodes in (same_nodes, None):
+                try:
+                    replace_command = replacement_command_for_engine_refused_instance(
+                        refused
+                    )
+                    repair_memory, repair_vram = self._reserved_placement_inputs(
+                        self._telemetry_view.node_memory,
+                        self._placement_reservations(after_delete),
+                    )
+                    final_placement = place_instance(
+                        replace_command,
+                        self.state.topology,
+                        after_delete,
+                        repair_memory,
+                        self.state.node_network,
+                        required_nodes=required_nodes,
+                        download_status=self._effective_downloads(),
+                        excluded_nodes=set(replace_command.excluded_nodes),
+                        stamped_exclusions=set(refused.excluded_nodes),
+                        node_install_ids=self._node_install_ids(),
+                        node_resources=offered,
+                        node_vram=repair_vram,
+                        unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
+                            self._telemetry_view.node_system,
+                            self._telemetry_view.node_resources,
+                            node_memory=repair_memory,
+                        ),
+                        approved_remote_code_identities=self._model_trust_approvals,
+                        model_engine_orders=self._model_engine_orders,
+                        served_context_default=self._served_context_default(),
+                        native_music_commitments=self._native_music_placement_commitments(
+                            replace_command, after_delete
+                        ),
+                        package_needs=self.state.engine_package_needs,
+                    )
+                except (PlacementError, PlacementInfoPendingError) as err:
+                    outcome = str(err)
+                    continue
+                self._engine_refusal_lineage[
+                    InstanceId(str(replace_command.command_id))
+                ] = refused_builds
+                while len(self._engine_refusal_lineage) > ENGINE_REFUSAL_LINEAGE_LIMIT:
+                    del self._engine_refusal_lineage[
+                        next(iter(self._engine_refusal_lineage))
+                    ]
+                break
+        replaced = final_placement is not after_delete
+        if replaced:
+            logger.warning(
+                f"Re-placing {model_id} on another engine after an engine "
+                f"package on {command.node_id} refused to load it ({code})"
+            )
+        else:
+            logger.error(
+                f"Cannot re-place {model_id} after an engine package on "
+                f"{command.node_id} refused to load it ({code}): {outcome}. "
+                "Torn down."
+            )
+        events: list[Event] = [
+            instance_failure_event(
+                refused,
+                error_code="placement_failed",
+                error_message=engine_refusal_failure_message(
+                    model_id, code, None if replaced else outcome
+                ),
+            )
+        ]
+        events.extend(
+            get_transition_events(
+                self.state.instances, final_placement, self.state.tasks
+            )
+        )
+        for cancel_command in cancel_unnecessary_downloads(
+            final_placement, self._effective_downloads()
+        ):
+            await self.download_command_sender.send(
+                ForwarderDownloadCommand(
+                    origin=self._system_id, command=cancel_command
+                )
+            )
+        return events
 
     async def _recover_download_failed_instances(self) -> None:
         """Fail and re-place instances stuck because a rank's download failed (#381).

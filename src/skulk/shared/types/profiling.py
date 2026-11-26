@@ -429,9 +429,11 @@ class NodeResources(CamelCaseModel):
         description=(
             "One entry per engine package lane this node holds or may "
             "install, for the cluster's engines report (GET /v1/engines). "
-            "Placement does not read it: it admits and stamps from backends, "
-            "engine_builds and installable_engine_builds. A placement preview "
-            "quotes an offered build's download size from it."
+            "Placement admits and stamps from backends, engine_builds and "
+            "installable_engine_builds, and reads one thing here: each "
+            "entry's unsupported_models, the builds that refused a model and "
+            "are therefore not offered it. A placement preview also quotes "
+            "an offered build's download size from it."
         ),
     )
 

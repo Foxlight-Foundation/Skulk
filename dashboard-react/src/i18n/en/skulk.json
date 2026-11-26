@@ -386,6 +386,7 @@
   "engines.title": "Add-on engines",
   "engines.turnedOff": "Add-on engines are turned off, so machines report none. Turn on \"Use add-on engines\" in Settings to use them.",
   "engines.unavailable": "The list of engines is unavailable.",
+  "engines.unsupportedModels": "This engine cannot load {models}. Skulk runs them on another engine.",
   "engines.useBuild": "Use this build",
   "engines.useBuildOf": "Use build {build} on {machine}",
   "engines.version": "version {version}",

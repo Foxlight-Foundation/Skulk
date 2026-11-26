@@ -13,6 +13,14 @@ a damaged packages folder from growing its telemetry."""
 MAX_REPORTED_ENGINE_BUILDS: Final = 16
 """Most installed builds reported for one lane."""
 
+MAX_REPORTED_UNSUPPORTED_MODELS: Final = 32
+"""Most models one lane reports as refused by one of its builds."""
+
+UNSUPPORTED_MODEL_CODE: Final = "unsupported_model"
+"""The refusal code that says a build cannot load a model at all. It is the
+one refusal a node remembers and placement acts on: it depends on the build
+and the model only, so asking the same build again repeats it."""
+
 _DIGEST: Final = r"^[0-9a-f]{64}$"
 
 ENGINE_BUILD_PATTERN: Final = _DIGEST
@@ -32,7 +40,8 @@ class NodeEngineLoadResult(CamelCaseModel):
     """How the last model load on one engine package build ended on one node.
 
     Evidence about one build and one model, kept by the node since it
-    started. It never makes a node more or less eligible for anything.
+    started. As a lane's last load result it never makes a node more or less
+    eligible for anything; the same record under ``unsupported_models`` does.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -156,5 +165,17 @@ class NodeEnginePackage(CamelCaseModel):
         description=(
             "How the last model load on each build of the lane ended since "
             "the node started, newest first. Empty until a model is loaded."
+        ),
+    )
+    unsupported_models: tuple[NodeEngineLoadResult, ...] = Field(
+        default=(),
+        max_length=MAX_REPORTED_UNSUPPORTED_MODELS,
+        description=(
+            "Models a build of the lane refused to load as unsupported since "
+            "the node started, newest first. Placement reads this: a build "
+            "that refused a model is not given that model again, on any "
+            "node, so the next engine in the model's order serves it. An "
+            "entry leaves when the node restarts, when the build leaves the "
+            "node, or when the build later loads the model."
         ),
     )

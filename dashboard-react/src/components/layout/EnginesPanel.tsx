@@ -79,6 +79,9 @@ export function EngineMachineRow({ engine, entry, machineName, busy, onChange }:
       ? ['danger', t('engines.status.unusable', 'Cannot be used')]
       : ['neutral', t('engines.status.offered', 'Not installed yet')];
   const lastLoad = held.loadResults?.[0];
+  // Only the build new launches would use: an earlier build's answers do not
+  // decide where a model goes now.
+  const unsupported = [...new Set((held.unsupportedModels ?? []).filter(entry => entry.build === held.build).map(entry => entry.modelId))];
   const change = (request: EngineChangeRequest) => { setConfirming(null); onChange(request); };
   return <Machine>
     <FiCpu size={24} aria-hidden="true" />
@@ -98,6 +101,7 @@ export function EngineMachineRow({ engine, entry, machineName, busy, onChange }:
         : t('engines.offered', 'This machine installs it the first time a model placed here needs it.')}</Meta>}
       {held.status === 'unusable' && <Problem role="alert">{engineProblemSentence(held.problem, t)}</Problem>}
       {lastLoad && <Meta>{loadSentence(lastLoad, t)}</Meta>}
+      {unsupported.length > 0 && <Meta>{t('engines.unsupportedModels', 'This engine cannot load {models}. Skulk runs them on another engine.', { models: unsupported.join(', ') })}</Meta>}
       {builds.length > 0 && <Builds aria-label={t('engines.builds', 'Builds on {machine}', { machine: machineName })}>
         {builds.map(row => <Build key={row.build}>
           <Mono title={row.build}>{t('engines.buildLabel', 'build {build}', { build: shortBuild(row.build) })}</Mono>

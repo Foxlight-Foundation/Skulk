@@ -486,16 +486,15 @@ def _engine_unknown_instance_failure_message(model_id: ModelId) -> str:
     )
 
 
-def _engine_load_refused_instance_failure_message(model_id: ModelId, code: str) -> str:
-    """Return safe operator guidance for a load an engine package refused.
+def _engine_load_refused_reason(model_id: ModelId, code: str) -> str:
+    """Return the payload-safe reason for a load an engine package refused.
 
     Only the engine's typed code is kept. Its own explanation may name local
     paths, so it stays in this node's log.
     """
-    return _instance_failure_message(
-        f"the engine package refused to load {model_id} ({code}); not retrying "
-        "on this node with this engine build. The engine's own reason is in "
-        "the node's log. The node stays eligible for other models."
+    return (
+        f"the engine package refused to load {model_id} ({code}); the engine's "
+        "own reason is in the node's log"
     )
 
 
@@ -649,8 +648,9 @@ def engine_load_refused_live_instances(
     """Return live instances whose engine package refused to load their model.
 
     A refusal is the engine's answer for one build and one checkpoint, so the
-    instance is given up once. Each entry is the instance, its model, the
-    engine's typed code and the full failure message for the log.
+    instance is reported once and never relaunched here. Each entry is the
+    instance, its model, the engine's typed code and the full failure message
+    for the log.
     """
     refused: list[tuple[InstanceId, ModelId, str, str]] = []
     for supervisor in runners.values():
@@ -2363,9 +2363,17 @@ class Worker:
         )
 
     async def _refuse_instance_placement(
-        self, instance_id: InstanceId, reason: str
+        self,
+        instance_id: InstanceId,
+        reason: str,
+        *,
+        engine_refusal_code: str | None = None,
     ) -> None:
         """Ask the master to re-place this instance on a wider split (#290).
+
+        With ``engine_refusal_code`` the refusal is an engine package's, not
+        the memory guard's: the master then places the model again at the same
+        width on another engine.
 
         Used instead of :meth:`_give_up_on_instance` when the give-up is driven
         by the *memory fit guard* rather than a runner crash or GPU wedge. The
@@ -2381,7 +2389,9 @@ class Worker:
         """
         logger.error(
             f"Worker: refusing instance {instance_id} for placement "
-            f"(asking master to re-place wider): {reason}"
+            f"(asking master to re-place "
+            f"{'wider' if engine_refusal_code is None else 'on another engine'}): "
+            f"{reason}"
         )
         await self.command_sender.send(
             ForwarderCommand(
@@ -2390,6 +2400,7 @@ class Worker:
                     instance_id=instance_id,
                     node_id=self.node_id,
                     reason=reason,
+                    engine_refusal_code=engine_refusal_code,
                 ),
             )
         )
@@ -4488,12 +4499,12 @@ class Worker:
                         f"Worker: engine package refused the load for instance "
                         f"{refused_instance_id}: {refusal_error}"
                     )
-                    await self._give_up_on_instance(
+                    # Loading again on this build repeats the answer, so the
+                    # master places the model on the next engine instead.
+                    await self._refuse_instance_placement(
                         refused_instance_id,
-                        _engine_load_refused_instance_failure_message(
-                            refused_model_id, refusal_code
-                        ),
-                        error_code="placement_failed",
+                        _engine_load_refused_reason(refused_model_id, refusal_code),
+                        engine_refusal_code=refusal_code,
                     )
 
             for (

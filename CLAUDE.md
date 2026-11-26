@@ -1210,6 +1210,21 @@ adapter what the exact load needs before dispatch and the master reserves the
 larger figure (`EnginePackageNeedStated`, `State.engine_package_needs`). An
 engine reports need only, never what is free.
 
+A load an engine package refuses falls back to the next engine. The worker
+sends `RefuseInstancePlacement` with `engine_refusal_code`; the master
+(`_replace_engine_refused_instance`) places the model again at the same width
+with the refusing build off offer (`without_engine_builds`), on the same nodes
+first, and keeps every build that refused in the chain off offer
+(`_engine_refusal_lineage`) so the chain ends. It is a call inside the existing
+`RefuseInstancePlacement` case, not a branch: one more branch in that match
+makes basedpyright give up on the whole function. Only `unsupported_model` is
+remembered: the node reports it per build and model
+(`NodeEnginePackage.unsupported_models`, in memory, cleared by a restart) and
+`place_instance` takes that build off offer for that model on every node
+(`engine_builds_unsupporting`). Never widen the remembered set to other
+refusal codes: they can depend on settings or on memory at the time. A shard
+that names its engine explicitly keeps it.
+
 Changing a package is a command to the node that holds it (`ChangeEnginePackage`
 -> `EnginePackageChangeRequested` -> `EnginePackageChangeCompleted`), reachable
 from `/v1/engines`, `skulk engines` and the dashboard (Settings, Add-on engines).

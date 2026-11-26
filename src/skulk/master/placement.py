@@ -446,6 +446,14 @@ def add_instance_to_placements(
                         "Backend telemetry is required for unresolved exact placement"
                     )
                 continue
+            # A shard that names no engine is not given a build that refused
+            # its model as unsupported. One that names its engine keeps it.
+            resources = without_engine_builds(
+                {node_id: resources},
+                engine_builds_unsupporting(
+                    node_resources or {}, shard.model_card.model_id
+                ),
+            )[node_id]
             backend = resolve_node_backend(
                 _card_platform_backends(shard.model_card, resources),
                 _engine_order(shard.model_card, model_engine_orders, launch_order),
@@ -844,6 +852,66 @@ def _engine_order(
         model_engine_order(model_engine_orders, card.model_id),
         launch_order,
     )
+
+
+UNSUPPORTED_BY_ENGINE_BUILD_REFUSAL: Final = (
+    "An add-on engine refused to load this model as unsupported, and no "
+    "other engine on a machine that could take it can run it. The engine is "
+    "asked again after that machine restarts or the engine is updated."
+)
+"""Start of the refusal for a model whose remaining engines all said no."""
+
+
+def engine_builds_unsupporting(
+    node_resources: Mapping[NodeId, NodeResources], model_id: ModelId
+) -> frozenset[str]:
+    """The engine package builds that refused ``model_id`` as unsupported.
+
+    Each node reports the models its builds refused. A build is the same
+    bytes wherever it is installed, and this refusal depends on the build and
+    the model only, so one node's report counts for every node that holds or
+    could install the build.
+    """
+    named = str(model_id)[:256]
+    return frozenset(
+        refusal.build
+        for resources in node_resources.values()
+        for package in resources.engine_packages
+        for refusal in package.unsupported_models
+        if refusal.model_id == named
+    )
+
+
+def without_engine_builds(
+    node_resources: Mapping[NodeId, NodeResources], builds: AbstractSet[str]
+) -> Mapping[NodeId, NodeResources]:
+    """Return ``node_resources`` with the named engine package builds not on offer.
+
+    A node's backend tag for one of ``builds``, held or installable, is taken
+    out of the backends it advertises, so every placement read (eligibility,
+    engine ranking, admission, the backend stamped on a shard) sees the node
+    as it is without that build. Built-in engines are never touched. With no
+    build named, or none of them on any node, the mapping is returned as it
+    came.
+    """
+    if not builds:
+        return node_resources
+    changed: dict[NodeId, NodeResources] = {}
+    for node_id, resources in node_resources.items():
+        dropped = {
+            tag
+            for known in (resources.engine_builds, resources.installable_engine_builds)
+            for tag, build in known.items()
+            if build in builds and package_engine_of(tag) is not None
+        } & (resources.backends | resources.on_demand_backends)
+        if dropped:
+            changed[node_id] = resources.model_copy(
+                update={
+                    "backends": resources.backends - dropped,
+                    "on_demand_backends": resources.on_demand_backends - dropped,
+                }
+            )
+    return {**node_resources, **changed} if changed else node_resources
 
 
 def _cycle_built_in_engine_score(
@@ -1263,6 +1331,15 @@ def place_instance(
     backend_preference = _engine_order(
         command.model_card, model_engine_orders, command.engine_order
     )
+    unsupporting_builds: frozenset[str] = frozenset()
+    if node_resources is not None:
+        # An engine package build that refused this model as unsupported is
+        # not on offer for it, so the next engine in the order is chosen. A
+        # cluster where no build refused anything keeps the mapping it passed.
+        unsupporting_builds = engine_builds_unsupporting(
+            node_resources, command.model_card.model_id
+        )
+        node_resources = without_engine_builds(node_resources, unsupporting_builds)
     native_music = command.model_card.music is not None and command.model_card.music.native is not None
     if native_music and command.sharding != Sharding.Pipeline:
         raise PlacementError("Native music requires single-host pipeline placement")
@@ -1443,6 +1520,13 @@ def place_instance(
                 raise PlacementInfoPendingError(
                     "Runtime availability has not been gossiped for a model "
                     "without a declared engine. Retry shortly."
+                )
+            if unsupporting_builds:
+                # Saying the cluster lacks the hardware would be wrong: a node
+                # has an engine for this model, and that engine said no.
+                raise PlacementError(
+                    UNSUPPORTED_BY_ENGINE_BUILD_REFUSAL
+                    + f" Engines this model can use: {sorted(compatible_backend_summary)}."
                 )
             # Name the hardware only when every node has reported and none
             # could be the machine the model needs.
@@ -2291,6 +2375,33 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
         system_role=instance.system_role,
         requested_context_tokens=instance.requested_context_tokens,
         # A launch that picked its engine keeps the pick through a repair.
+        engine_order=list(instance.engine_order) or None,
+    )
+
+
+def replacement_command_for_engine_refused_instance(instance: Instance) -> PlaceInstance:
+    """Build a *same-width* re-placement for a model an engine package refused.
+
+    The engine's refusal says nothing about the node or its memory, so the
+    width, the exclusions and the engine order are the instance's own. What
+    changes is which engines are on offer: the caller passes
+    :func:`place_instance` node resources without the build that refused
+    (:func:`without_engine_builds`), and the order then picks the next engine.
+
+    Raises :class:`PlacementError` if the instance carries no shards.
+    """
+    model_card, sharding, instance_meta, width = _placement_intent_from_instance(
+        instance
+    )
+    return PlaceInstance(
+        model_card=model_card,
+        sharding=sharding,
+        instance_meta=instance_meta,
+        min_nodes=width,
+        excluded_nodes=sorted(instance.excluded_nodes),
+        excluded_install_ids=sorted(instance.excluded_install_ids),
+        system_role=instance.system_role,
+        requested_context_tokens=instance.requested_context_tokens,
         engine_order=list(instance.engine_order) or None,
     )
 

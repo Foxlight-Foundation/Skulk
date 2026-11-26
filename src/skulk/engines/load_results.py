@@ -3,8 +3,13 @@
 A load is the only thing that says whether a build serves a model on this
 node, so the node keeps the newest answer per build and reports it with its
 engine packages. The record lives in this process: it starts empty when the
-node starts and is never written to disk, replicated or used by placement. It
-is evidence for a person reading the engines report, nothing more.
+node starts and is never written to disk or replicated. As a build's last load
+result it is evidence for a person reading the engines report, nothing more.
+
+One answer is also kept per model: a build that refused a model as
+unsupported. That depends on the build and the model only, so the node keeps
+it beside the last results, where a later load of another model cannot push it
+out, and placement reads it to stop giving the model to that build.
 """
 
 import threading
@@ -16,6 +21,8 @@ from skulk.shared.backends import engine_load_refusal_code
 from skulk.shared.types.engine_packages import (
     MAX_NODE_ENGINE_PACKAGES,
     MAX_REPORTED_ENGINE_BUILDS,
+    MAX_REPORTED_UNSUPPORTED_MODELS,
+    UNSUPPORTED_MODEL_CODE,
     NodeEngineLoadResult,
     NodeEnginePackage,
 )
@@ -85,12 +92,16 @@ class EngineLoadResults:
 
     Safe to call from any thread. Bounded: at most ``MAX_NODE_ENGINE_PACKAGES``
     backend tags and ``MAX_REPORTED_ENGINE_BUILDS`` builds per tag, the oldest
-    result leaving first.
+    result leaving first; and at most ``MAX_REPORTED_UNSUPPORTED_MODELS``
+    unsupported models per tag, the oldest leaving first.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._results: dict[str, dict[str, NodeEngineLoadResult]] = {}
+        self._unsupported: dict[
+            str, dict[tuple[str, str], NodeEngineLoadResult]
+        ] = {}
 
     def record(self, backend_tag: str, result: NodeEngineLoadResult) -> bool:
         """Keep ``result`` unless a newer one for the same build is held.
@@ -112,16 +123,42 @@ class EngineLoadResults:
                 if len(self._results) >= MAX_NODE_ENGINE_PACKAGES:
                     return False
                 builds = self._results[backend_tag] = {}
+            unsupported_changed = self._note_unsupported(backend_tag, result)
             held = builds.get(result.build)
             if held == result or (
                 held is not None and held.at_unix_ms > result.at_unix_ms
             ):
-                return False
+                return unsupported_changed
             builds[result.build] = result
             while len(builds) > MAX_REPORTED_ENGINE_BUILDS:
                 oldest = min(builds.values(), key=lambda entry: entry.at_unix_ms)
                 del builds[oldest.build]
             return True
+
+    def _note_unsupported(self, backend_tag: str, result: NodeEngineLoadResult) -> bool:
+        """Keep or drop the per-model answer ``result`` carries. Lock held.
+
+        An unsupported refusal is kept under its build and model. A load of
+        the same model on the same build that later succeeds is newer truth
+        and removes it. Any other result says nothing about support.
+        """
+        models = self._unsupported.setdefault(backend_tag, {})
+        key = (result.build, result.model_id)
+        held = models.get(key)
+        if result.outcome == "loaded":
+            if held is None or held.at_unix_ms > result.at_unix_ms:
+                return False
+            del models[key]
+            return True
+        if result.outcome != "refused" or result.code != UNSUPPORTED_MODEL_CODE:
+            return False
+        if held is not None and held.at_unix_ms >= result.at_unix_ms:
+            return False
+        models[key] = result
+        while len(models) > MAX_REPORTED_UNSUPPORTED_MODELS:
+            oldest = min(models, key=lambda entry: models[entry].at_unix_ms)
+            del models[oldest]
+        return True
 
     def for_tag(self, backend_tag: str) -> tuple[NodeEngineLoadResult, ...]:
         """Return the held results for one backend tag, newest first."""
@@ -129,6 +166,17 @@ class EngineLoadResults:
             held = tuple(self._results.get(backend_tag, {}).values())
         return tuple(
             sorted(held, key=lambda entry: (-entry.at_unix_ms, entry.build))
+        )
+
+    def unsupported_for_tag(self, backend_tag: str) -> tuple[NodeEngineLoadResult, ...]:
+        """Return the models builds of one backend tag refused, newest first."""
+        with self._lock:
+            held = tuple(self._unsupported.get(backend_tag, {}).values())
+        return tuple(
+            sorted(
+                held,
+                key=lambda entry: (-entry.at_unix_ms, entry.build, entry.model_id),
+            )
         )
 
 
@@ -153,17 +201,26 @@ def with_load_results(
         results: The node's load record.
 
     Returns:
-        The report in the same order, with ``load_results`` filled in.
+        The report in the same order, with ``load_results`` and
+        ``unsupported_models`` filled in.
     """
     reported: list[NodeEnginePackage] = []
     for package in packages:
         named = {*package.installed_builds, package.build}
+        update: dict[str, tuple[NodeEngineLoadResult, ...]] = {}
         held = tuple(
             result
             for result in results.for_tag(package.backend_tag)
             if result.build in named
         )
-        reported.append(
-            package.model_copy(update={"load_results": held}) if held else package
+        if held:
+            update["load_results"] = held
+        unsupported = tuple(
+            result
+            for result in results.unsupported_for_tag(package.backend_tag)
+            if result.build in named
         )
+        if unsupported:
+            update["unsupported_models"] = unsupported
+        reported.append(package.model_copy(update=update) if update else package)
     return tuple(reported)

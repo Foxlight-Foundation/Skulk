@@ -408,6 +408,11 @@ class RefuseInstancePlacement(BaseCommand):
     as a re-placement signal (one node wider, which shrinks every node's share)
     lets the cluster self-correct to a split that fits instead of leaving the
     operator with a placement that vanished without explanation.
+
+    The same command reports a second kind of refusal: an engine package that
+    refused to load the model. ``engine_refusal_code`` is set for it, and the
+    master then places the model again at the same width without the build
+    that refused, so the next engine in the model's order serves it.
     """
 
     instance_id: InstanceId
@@ -415,6 +420,15 @@ class RefuseInstancePlacement(BaseCommand):
     node_id: NodeId
     # The worker's refusal message (footprint vs. usable memory).
     reason: str
+    engine_refusal_code: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[a-z_]+$",
+        description=(
+            "Set when an engine package refused to load the model: the "
+            "engine's typed refusal code. Absent for a memory refusal."
+        ),
+    )
 
 
 class TaskCancelled(BaseCommand):

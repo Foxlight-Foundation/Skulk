@@ -2845,6 +2845,7 @@ node:
 | `downloadBytes` | For an offered build, the bytes an install downloads. |
 | `overheadBytes` | Memory the build declares beyond a model's weight bytes, which admission counts for a launch. |
 | `loadResults` | How the last model load on each build of the lane ended on this node since it started, newest first, at most 16. Empty until a model is loaded there. |
+| `unsupportedModels` | Models a build of the lane refused to load with the code `unsupported_model` since the node started, newest first, at most 32. Each entry has the shape of a `loadResults` entry. |
 
 Each entry of `loadResults`:
 
@@ -2859,6 +2860,19 @@ Each entry of `loadResults`:
 A load result is evidence about one build and one model. It is kept in the
 node's memory, so a restart clears it, and it never changes where a model may
 be placed.
+
+`unsupportedModels` does change placement. A build listed there for a model is
+not given that model again, on any node that holds or could install the same
+build: a launch, a repair or a preview uses the next engine in the model's
+order. An entry leaves when the node restarts, when the build leaves the node,
+or when the build later loads the model.
+
+When an engine refuses a load, Skulk places the model again on the next engine
+that can run it, on the same machine when it has one. The instance that was
+refused is deleted with a `placement_failed` record in `/state`
+`instanceFailures` that names the engine's code, and the model comes up under
+a new instance ID. A client that follows an instance ID should read that
+record and then find the model's new instance.
 
 An `active` status says the node holds an intact build that this Skulk version
 can run. It does not promise that a given model loads on it; only a launch

@@ -43,7 +43,7 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import channel, mp_channel
 from skulk.worker.main import (
     Worker,
-    _engine_load_refused_instance_failure_message,  # pyright: ignore[reportPrivateUsage]
+    _engine_load_refused_reason,  # pyright: ignore[reportPrivateUsage]
     engine_load_refused_live_instances,
     engine_package_load_results,
 )
@@ -406,7 +406,7 @@ def test_packages_turned_off_refuse_a_placement_on_a_held_package(
     assert f"{ENGINE_PACKAGES_DISABLE_ENV}=1" in message
 
 
-def test_the_worker_gives_up_a_refused_load_with_the_code_only() -> None:
+def test_the_worker_reports_a_refused_load_with_the_code_only() -> None:
     """The engine's own words may name local paths, so only its code is kept."""
 
     def supervisor(instance_id: str, message: str) -> object:
@@ -436,7 +436,7 @@ def test_the_worker_gives_up_a_refused_load_with_the_code_only() -> None:
     )
 
     assert found == [("instance-a", MODEL, "load_refused", refused)]
-    durable = _engine_load_refused_instance_failure_message(MODEL, found[0][2])
+    durable = _engine_load_refused_reason(MODEL, found[0][2])
     assert "load_refused" in durable and "/private" not in durable
 
 
