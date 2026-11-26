@@ -458,10 +458,18 @@ SID, because task names are one namespace for the whole machine and two
 accounts need two. It runs as that account, in its
 signed-in session, with ordinary rights, and only while the account is signed
 in. Only that scope exists there (`registrable_scopes()`); a machine-wide
-service is refused. The task is started every minute and never twice at once:
+service is refused. The task is started every minute:
 Task Scheduler restarts a task only after a failure, and the manager also ends
 cleanly when it wants to be started again, so a restart on Windows takes up to
-a minute where launchd and systemd take ten seconds. It runs the base
+a minute where launchd and systemd take ten seconds. A start is allowed beside
+a running one (`Parallel`): the startup file's own lock decides which is the
+service, and a start that finds it held ends at once with success. Do not let
+Task Scheduler refuse or queue that start instead. Refused (`IgnoreNew`, how
+the task was first written), Task Scheduler shows the refusal, `0x800710E0`,
+as the task's last result beside a healthy service for as long as it runs;
+queued, it keeps one more start every minute without limit; and a second start
+that ends with a failure shows that failure the same way. Setup still takes a
+task written the first way for its own, and replaces it. It runs the base
 `pythonw.exe`, which opens no console window; `current_base()` answers the
 `python.exe` beside it. The service root is `Skulk\plugins` in the account's
 local data folder, short because of the path limit.

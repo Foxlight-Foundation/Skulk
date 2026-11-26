@@ -3182,8 +3182,9 @@ service manager for an ordinary account. Its name ends in the account's SID, bec
 the whole machine. The task runs as that account, in its signed-in session and with its
 ordinary rights, so the service runs only while the account is signed in, and a service for the whole machine
 is not offered. Task Scheduler restarts a task only after a failure, and the manager also ends cleanly when it
-wants to be started again, so the task is started every minute and never twice at once; a restart there takes
-up to a minute where launchd and systemd take ten seconds. To stop the service, setup switches the task off,
+wants to be started again, so the task is started every minute; a restart there takes
+up to a minute where launchd and systemd take ten seconds. While the service runs, each of those starts finds
+it there and ends at once, so Task Scheduler shows the task as running. To stop the service, setup switches the task off,
 asks the bootstrap to stop through a file in the service root and waits up to 180 seconds before it ends the
 task. That file stays until the service is installed again, and while it is there a start ends at once.
 A Windows node that was never set up reads `absent`, like any other, and the Plugins page starts local setup

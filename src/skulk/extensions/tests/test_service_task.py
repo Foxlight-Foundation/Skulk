@@ -9,6 +9,7 @@ Scheduler under a name of their own, and delete what they register.
 """
 
 import asyncio
+import contextlib
 import os
 import re
 import subprocess
@@ -121,7 +122,8 @@ def test_a_task_reads_the_same_after_the_scheduler_rewrites_it(tmp_path: Path) -
     assert fields["Actions/Exec/Command"] == str(python.with_name("pythonw.exe"))
     assert fields["Principals/Principal/UserId"] == _ACCOUNT
     assert fields["Principals/Principal/LogonType"] == "InteractiveToken"
-    assert fields["Settings/MultipleInstancesPolicy"] == "IgnoreNew"
+    # A start beside a running service is allowed; the startup file ends it.
+    assert fields["Settings/MultipleInstancesPolicy"] == "Parallel"
     assert fields["Triggers/TimeTrigger/Repetition/Interval"] == "PT1M"
     # Nothing asks for more than the account's ordinary rights.
     assert "Principals/Principal/RunLevel" not in fields
@@ -171,6 +173,14 @@ def test_only_local_setups_own_task_is_accepted_under_the_name(tmp_path: Path) -
     layout.verify_existing(_as_the_scheduler_keeps_it(written, layout.label))
     # Stopping the service switches its task off; it is still ours.
     layout.verify_existing(_as_the_scheduler_keeps_it(written, layout.label, False))
+    # So is the task local setup first wrote, which refused a second start.
+    assert written.count("Parallel") == 1
+    earlier = written.replace("Parallel", "IgnoreNew")
+    layout.verify_existing(_as_the_scheduler_keeps_it(earlier, layout.label))
+    assert task_fields(earlier) != task_fields(written)
+    # No other answer to a second start is local setup's.
+    with pytest.raises(ValueError, match="differs from fixed contract"):
+        layout.verify_existing(written.replace("Parallel", "Queue"))
     with pytest.raises(ValueError, match="not managed by local setup"):
         layout.verify_existing(written.replace("skulk-plugin-service-v1", "another"))
     with pytest.raises(ValueError, match="differs from fixed contract"):
@@ -262,12 +272,19 @@ class _Scheduler:
         return self._answer(arguments, 0)
 
     def minute(self, name: str) -> None:
-        """The task's trigger comes round: start it unless it runs or is off."""
-        if name in self.disabled or any(p.poll() is None for p in self.started):
+        """The task's trigger comes round: start it unless it is off.
+
+        Beside a running service too, as the task allows. That start finds
+        the service there and ends at once with success; it is not kept.
+        """
+        if name in self.disabled:
             return
+        beside = any(p.poll() is None for p in self.started)
         self.run(["schtasks.exe", "/Run", "/TN", name])
         # Task Scheduler's own doing, not something that was asked of it.
         self.calls.pop()
+        if beside:
+            assert self.started.pop().wait(120) == 0
 
 
 @pytest.fixture
@@ -333,8 +350,18 @@ def test_setup_registers_starts_and_stops_the_service(
     (service,) = scheduler.started
     _appears(layout.root / "ready", service)
     assert _held(layout.root)
-    # A second start, by hand or by the minute, finds the first one there.
-    assert subprocess.run(scheduler.started[0].args, cwd=layout.root).returncode == 1
+    # A second start, by hand or by the minute, finds the first one there
+    # and ends with success: Task Scheduler shows a failed start beside the
+    # running service. It starts nothing and leaves the service as it is.
+    told = (layout.root / "ready").stat().st_mtime_ns
+    began = time.monotonic()
+    scheduler.minute(layout.label)
+    assert time.monotonic() - began < 30
+    assert subprocess.run(service.args, cwd=layout.root).returncode == 0
+    assert scheduler.started == [service] and service.poll() is None
+    # A manager says it is ready by writing this file anew; none did.
+    assert (layout.root / "ready").stat().st_mtime_ns == told
+    assert _held(layout.root)
 
     service_registration.register_user(layout, "stop")
     assert (layout.root / "asked").exists()
@@ -553,6 +580,29 @@ def test_another_task_under_the_name_is_left_alone(
     assert not service_registration.registered_for(
         layout, service_bootstrap.current_base()
     )
+
+
+@windows_only
+def test_a_task_registered_the_earlier_way_is_replaced(
+    tmp_path: Path, scheduler: _Scheduler
+) -> None:
+    """Local setup first wrote a task that refused a second start."""
+    layout = _own_layout(tmp_path)
+    base = service_bootstrap.current_base()
+    _prepared(layout, _SERVES)
+    earlier = layout.definition(base).decode("utf-16").replace("Parallel", "IgnoreNew")
+    scheduler.tasks[layout.label] = earlier
+    # Local setup's own, and not the service that is registered today.
+    assert not service_registration.registered_for(layout, base)
+    service_registration.register_user(layout, "stop")
+    assert scheduler.calls == ["/Change"]
+    service_registration.register_user(layout, "install")
+    assert scheduler.calls == ["/Change", "/Create", "/Run"]
+    assert scheduler.tasks[layout.label] != earlier
+    assert service_registration.registered_for(layout, base)
+    _appears(layout.root / "ready", scheduler.started[-1])
+    service_registration.register_user(layout, "stop")
+    assert scheduler.started[-1].wait(30) == 5
 
 
 @windows_only
@@ -860,6 +910,17 @@ def _delete_live_task() -> None:
     )
 
 
+def _put_away(layout: WindowsServiceLayout) -> None:
+    """End a live test's service and delete its task, however the test went.
+
+    Deleting a task does not end what it started: a test that failed before
+    it stopped its service left the service running on the machine.
+    """
+    with contextlib.suppress(ValueError, OSError):
+        service_registration.register_user(layout, "stop")
+    _delete_live_task()
+
+
 @live
 def test_the_real_task_scheduler_runs_and_stops_the_service(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_task_scheduler: None
@@ -899,7 +960,56 @@ def test_the_real_task_scheduler_runs_and_stops_the_service(
         service_registration.register_user(layout, "stop")
         assert (layout.root / "asked").exists()
     finally:
-        _delete_live_task()
+        _put_away(layout)
+
+
+def _last_result() -> int:
+    """What Task Scheduler shows as the live task's last result."""
+    shown = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "$s = New-Object -ComObject Schedule.Service; $s.Connect(); "
+            f"$s.GetFolder('\\').GetTask('{_LIVE_NAME}').LastTaskResult",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(shown.stdout.strip()) & 0xFFFFFFFF
+
+
+@live
+@pytest.mark.slow
+def test_the_real_task_scheduler_shows_a_running_service_as_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_task_scheduler: None
+) -> None:
+    """Past the minute, when Task Scheduler starts the task beside the service.
+
+    A task that refuses that start shows the refusal, ``0x800710E0``, as its
+    last result for as long as the service runs. Seen on a real machine.
+    """
+    monkeypatch.setattr(WindowsServiceLayout, "label", property(_live_name))
+    layout = _own_layout(tmp_path)
+    _prepared(layout, _SERVES)
+    _delete_live_task()
+    try:
+        service_registration.register_user(layout, "install")
+        _appears(layout.root / "ready")
+        (layout.root / "ready").unlink()
+        # Two whole minutes come round, whenever in the minute this began.
+        time.sleep(125)
+        assert _last_result() == 0x41301, "not shown as currently running"
+        # The starts beside it were not the service and started none.
+        assert _held(layout.root)
+        assert not (layout.root / "ready").exists()
+        assert not (layout.root / "asked").exists()
+        service_registration.register_user(layout, "stop")
+        assert (layout.root / "asked").exists()
+        assert not _held(layout.root)
+    finally:
+        _put_away(layout)
 
 
 @live
@@ -922,4 +1032,4 @@ def test_the_real_task_scheduler_ends_a_service_that_will_not_stop(
         assert not _held(layout.root)
         RuntimeLock(layout.root, "manager.lock").close()
     finally:
-        _delete_live_task()
+        _put_away(layout)
