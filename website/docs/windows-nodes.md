@@ -161,19 +161,26 @@ Things to know about the service:
   account, not to the node's window or the checkout. Stopping the node, or
   deleting the checkout, removes neither.
 
-### Remove the plugin service
+### Stop or remove the plugin service
 
-Skulk has no command for this on Windows yet. By hand:
+To stop the service and keep it stopped: open **Task Scheduler**, select
+**Task Scheduler Library**, find the task whose name begins
+`foundation.foxlight.skulk.plugins.`, and choose **Disable**, then **End**, in
+that order. Disabled first, the task is not started again by the next minute.
+Enable it again to bring the service back.
 
-1. Open **Task Scheduler** and select **Task Scheduler Library**.
-2. Find the task whose name begins `foundation.foxlight.skulk.plugins.` and
-   choose **Disable**, then **End**, then **Delete**, in that order. Disabled
-   first, the task is not started again by the next minute; deleting a task
-   does not stop a service it has already started.
-3. Delete the folder `%LOCALAPPDATA%\Skulk\plugins`. If Windows says a file
-   is in use, the service is still running: wait a few seconds and try again.
+Skulk has no command that removes the service on Windows yet, and removing it
+by hand has not been tested from end to end. The service has three parts:
 
-Opening the Plugins page on the PC again sets the service up again.
+- the scheduled task;
+- the folder `%LOCALAPPDATA%\Skulk\plugins`;
+- the node's own record of its connection to the service, in
+  `managed-service` inside the node's settings folder
+  (`%USERPROFILE%\.skulk`).
+
+Deleting the task and the folder while that record is still there leaves the
+Plugins page reporting a service that is set up and does not answer. Whether
+setup then repairs it has not been tried on Windows.
 
 ### If setup says a path is too long
 
@@ -241,5 +248,6 @@ All on one Windows 11 machine (x86-64), from a clean checkout:
 - An account that was never an administrator. The test account is an
   administrator that runs Skulk with ordinary rights.
 - The plugin service coming back after signing out and in again.
+- Removing the plugin service by hand, and setting it up again afterwards.
 - A chat request sent through a Windows node to a model on another node.
 - A cluster of more than two nodes with a Windows node in it.
