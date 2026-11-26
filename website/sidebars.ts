@@ -46,7 +46,7 @@ const sidebars: SidebarsConfig = {
       type: "category",
       label: "Hardware and networking",
       items: [
-        "nvidia-cuda-nodes", "amd-strix-halo-nodes", "vllm-engine",
+        "nvidia-cuda-nodes", "amd-strix-halo-nodes", "windows-nodes", "vllm-engine",
         "thunderbolt-clustering", "tailscale", "tailscale-clustering", "cluster-communication",
       ],
     },
