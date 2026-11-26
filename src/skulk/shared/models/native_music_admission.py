@@ -39,6 +39,7 @@ from skulk.shared.types.native_music import (
 )
 from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.worker.instances import Instance, InstanceId, LlamaRpcInstance
+from skulk.shared.types.worker.runners import RunnerId
 from skulk.utils.pydantic_ext import FrozenModel
 
 
@@ -125,6 +126,7 @@ def native_music_placement_commitments(
     target_device: NativeMusicDevice,
     node_is_unified: bool | None,
     excluded_instance: Instance | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> tuple[NativeMusicMemoryBudget, ...]:
     """Project pending and idle work onto this actual target's physical pools.
 
@@ -138,6 +140,11 @@ def native_music_placement_commitments(
     ``excluded_instance`` is only the exact authoritative instance currently
     being created by its Worker. A changed or missing owner cannot remove an
     unrelated commitment. API/Master new-placement calls exclude nothing.
+
+    ``package_needs`` holds what an engine package said a placed load takes
+    (``State.engine_package_needs``), by runner. It can only raise another
+    engine's commitment above the card estimate, as it does in the ordinary
+    reservations; native music's own phase budgets never read it.
     """
     if (
         excluded_instance is not None
@@ -226,6 +233,9 @@ def native_music_placement_commitments(
                     shard, instance.context_token_limit
                 ),
             ).in_bytes
+            stated = package_needs.get(runner) if package_needs is not None else None
+            if stated is not None:
+                footprint = max(footprint, stated)
             gpu = _gpu_backend(shard.resolved_backend)
             shared_gpu = (
                 node_is_unified is not False
@@ -253,12 +263,15 @@ def assess_native_music_placement(
     now_unix_ms: int,
     node_is_unified: bool | None = None,
     excluded_instance: Instance | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> NativeMusicPlacementAssessment:
     """Bind a live fixed library and assess all three pools without qualification gates.
 
     The caller independently enforces model/engine compatibility and authoritative
     placement ownership. This function prepares nothing and supplies no lease or
     reservation. A fresh call is required at each actual admission boundary.
+    ``package_needs`` is ``State.engine_package_needs``; see
+    ``native_music_placement_commitments``.
     """
     observed = resources.native_music_probes.get(backend)
     if observed is None or backend not in resources.backends:
@@ -294,6 +307,7 @@ def assess_native_music_placement(
         target_device=probe.device,
         node_is_unified=unified,
         excluded_instance=excluded_instance,
+        package_needs=package_needs,
     )
     remaining = reserve_native_music_memory(
         native_music_admission_capacity(capacity), (), additional_budgets=commitments

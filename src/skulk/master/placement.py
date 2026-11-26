@@ -31,6 +31,8 @@ from skulk.shared.backends import (
     engine_of,
     engine_supports_multi_node,
     expand_engine_backends,
+    memory_settings_key,
+    package_engine_of,
     platform_compatible_backends,
     resolve_node_backend,
     runtime_backends_for_builds,
@@ -78,6 +80,10 @@ from skulk.shared.types.commands import (
     PlaceInstance,
 )
 from skulk.shared.types.common import NodeId
+from skulk.shared.types.engine_orders import (
+    layered_engine_order,
+    model_engine_order,
+)
 from skulk.shared.types.events import (
     Event,
     InstanceCreated,
@@ -107,7 +113,7 @@ from skulk.shared.types.worker.instances import (
     MlxRingInstance,
     instance_meta_of,
 )
-from skulk.shared.types.worker.runners import ShardAssignments
+from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import (
     RpcDonorShardMetadata,
     Sharding,
@@ -253,6 +259,8 @@ def add_instance_to_placements(
     approved_remote_code_identities: AbstractSet[str] | None = None,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     native_music_commitments: Mapping[InstanceId, Instance] | None = None,
+    model_engine_orders: Mapping[ModelId, Sequence[str]] | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> Mapping[InstanceId, Instance]:
     """Validate and add one caller-specified exact instance placement.
 
@@ -268,6 +276,12 @@ def add_instance_to_placements(
         node_resources: Advertised engines used to resolve unstamped exact shards.
         native_music_commitments: Complete deduplicated pending and committed
             native-admission owners; generic node_memory is already reserved.
+        package_needs: What an engine package said a placed load takes, by
+            runner (``State.engine_package_needs``). Native music admission
+            reads raw observations, so it charges these itself.
+        model_engine_orders: Each person-set engine order by model name. It
+            ranks the engine for a shard that names none; a stamped shard
+            keeps the engine it names.
 
     Returns:
         Existing placements plus the validated, memory-stamped instance.
@@ -289,6 +303,7 @@ def add_instance_to_placements(
     # still unknown, so a transient missing reading yields the card guard rather
     # than None (review catch on #292).
     assignments = command.instance.shard_assignments
+    launch_order = command.instance.engine_order or None
     require_instance_model_card_identity(command.instance)
     music_instance = any(
         shard.model_card.music is not None
@@ -345,6 +360,8 @@ def add_instance_to_placements(
                     current_instances if native_music_commitments is None else native_music_commitments,
                     explicit_backend=shard.resolved_backend,
                     node_is_unified=node_id in (unified_memory_gpu_nodes or ()) or None,
+                    engine_order=_engine_order(shard.model_card, model_engine_orders, launch_order),
+                    package_needs=package_needs,
                 )
                 build = "ace_step@sha256:" + assessment.policy.payload_sha256
                 if shard.resolved_engine_build is not None and shard.resolved_engine_build != build:
@@ -362,7 +379,7 @@ def add_instance_to_placements(
                     raise PlacementInfoPendingError("Verified native separation backend telemetry is required before placement")
                 ready = _card_platform_backends(shard.model_card, resources)
                 backend = shard.resolved_backend or resolve_node_backend(
-                    ready, shard.model_card.placement.backend_preference, resources.backends
+                    ready, _engine_order(shard.model_card, model_engine_orders, launch_order), resources.backends
                 )
                 if backend is None or backend not in ready:
                     raise PlacementInfoPendingError("Prepare a compatible native separation package before placement")
@@ -429,9 +446,17 @@ def add_instance_to_placements(
                         "Backend telemetry is required for unresolved exact placement"
                     )
                 continue
+            # A shard that names no engine is not given a build that refused
+            # its model as unsupported. One that names its engine keeps it.
+            resources = without_engine_builds(
+                {node_id: resources},
+                engine_builds_unsupporting(
+                    node_resources or {}, shard.model_card.model_id
+                ),
+            )[node_id]
             backend = resolve_node_backend(
                 _card_platform_backends(shard.model_card, resources),
-                shard.model_card.placement.backend_preference,
+                _engine_order(shard.model_card, model_engine_orders, launch_order),
                 resources.backends,
             )
             if backend is None:
@@ -574,13 +599,17 @@ def _assess_native_music_node(
     *,
     explicit_backend: str | None = None,
     node_is_unified: bool | None = None,
+    engine_order: tuple[str, ...] | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> NativeMusicPlacementAssessment:
     """Choose a genuinely ready native lane with complete shared fit policy.
 
     Installed package and actual memory are technical requirements; empirical
     qualification is never a hardware permission list. All candidates use the
     raw native observation rather than generic already-reserved pool inputs.
+    ``engine_order`` ranks the ready lanes; without one the card's order does.
     """
+    preference = _engine_order(card) if engine_order is None else engine_order
     if resources is None or resources.participation != "full":
         raise PlacementInfoPendingError("Prepare and publish native music resources before placement")
     ready = _card_platform_backends(card, resources) & resources.backends - resources.on_demand_backends
@@ -591,12 +620,13 @@ def _assess_native_music_node(
     reasons: list[str] = []
     refresh_needed = False
     while ready:
-        backend = resolve_node_backend(ready, card.placement.backend_preference, ready)
+        backend = resolve_node_backend(ready, preference, ready)
         assert backend is not None
         try:
             assessed = assess_native_music_placement(
                 card, backend, node, resources, commitments,
                 now_unix_ms=int(time.time() * 1000), node_is_unified=node_is_unified,
+                package_needs=package_needs,
             )
         except ValueError as error:
             reasons.append(str(error))
@@ -644,10 +674,14 @@ def _stamp_llama_server_settings(
     for node_id, runner_id in assignments.node_to_runner.items():
         shard = shards[runner_id]
         resources = resources_by_node.get(node_id)
-        engine = engine_of(shard.resolved_backend or "")
-        if engine is not None:
+        backend = shard.resolved_backend or ""
+        # A package shard is stamped too, so reservations and the worker's
+        # load guard count the memory its build declares.
+        if engine_of(backend) is not None or package_engine_of(backend) is not None:
             settings = (
-                resources.engine_memory_settings.get(engine, EngineMemorySettings())
+                resources.engine_memory_settings.get(
+                    memory_settings_key(backend), EngineMemorySettings()
+                )
                 if resources is not None
                 else EngineMemorySettings()
             )
@@ -742,12 +776,18 @@ def _cycle_engine_ready_score(
     engine ready wins when nothing more important separates them. Nodes
     without a resources entry are not counted against the cycle.
     """
+
+    def ready(resources: NodeResources) -> bool:
+        installed = resources.backends - resources.on_demand_backends
+        # A card may name an engine package by its bare name, which a node
+        # advertises only as a lane tag.
+        return bool(installed & compatible_backends) or any(
+            package_engine_of(tag) in compatible_backends for tag in installed
+        )
+
     return int(
         all(
-            bool(
-                (resources.backends - resources.on_demand_backends)
-                & compatible_backends
-            )
+            ready(resources)
             for node_id in cycle
             if (resources := node_resources.get(node_id)) is not None
         )
@@ -773,15 +813,138 @@ def _cycle_backend_preference_score(
     candidates, so every cycle here is runnable; this only orders them. Nodes
     without a resources entry yet (gossip warming up) are not counted against a
     preference, matching the optimistic eligibility default elsewhere.
+
+    A built-in engine is advertised under its bare name as well as its
+    compute tags, so a preference for the bare name matches by membership. An
+    engine package is advertised only under its compute tags, so a preference
+    for a package's bare name matches a node that holds any lane of it.
     """
     for index, tag in enumerate(backend_preference):
+        names_package = package_engine_of(tag) == tag
         if all(
-            tag in node_resources[node_id].backends
+            tag in (backends := node_resources[node_id].backends)
+            or (
+                names_package
+                and any(package_engine_of(held) == tag for held in backends)
+            )
             for node_id in cycle
             if node_id in node_resources
         ):
             return len(backend_preference) - index
     return 0
+
+
+def _engine_order(
+    card: ModelCard,
+    model_engine_orders: Mapping[ModelId, Sequence[str]] | None = None,
+    launch_order: Sequence[str] | None = None,
+) -> tuple[str, ...]:
+    """The order that ranks a card's engines for one placement.
+
+    An order given for this launch comes first, then the person's order for
+    the model, then the card's own default. Every placement read of the
+    card's preference goes through here, so eligibility scoring, memory
+    admission and the backend stamped on each shard rank engines the same
+    way. With no order given this is exactly the card's preference.
+    """
+    return layered_engine_order(
+        card.placement.backend_preference,
+        model_engine_order(model_engine_orders, card.model_id),
+        launch_order,
+    )
+
+
+UNSUPPORTED_BY_ENGINE_BUILD_REFUSAL: Final = (
+    "An add-on engine refused to load this model as unsupported, and no "
+    "other engine on a machine that could take it can run it. The engine is "
+    "asked again after that machine restarts or the engine is updated."
+)
+"""Start of the refusal for a model whose remaining engines all said no."""
+
+
+def engine_builds_unsupporting(
+    node_resources: Mapping[NodeId, NodeResources], model_id: ModelId
+) -> frozenset[str]:
+    """The engine package builds that refused ``model_id`` as unsupported.
+
+    Each node reports the models its builds refused. A build is the same
+    bytes wherever it is installed, and this refusal depends on the build and
+    the model only, so one node's report counts for every node that holds or
+    could install the build.
+    """
+    named = str(model_id)[:256]
+    return frozenset(
+        refusal.build
+        for resources in node_resources.values()
+        for package in resources.engine_packages
+        for refusal in package.unsupported_models
+        if refusal.model_id == named
+    )
+
+
+def without_engine_builds(
+    node_resources: Mapping[NodeId, NodeResources], builds: AbstractSet[str]
+) -> Mapping[NodeId, NodeResources]:
+    """Return ``node_resources`` with the named engine package builds not on offer.
+
+    A node's backend tag for one of ``builds``, held or installable, is taken
+    out of the backends it advertises, so every placement read (eligibility,
+    engine ranking, admission, the backend stamped on a shard) sees the node
+    as it is without that build. Built-in engines are never touched. With no
+    build named, or none of them on any node, the mapping is returned as it
+    came.
+    """
+    if not builds:
+        return node_resources
+    changed: dict[NodeId, NodeResources] = {}
+    for node_id, resources in node_resources.items():
+        dropped = {
+            tag
+            for known in (resources.engine_builds, resources.installable_engine_builds)
+            for tag, build in known.items()
+            if build in builds and package_engine_of(tag) is not None
+        } & (resources.backends | resources.on_demand_backends)
+        if dropped:
+            changed[node_id] = resources.model_copy(
+                update={
+                    "backends": resources.backends - dropped,
+                    "on_demand_backends": resources.on_demand_backends - dropped,
+                }
+            )
+    return {**node_resources, **changed} if changed else node_resources
+
+
+def _cycle_built_in_engine_score(
+    cycle: Cycle,
+    card: ModelCard,
+    node_resources: Mapping[NodeId, NodeResources],
+    preference: tuple[str, ...],
+) -> int:
+    """Prefer a cycle that does not fall back to an installed engine package.
+
+    With no preference that applies, a node serves a model on a built-in
+    engine when it has a compatible one. A node whose only compatible engine
+    is an installed package resolves to that package, and nobody chose it.
+    Such a cycle scores ``0`` and every other cycle ``1``, so a model goes to
+    a package-only node when no node with a built-in engine can take it, and
+    installing a package never draws a model away from one that can. A
+    package that ``preference`` names was chosen, by the person or by the
+    card's author, and scores ``1``. A cluster with no package scores every
+    cycle ``1``, which leaves the ranking as it was.
+    """
+    for node_id in cycle:
+        resources = node_resources.get(node_id)
+        if resources is None:
+            continue
+        resolved = resolve_node_backend(
+            _card_platform_backends(card, resources), preference, resources.backends
+        )
+        if resolved is None or package_engine_of(resolved) is None:
+            continue
+        if resolved in preference or package_engine_of(resolved) in preference:
+            continue
+        return 0
+    return 1
 
 
 def _card_platform_backends(
@@ -827,6 +990,27 @@ def _card_platform_backends(
         ),
     )
     if node_resources is not None:
+        if (
+            card.vision is not None
+            or card.music is not None
+            or card.separation is not None
+            or card.image is not None
+            or card.video is not None
+            or card_serves_speech(card)
+            or card_serves_embeddings(card)
+        ):
+            # An installed engine package serves text generation and nothing
+            # else: its manifest has no way yet to say it implements another
+            # operation. The shared platform filter passes any tag whose
+            # engine this build has no name for, so without this a non-text
+            # card would be placed on a node's package only for its runner
+            # to refuse the load.
+            filtered = frozenset(
+                tag
+                for tag in filtered
+                if package_engine_of(tag) is None
+                or tag not in node_resources.backends
+            )
         filtered = frozenset(
             tag
             for tag in filtered
@@ -1138,7 +1322,24 @@ def place_instance(
     served_context_default: int | None = None,
     node_install_ids: Mapping[NodeId, UUID] | None = None,
     native_music_commitments: Mapping[InstanceId, Instance] | None = None,
+    model_engine_orders: Mapping[ModelId, Sequence[str]] | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> dict[InstanceId, Instance]:
+    # One order ranks this placement's engines everywhere below: an order given
+    # for this launch, then the person's order for the model, then the card's
+    # default.
+    backend_preference = _engine_order(
+        command.model_card, model_engine_orders, command.engine_order
+    )
+    unsupporting_builds: frozenset[str] = frozenset()
+    if node_resources is not None:
+        # An engine package build that refused this model as unsupported is
+        # not on offer for it, so the next engine in the order is chosen. A
+        # cluster where no build refused anything keeps the mapping it passed.
+        unsupporting_builds = engine_builds_unsupporting(
+            node_resources, command.model_card.model_id
+        )
+        node_resources = without_engine_builds(node_resources, unsupporting_builds)
     native_music = command.model_card.music is not None and command.model_card.music.native is not None
     if native_music and command.sharding != Sharding.Pipeline:
         raise PlacementError("Native music requires single-host pipeline placement")
@@ -1320,6 +1521,13 @@ def place_instance(
                     "Runtime availability has not been gossiped for a model "
                     "without a declared engine. Retry shortly."
                 )
+            if unsupporting_builds:
+                # Saying the cluster lacks the hardware would be wrong: a node
+                # has an engine for this model, and that engine said no.
+                raise PlacementError(
+                    UNSUPPORTED_BY_ENGINE_BUILD_REFUSAL
+                    + f" Engines this model can use: {sorted(compatible_backend_summary)}."
+                )
             # Name the hardware only when every node has reported and none
             # could be the machine the model needs.
             required_hardware = (
@@ -1494,6 +1702,8 @@ def place_instance(
                     command.model_card, node, resolved_node_resources.get(node),
                     current_instances if native_music_commitments is None else native_music_commitments,
                     node_is_unified=node in (unified_memory_gpu_nodes or ()) or None,
+                    engine_order=backend_preference,
+                    package_needs=package_needs,
                 )
             except PlacementInfoPendingError as error:
                 memory_diagnostics.pending_info_node_ids.append(node)
@@ -1519,7 +1729,7 @@ def place_instance(
             resolved_backends={
                 node_id: resolve_node_backend(
                     _card_platform_backends(command.model_card, resources),
-                    command.model_card.placement.backend_preference,
+                    backend_preference,
                     resources.backends,
                 )
                 for node_id in standard_cycle.node_ids
@@ -1698,14 +1908,18 @@ def place_instance(
     # compatible_backends has already hard-filtered, so this only ranks). This
     # dominates the download/memory tie-breakers because serving a model on its
     # faster backend is the whole point of the preference; among cycles with the
-    # same preference rank, download locality, then an engine that is already
-    # installed (rather than installed on demand), then free memory decide.
-    backend_preference = command.model_card.placement.backend_preference
+    # same preference rank, a built-in engine ahead of an installed engine
+    # package nobody chose, then download locality, then an engine that is
+    # already installed (rather than installed on demand), then free memory
+    # decide.
     selected_cycle = max(
         candidate_cycles,
         key=lambda cycle: (
             _cycle_backend_preference_score(
                 cycle, resolved_node_resources, backend_preference
+            ),
+            _cycle_built_in_engine_score(
+                cycle, command.model_card, resolved_node_resources, backend_preference
             ),
             _cycle_download_score(
                 cycle, command.model_card.model_id, resolved_download_status
@@ -1852,6 +2066,24 @@ def place_instance(
                         "Native placement lacks its exact engine build"
                     )
                 updates["resolved_engine_build"] = build
+            if package_engine_of(resolved_backend) is not None:
+                # The runner finds an engine package's generation by its
+                # manifest digest. Without it a later activation could move
+                # this placement onto a build it was never admitted for.
+                assert resources is not None
+                # A package the node will install first is stamped with the
+                # build its package list offers; the worker installs exactly
+                # that build or gives the instance up.
+                build = resources.engine_builds.get(resolved_backend) or (
+                    resources.installable_engine_builds.get(resolved_backend)
+                    if resolved_backend in resources.on_demand_backends
+                    else None
+                )
+                if build is None:
+                    raise PlacementError(
+                        "Engine package placement lacks its exact package build"
+                    )
+                updates["resolved_engine_build"] = build
             if engine_of(resolved_backend) == "vllm" and resources is not None:
                 build = _vllm_placement_build(resolved_backend, resources)
                 if build is not None:
@@ -1960,6 +2192,7 @@ def place_instance(
             excluded_nodes=stamped_exclusions_list,
             excluded_install_ids=sorted(command.excluded_install_ids),
             system_role=command.system_role,
+            engine_order=list(command.engine_order or ()),
             driver_node=driver_node,
             donor_endpoints=donor_endpoints,
         )
@@ -2010,6 +2243,7 @@ def place_instance(
                 excluded_nodes=stamped_exclusions_list,
                 excluded_install_ids=sorted(command.excluded_install_ids),
                 system_role=command.system_role,
+                engine_order=list(command.engine_order or ()),
                 jaccl_devices=mlx_jaccl_devices,
                 jaccl_coordinators=mlx_jaccl_coordinators,
             )
@@ -2031,6 +2265,7 @@ def place_instance(
                 excluded_nodes=stamped_exclusions_list,
                 excluded_install_ids=sorted(command.excluded_install_ids),
                 system_role=command.system_role,
+                engine_order=list(command.engine_order or ()),
                 hosts_by_node=hosts_by_node,
                 ephemeral_port=ephemeral_port,
             )
@@ -2100,6 +2335,8 @@ def fallback_command_for_refused_instance(
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,
         requested_context_tokens=instance.requested_context_tokens,
+        # A launch that picked its engine keeps the pick through a repair.
+        engine_order=list(instance.engine_order) or None,
     )
 
 
@@ -2137,6 +2374,35 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,
         requested_context_tokens=instance.requested_context_tokens,
+        # A launch that picked its engine keeps the pick through a repair.
+        engine_order=list(instance.engine_order) or None,
+    )
+
+
+def replacement_command_for_engine_refused_instance(instance: Instance) -> PlaceInstance:
+    """Build a *same-width* re-placement for a model an engine package refused.
+
+    The engine's refusal says nothing about the node or its memory, so the
+    width, the exclusions and the engine order are the instance's own. What
+    changes is which engines are on offer: the caller passes
+    :func:`place_instance` node resources without the build that refused
+    (:func:`without_engine_builds`), and the order then picks the next engine.
+
+    Raises :class:`PlacementError` if the instance carries no shards.
+    """
+    model_card, sharding, instance_meta, width = _placement_intent_from_instance(
+        instance
+    )
+    return PlaceInstance(
+        model_card=model_card,
+        sharding=sharding,
+        instance_meta=instance_meta,
+        min_nodes=width,
+        excluded_nodes=sorted(instance.excluded_nodes),
+        excluded_install_ids=sorted(instance.excluded_install_ids),
+        system_role=instance.system_role,
+        requested_context_tokens=instance.requested_context_tokens,
+        engine_order=list(instance.engine_order) or None,
     )
 
 
@@ -2175,6 +2441,8 @@ def replacement_command_for_download_failed_instance(
         # re-placements re-stamp it so the flag survives node loss.
         system_role=instance.system_role,
         requested_context_tokens=instance.requested_context_tokens,
+        # A launch that picked its engine keeps the pick through a repair.
+        engine_order=list(instance.engine_order) or None,
     )
 
 

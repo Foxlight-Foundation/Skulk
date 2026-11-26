@@ -35,6 +35,8 @@ vi.mock('../../hooks/useToast', () => ({
 
 vi.mock('./DevicesPanel', () => ({ DevicesPanel: () => <div>Device actions fixture</div> }));
 
+vi.mock('./EnginesPanel', () => ({ EnginesPanel: () => <div>Engine actions fixture</div> }));
+
 vi.mock('./PairingSettings', () => ({
   PairingSettings: () => <div>Pairing</div>,
 }));
@@ -422,5 +424,114 @@ describe('restart recovery setting', () => {
     await save();
 
     expect(saveFullConfig.mock.calls[0]?.[0]).toMatchObject({ restart_recovery: { enabled: false } });
+  });
+});
+
+describe('add-on engine settings', () => {
+  async function renderWithConfig(fullConfig: Record<string, unknown>) {
+    localStorage.setItem('skulk-settings-sections', JSON.stringify({ engines: true }));
+    const saveFullConfig = vi.fn<(config: unknown) => Promise<boolean>>(async () => true);
+    useConfigMock.mockReturnValue({
+      fullConfig,
+      effective: { kv_cache_backend: 'default', has_hf_token: false, experimental_mode_enabled: false },
+      configPath: 'skulk.yaml',
+      loading: false,
+      saving: false,
+      error: null,
+      fetchConfig: vi.fn(async () => undefined),
+      saveFullConfig,
+    });
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <ThemeProvider theme={darkTheme}>
+          <SettingsPanel open onClose={vi.fn()} />
+        </ThemeProvider>,
+      );
+    });
+    const save = async () => {
+      const saveButton = [...(container?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+        .find((button) => button.textContent === 'Save changes');
+      await act(async () => {
+        saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+    };
+    const control = (label: string) => container?.querySelector<HTMLElement>(`[aria-label="${label}"]`);
+    const click = async (label: string) => {
+      await act(async () => {
+        control(label)?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+    };
+    return { saveFullConfig, save, control, click };
+  }
+
+  it('shows the defaults and saves no engines section until the operator changes one', async () => {
+    const { saveFullConfig, save, control } = await renderWithConfig({});
+    expect(control('Use add-on engines')?.getAttribute('aria-checked')).toBe('true');
+    expect(control('Install test builds')?.getAttribute('aria-checked')).toBe('false');
+
+    await save();
+
+    expect(saveFullConfig.mock.calls[0]?.[0]).not.toHaveProperty('engines');
+  });
+
+  it('saves turning add-on engines off and hides the test-build choice', async () => {
+    const { saveFullConfig, save, control, click } = await renderWithConfig({});
+    await click('Use add-on engines');
+    expect(control('Install test builds')).toBeNull();
+
+    await save();
+
+    expect(saveFullConfig.mock.calls[0]?.[0]).toMatchObject({
+      engines: { packages_enabled: false, package_channel: 'stable' },
+    });
+  });
+
+  it('saves choosing test builds and going back to released builds', async () => {
+    const { saveFullConfig, save, click } = await renderWithConfig({});
+    await click('Install test builds');
+    await save();
+    expect(saveFullConfig.mock.calls[0]?.[0]).toMatchObject({
+      engines: { packages_enabled: true, package_channel: 'candidate' },
+    });
+
+    await click('Install test builds');
+    await save();
+    // The first save did not change the fetched config in this fixture, so
+    // going back to the defaults leaves the section absent again.
+    expect(saveFullConfig.mock.calls[1]?.[0]).not.toHaveProperty('engines');
+  });
+
+  it('keeps a saved choice when other settings are saved', async () => {
+    const { saveFullConfig, save, control } = await renderWithConfig({
+      engines: { packages_enabled: true, package_channel: 'candidate' },
+    });
+    expect(control('Install test builds')?.getAttribute('aria-checked')).toBe('true');
+
+    await save();
+
+    expect(saveFullConfig.mock.calls[0]?.[0]).toMatchObject({
+      engines: { packages_enabled: true, package_channel: 'candidate' },
+    });
+  });
+
+  it('opens the engines on the machines without saving or losing the draft', async () => {
+    const { saveFullConfig, save, control, click } = await renderWithConfig({});
+    await click('Install test builds');
+
+    await click('Engines on your machines');
+    expect(container?.textContent).toContain('Engine actions fixture');
+    expect(container?.querySelector('[role=dialog]')?.getAttribute('aria-label')).toBe('Add-on engines');
+    expect(saveFullConfig).not.toHaveBeenCalled();
+
+    await click('Back to Settings');
+    expect(container?.textContent).not.toContain('Engine actions fixture');
+    expect(control('Install test builds')?.getAttribute('aria-checked')).toBe('true');
+    await save();
+    expect(saveFullConfig.mock.calls[0]?.[0]).toMatchObject({
+      engines: { packages_enabled: true, package_channel: 'candidate' },
+    });
   });
 });

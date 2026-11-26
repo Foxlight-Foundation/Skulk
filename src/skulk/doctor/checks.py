@@ -21,7 +21,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, final
+from typing import TYPE_CHECKING, Literal, cast, final, get_args
 
 from pydantic import ConfigDict
 
@@ -32,6 +32,11 @@ from skulk.shared.types.node_facts import (
     NodeFacts,
 )
 from skulk.utils.pydantic_ext import CamelCaseModel
+
+if TYPE_CHECKING:
+    from skulk.provisioning.engine_install import InstalledEngine
+    from skulk.provisioning.engine_packages import EngineLane
+    from skulk.shared.types.engine_packages import NodeEnginePackage
 
 CheckVerdict = Literal["ok", "degraded", "fail"]
 """Outcome of one doctor check.
@@ -431,6 +436,230 @@ def _fix_comfy_engine(facts: NodeFacts) -> str | None:
 
     root = install_comfy_on_demand(facts, offline=offline_mode())
     return f"provisioned pinned ComfyUI at {root}"
+
+
+# --- add-on engines (engine packages) ---------------------------------------
+
+_ENGINE_PACKAGE_UNFIT = frozenset(
+    {
+        "skulk_version_unsupported",
+        "protocol_unsupported",
+        "adapter_python_unsupported",
+    }
+)
+_ENGINE_PACKAGES_NAMED = 6
+
+
+def _engine_packages_root() -> Path:
+    """Where this node keeps its installed engine packages."""
+    from skulk.provisioning.engine_install import ENGINE_PACKAGES_DIR
+
+    return ENGINE_PACKAGES_DIR
+
+
+def _engine_package_name(package: NodeEnginePackage) -> str:
+    return f"{package.engine_id} ({package.lane})"
+
+
+def _replacement_engine_builds(
+    package: NodeEnginePackage,
+) -> list[InstalledEngine]:
+    """Other builds of one engine on this node's disk that new launches could use.
+
+    Each is checked quickly (names, sizes and executable bits, no hashing),
+    belongs to this engine and accelerator class, and can be run by the Skulk
+    that is running. The build that was in use before comes first, because a
+    person already ran it here; the rest follow, newest package first.
+    """
+    from skulk.engines.inventory import engine_build_fit_refusal
+    from skulk.provisioning.engine_install import (
+        active_engine_generation,
+        installed_engine_generation,
+    )
+    from skulk.provisioning.engine_packages import (
+        EngineLane,
+        EnginePackageRefusedError,
+    )
+
+    if package.lane not in get_args(EngineLane):
+        return []
+    lane = cast("EngineLane", package.lane)
+    root = _engine_packages_root()
+    in_use = active_engine_generation(package.engine_id, lane, root=root)
+    usable: list[InstalledEngine] = []
+    for build in package.installed_builds:
+        if build == in_use:
+            continue
+        try:
+            installed = installed_engine_generation(
+                package.engine_id, lane, build, root=root
+            )
+        except (EnginePackageRefusedError, OSError, ValueError):
+            continue
+        claims = installed.claims
+        if (
+            claims.engine_id == package.engine_id
+            and claims.lane == lane
+            and engine_build_fit_refusal(claims) is None
+        ):
+            usable.append(installed)
+    return sorted(
+        usable,
+        key=lambda installed: (
+            installed.digest != package.rollback_build,
+            -installed.claims.generation,
+            installed.digest,
+        ),
+    )
+
+
+def _engine_package_problem(package: NodeEnginePackage) -> str:
+    """What is wrong with the build new launches would use, in one clause."""
+    reason = package.problem or ""
+    if reason == "installation_damaged":
+        return "the build new launches use has missing or changed files"
+    if reason == "generation_missing":
+        return "the build recorded as the one new launches use is not on disk"
+    if reason in _ENGINE_PACKAGE_UNFIT:
+        return "this Skulk version cannot run the build new launches use"
+    if reason == "backend_tag_ambiguous":
+        return (
+            f"its backend name {package.backend_tag} is reserved or claimed by "
+            "another installed engine"
+        )
+    return f"the build new launches use cannot be used ({reason or 'no reason given'})"
+
+
+def _check_engine_packages(facts: NodeFacts) -> Sequence[CheckResult]:
+    """Every add-on engine this node holds can be used for a new launch.
+
+    Read from the facts snapshot, which compares each engine's files with the
+    record taken at install by name, size and executable bit. Nothing is
+    hashed and no engine is started, so the check is as cheap on a running
+    node's diagnostics as it is from the terminal.
+    """
+    from skulk.shared.backends import (
+        engine_packages_disabled,
+        engine_packages_off_phrase,
+    )
+
+    check_id = "engine-packages"
+    title = "Add-on engines"
+    if engine_packages_disabled():
+        return [
+            _ok(
+                check_id,
+                title,
+                f"turned off ({engine_packages_off_phrase()}); any on this "
+                "node's disk are ignored",
+            )
+        ]
+    held = [package for package in facts.engine_packages if package.status != "offered"]
+    offered = len(facts.engine_packages) - len(held)
+    usable = [package for package in held if package.status == "active"]
+    results: list[CheckResult] = []
+    if usable or not held:
+        named = ", ".join(
+            f"{_engine_package_name(package)} {package.engine_version or ''}".strip()
+            for package in usable[:_ENGINE_PACKAGES_NAMED]
+        )
+        more = len(usable) - _ENGINE_PACKAGES_NAMED
+        detail = (
+            f"usable: {named}" + (f" and {more} more" if more > 0 else "")
+            if usable
+            else "none installed"
+        )
+        if offered:
+            detail += f"; {offered} more can be installed the first time a model needs one"
+        results.append(_ok(check_id, title, detail))
+    for package in held:
+        if package.status != "unusable":
+            continue
+        name = _engine_package_name(package)
+        ambiguous = package.problem == "backend_tag_ambiguous"
+        replacements = [] if ambiguous else _replacement_engine_builds(package)
+        if replacements:
+            best = replacements[0]
+            remediation = (
+                f"`skulk doctor --fix` switches new launches to build "
+                f"{best.digest[:12]} (version {best.claims.engine_version}), which "
+                "is on this node's disk; nothing is deleted and a running model "
+                "keeps its build"
+            )
+        elif ambiguous:
+            remediation = (
+                "remove one of the engines that claim the name, from the "
+                "dashboard (Settings, Add-on engines, Engines on your machines) "
+                "or with `skulk engines remove <engine id>`"
+            )
+        else:
+            remediation = (
+                "remove it from the dashboard (Settings, Add-on engines, Engines "
+                f"on your machines) or with `skulk engines remove {package.engine_id} "
+                f"--lane {package.lane}`; this node installs the engine again the "
+                "first time a model placed here needs it, if a build this Skulk "
+                "version can run is published"
+            )
+        results.append(
+            CheckResult(
+                check_id=check_id,
+                title=f"Add-on engine: {name}",
+                verdict="degraded",
+                detail=f"{name}: {_engine_package_problem(package)}",
+                consequence=(
+                    "this node does not offer the engine, so a model that can "
+                    "only run on it is not placed here; the built-in engines "
+                    "are unaffected"
+                ),
+                remediation=remediation,
+                fix_available=bool(replacements),
+            )
+        )
+    return results
+
+
+def _fix_engine_packages(facts: NodeFacts) -> str | None:
+    """Switch new launches to another intact build of an engine that cannot be used.
+
+    Only which build new launches use is changed, the same change a person
+    makes with "Use this build". Nothing is deleted: only the running node
+    knows which build a model is using, so removal stays with it. A candidate
+    is hashed in full before it is activated, and one that fails is passed
+    over for the next.
+    """
+    from skulk.provisioning.engine_install import activate_engine_generation
+    from skulk.provisioning.engine_packages import EnginePackageRefusedError
+    from skulk.shared.backends import engine_packages_disabled
+
+    if engine_packages_disabled():
+        return None
+    root = _engine_packages_root()
+    done: list[str] = []
+    for package in facts.engine_packages:
+        if package.status != "unusable" or package.problem == "backend_tag_ambiguous":
+            continue
+        candidates = _replacement_engine_builds(package)
+        if not candidates:
+            continue
+        name = _engine_package_name(package)
+        for candidate in candidates:
+            try:
+                activate_engine_generation(
+                    candidate.claims.engine_id,
+                    candidate.claims.lane,
+                    candidate.digest,
+                    root=root,
+                )
+            except EnginePackageRefusedError:
+                continue
+            done.append(
+                f"{name}: new launches now use build {candidate.digest[:12]} "
+                f"(version {candidate.claims.engine_version})"
+            )
+            break
+        else:
+            done.append(f"{name}: no other build on disk passed a full check")
+    return "; ".join(done) or None
 
 
 # --- capability conflicts --------------------------------------------------
@@ -1083,6 +1312,30 @@ REGISTRY: tuple[DoctorCheck, ...] = (
         ),
         run=_check_comfy_engine,
         fix=_fix_comfy_engine,
+    ),
+    DoctorCheck(
+        check_id="engine-packages",
+        title="Add-on engines",
+        docs=(
+            "Verifies every add-on engine this node holds can be used for a new "
+            "launch. An add-on engine is installed separately from Skulk, on the "
+            "machine that needs it. One is reported when its files are missing "
+            "or changed, when this Skulk version can no longer run it, or when "
+            "two installed engines claim the same backend name. The node does "
+            "not offer such an engine, so a model that can only run on it is not "
+            "placed there; the built-in engines are unaffected. Files are "
+            "compared by name, size and executable bit, never hashed, so the "
+            "check stays fast. `--fix` switches new launches to another intact "
+            "build of the same engine that is already on the node's disk, the "
+            "earlier one first; it deletes nothing, because only the running "
+            "node knows which build a model is using. With no other build to "
+            "switch to, remove the engine from the dashboard or with `skulk "
+            "engines remove`, and the node installs it again when a model needs "
+            "it. A node with no add-on engine, or with add-on engines turned "
+            "off, passes."
+        ),
+        run=_check_engine_packages,
+        fix=_fix_engine_packages,
     ),
     DoctorCheck(
         check_id="capability-conflicts",

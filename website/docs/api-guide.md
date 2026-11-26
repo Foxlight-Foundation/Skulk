@@ -176,6 +176,10 @@ The Ollama group also serves alias paths (`/ollama/api/api/...`,
 - `GET /instance/{instance_id}`
 - `DELETE /instance/{instance_id}`
 - `GET /state`
+- `GET /v1/engines`
+- `POST /v1/engines/{engine_id}/activate`
+- `POST /v1/engines/{engine_id}/rollback`
+- `POST /v1/engines/{engine_id}/remove`
 - `GET /events`
 - `POST /download/start`
 - `DELETE /download/{node_id}/{model_id}`
@@ -2736,6 +2740,228 @@ Steward's `assess_inference` tool reads this same contract with bounded details
 and explicit coverage. Model selection displays this assessment; the coarse
 discovery Burst chip remains only a browsing hint.
 
+### Engine order for a model
+
+Several engines can often run the same model. Placement ranks them by the
+first of these that has an answer for a node:
+
+1. the order a person set for that model, described here;
+2. the model card's default order (`placement.backend_preference`);
+3. the built-in fallback: built-in engines first, installed engine packages
+   after them.
+
+An order is a list of backend tags, most preferred first. Each entry is an
+engine name, optionally followed by its hardware, such as
+`llama_server-vulkan`; an engine name on its own accepts whichever hardware a
+node has. An order only ranks. Entries a node does not have are skipped, and
+where a person's order names nothing a node has, the card's default decides
+for that node. An order therefore never makes a model impossible to launch.
+
+An order is set only by these routes. Launching a model, on any engine, never
+sets one. It is kept by model name rather than on the model card, shared with
+every node, and saved on each node so it survives a restart. It takes effect
+at the next launch; running instances are not moved.
+
+**GET** `/models/engine-orders`
+
+Returns `orders`, one entry per model that has an order of its own, sorted by
+model name. Each entry has `modelId`, `engineOrder` and `cardEngineOrder` (the
+card's default order, empty when the card has none or the model is no longer
+in the catalog).
+
+**PUT** `/models/engine-order`
+
+| Field | Required | Behavior |
+|---|---|---|
+| `modelId` | Yes | Exact model name in the catalog, 1 to 512 characters. An unknown name returns 404. |
+| `engineOrder` | Yes | 1 to 16 distinct backend tags, most preferred first. A malformed list returns 422. |
+
+```bash
+curl -X PUT http://localhost:52415/models/engine-order \
+  -H 'Content-Type: application/json' \
+  -d '{"modelId": "organization/model", "engineOrder": ["llama_server-vulkan", "llama_cpp-vulkan"]}'
+```
+
+The new order replaces any earlier one for the model. The response is the
+model's entry as the cluster now holds it. The cluster keeps an order for at
+most 512 models; a further model returns 409 until one is cleared. If the
+change is sent but the cluster does not confirm it within ten seconds, the
+route returns 503: read `/models/engine-orders` to see what is in force before
+trying again.
+
+**DELETE** `/models/engine-order`
+
+| Parameter | Required | Behavior |
+|---|---|---|
+| `model_id` | Yes | Model name, 1 to 512 characters. It need not be in the catalog, so an order left by a removed model can be cleared. |
+
+```bash
+curl -X DELETE --get http://localhost:52415/models/engine-order \
+  --data-urlencode 'model_id=organization/model'
+```
+
+Clears the model's order, so its card's default decides again. Clearing a
+model that has no order succeeds. The response is the model's entry with a
+null `engineOrder`. An unconfirmed change returns 503, as for the PUT.
+
+### Engine packages across the cluster
+
+**GET** `/v1/engines`
+
+Lists every engine package a node holds or may install, grouped by engine ID.
+An engine package adds an engine that is not built into Skulk; built-in
+engines are not listed here and appear in each node's resources in `/state`.
+
+The route is read-only. It is assembled from what each node last advertised
+about itself, so it reads no disk, starts nothing and installs nothing. A node
+that stops reporting drops out of the list.
+
+```bash
+curl http://localhost:52415/v1/engines
+```
+
+| Field | Meaning |
+|---|---|
+| `packagesEnabled` | Whether engine packages are turned on for the node that answered. A node on which they are turned off reports none. |
+| `engines[].engineId` | The `publisher.engine` identity, such as `foxlight.tensorfold`. |
+| `engines[].name` | The engine's name in backend tags and engine orders, such as `tensorfold`. |
+| `engines[].nodes[]` | One entry per node and lane, sorted by node then lane. Each has `nodeId` and `package`. |
+
+Each `package` describes one lane (one engine on one accelerator class) on one
+node:
+
+| Field | Meaning |
+|---|---|
+| `lane` | `metal`, `cuda`, `rocm`, `vulkan` or `cpu`. |
+| `backendTag` | The backend tag placements are stamped with, such as `tensorfold-rocm`. |
+| `status` | `active`: the node holds a usable build and new launches use it. `unusable`: the node holds a build it cannot offer; `problem` says why. `offered`: the node holds none and may install this build the first time a model placed there needs it. |
+| `build` | Manifest digest of the active or offered build. This is the build identity stamped on a placement. Null when the node cannot tell which build is active. |
+| `engineVersion`, `generation` | Version of the engine inside the build, and the package generation. |
+| `publisher` | Trust ID of the publisher that signed the active build. Null for an offered or unusable build. |
+| `channel` | `stable` or `candidate` for an offered build. Null for a held build. |
+| `installedBuilds` | Manifest digests of every build of the lane on the node's disk, at most 16. |
+| `rollbackBuild` | The build a rollback would return to, or null when none is kept. |
+| `problem` | For an unusable build, a short refusal code such as `installation_damaged` or `skulk_version_unsupported`. |
+| `downloadBytes` | For an offered build, the bytes an install downloads. |
+| `overheadBytes` | Memory the build declares beyond a model's weight bytes, which admission counts for a launch. |
+| `loadResults` | How the last model load on each build of the lane ended on this node since it started, newest first, at most 16. Empty until a model is loaded there. |
+| `unsupportedModels` | Models a build of the lane refused to load with the code `unsupported_model` since the node started, newest first, at most 32. Each entry has the shape of a `loadResults` entry. |
+
+Each entry of `loadResults`:
+
+| Field | Meaning |
+|---|---|
+| `build` | Manifest digest of the build that was loaded. |
+| `outcome` | `loaded`: the model became ready. `refused`: the engine answered the load with a typed refusal, named in `code`. `failed`: the runner ended while loading for another reason; the node's log holds it. |
+| `code` | The engine's refusal code, such as `load_refused` or `settings_changed`. Null unless `outcome` is `refused`. |
+| `modelId` | The model that was loaded. |
+| `atUnixMs` | When the load ended, by the node's own clock. |
+
+A load result is evidence about one build and one model. It is kept in the
+node's memory, so a restart clears it, and it never changes where a model may
+be placed.
+
+`unsupportedModels` does change placement. A build listed there for a model is
+not given that model again, on any node that holds or could install the same
+build: a launch, a repair or a preview uses the next engine in the model's
+order. An entry leaves when the node restarts, when the build leaves the node,
+or when the build later loads the model.
+
+When an engine refuses a load, Skulk places the model again on the next engine
+that can run it, on the same machine when it has one. The instance that was
+refused is deleted with a `placement_failed` record in `/state`
+`instanceFailures` that names the engine's code, and the model comes up under
+a new instance ID. A client that follows an instance ID should read that
+record and then find the model's new instance.
+
+An `active` status says the node holds an intact build that this Skulk version
+can run. It does not promise that a given model loads on it; only a launch
+answers that. With no engine package anywhere in the cluster, `engines` is
+empty.
+
+### Change an engine package on a node
+
+Three routes change a package a node already holds. Each names the engine in
+the path and the node and accelerator class in a JSON body, takes effect on
+that node only, and answers with the lane as the node reports it straight
+after the change. Through the operator gateway they need the
+`operations:write` scope.
+
+None of them downloads anything, starts an engine or touches a model that is
+running: a running model keeps the build it started on until it stops. Model
+files are never touched.
+
+**POST** `/v1/engines/{engine_id}/activate`
+
+Makes one build that is already on the node's disk the build new launches
+there use. The build is hashed in full first. The build that was active
+becomes the one a rollback returns to.
+
+```bash
+curl -X POST http://localhost:52415/v1/engines/foxlight.tensorfold/activate \
+  -H 'Content-Type: application/json' \
+  -d '{"nodeId": "<node id>", "lane": "rocm", "build": "<manifest digest>"}'
+```
+
+**POST** `/v1/engines/{engine_id}/rollback`
+
+Makes the build that was active before the current one the build new launches
+use again. The two swap places, so a second rollback undoes the first. The
+body has `nodeId` and `lane`.
+
+**POST** `/v1/engines/{engine_id}/remove`
+
+Deletes one build from the node's disk when the body names a `build`, or every
+build of the package when it does not. The build new launches use cannot be
+removed alone. After the whole package is removed the node may offer it again,
+and installs it again the first time a model placed there needs it; to keep an
+engine from being used, change the model's engine order or turn engine
+packages off in Settings.
+
+| Body field | Meaning |
+|---|---|
+| `nodeId` | The node whose package is changed, as `GET /v1/engines` names it. |
+| `lane` | `metal`, `cuda`, `rocm`, `vulkan` or `cpu`. |
+| `build` | Manifest digest of a build on the node's disk. Required to activate, optional to remove, not used to roll back. |
+
+The answer has `nodeId`, `engineId`, `lane`, `action` and `package`, which is
+the lane in the same shape `GET /v1/engines` gives, or null when the node no
+longer holds or is offered the package.
+
+| Status | When |
+|---|---|
+| 404 | The node reports no installed package for that engine and lane, the build is not on its disk, there is no earlier build to return to, or the node has left the cluster. |
+| 409 | The build's files are not intact; the node's Skulk version cannot run the build; the build is the active one and was asked to be removed alone; a model on the node is running on a build that would be deleted; or engine packages are turned off on the node. Nothing was changed. |
+| 500 | The node did not confirm the change. Read `GET /v1/engines` to see what it holds now. |
+| 503 | The change was sent and the node did not answer in time. Read `GET /v1/engines` before trying again. |
+
+The same four routes are available from a terminal on any machine that runs a
+Skulk node. Each command asks the node on that machine, which passes a change
+on to the node that holds the package:
+
+```bash
+skulk engines list
+skulk engines activate foxlight.tensorfold <manifest digest> --node <node id> --lane rocm
+skulk engines rollback foxlight.tensorfold
+skulk engines remove foxlight.tensorfold <manifest digest>
+skulk engines remove foxlight.tensorfold
+```
+
+Without `--node` the node on this machine is meant. Without `--lane` the
+node's only package for the engine is meant; a node that holds the engine for
+more than one accelerator class must be told which. `list --json` prints the
+report as JSON, and `--api-port` names the local node's port when it is not
+52415. A command exits 0 when it did what was asked and 1 when the node
+refused or did not answer.
+
+The dashboard reads the same report and makes the same changes under Settings,
+in the Add-on engines section, behind "Engines on your machines". It lists each
+engine, the machines that hold it or are offered it, and the builds on each
+machine's disk. "Use this build" activates a build, including the earlier one,
+and "Remove" deletes one build or the whole engine from a machine after a
+second click. A change there is sent at once; it is not part of the Settings
+draft and needs no Save.
+
 ### Read model capacity requirements
 
 **GET** `/models/requirements`
@@ -3104,6 +3330,7 @@ curl -X POST http://localhost:52415/place_instance \
 | `min_nodes` | Minimum nodes required for the placement |
 | `context_tokens` | Optional context window for this placement, 256 to 1,048,576 tokens. The placer honors it exactly up to the largest window the chosen nodes hold (the preview's `max_context_tokens`) and answers **400** naming that maximum for a larger request; it is never silently lowered. Repair re-placements of the instance keep the same request. When omitted, llama-server, in-process llama.cpp and vLLM placements take the fleet default `inference.served_context_tokens` (32768 unless changed in Settings), because those engines reserve the whole window's KV memory at load; MLX placements keep the full memory fit, since MLX grows its cache per request. |
 | `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected (exclusion is per-placement, not cluster-wide), and automatic repair re-placements of this instance (memory refusal, download failure) keep honoring the same exclusions. Default: `[]`. Note: node IDs are per-session, so they change when a cluster session restarts. |
+| `engine_order` | Optional. Engines to try for this launch only: 1 to 16 backend tags, most preferred first, such as `llama_server-vulkan`. They are consulted ahead of the model's person-set engine order (see [Engine order for a model](#engine-order-for-a-model)) and the card's default. This sets no standing order; it is how a person tries an engine before settling on one. Automatic repair re-placements of the instance keep the same order. An order only ranks: a launch that cannot run on any listed engine starts on the next engine in line (the model's order, the card's default, then the built-in fallback), and the response's `engine_pick` reports it (`asked`, the planned `engines`, and `used`, which is `false` when another engine is used and `null` when the plan does not name its engine yet). A launch brought back after every node restarted, and one made by an approved Steward proposal, follow the standing order instead. |
 
 The placement is validated against the current cluster state **before** the
 command is forwarded, so an impossible placement fails at the API instead of
@@ -3250,6 +3477,36 @@ pending or running in `GET /state` `tasks`, carrying the same
 `approximateDownloadBytes`; a failed install fails the instance
 with `engine_install_failed` in `instanceFailures`, and the message names the
 step that failed (the download, the disk-space check, or the GPU check).
+
+An engine package a node does not hold but can install is announced the same
+way. `engine` is then the package's engine name (for example `tensorfold`),
+and `approximate_download_bytes` is read from the answering node's own copy of
+the engine store's package list, so it is `0` when that node does not list the build.
+The node advertises the package's backend tag in `onDemandBackends` and the
+exact build in `installableEngineBuilds`; the placement is stamped with that
+build, and the worker installs and activates exactly that build before the
+model loads. The `InstallEngine` task's `engine` is the package's engine name
+and its `approximateDownloadBytes` is `0`. A node that is offline, has engine
+installs turned off (`SKULK_NO_ENGINE_AUTOPROVISION=1`), does not run models,
+or has engine packages turned off offers no package this way.
+
+Two cluster settings in the `engines` section of `GET /config` and
+`PUT /config` govern engine packages. They are settings and not launch
+switches, so they work the same in a packaged Skulk, and a node applies a
+change within about a minute, without a restart. The dashboard edits both
+under Settings, in the section named Add-on engines: "Use add-on engines" is
+`packages_enabled`, and "Install test builds" switches `package_channel`
+between `stable` and `candidate`.
+
+- `engines.package_channel`: `stable` (the default) installs released builds
+  only; `candidate` makes every node also install builds that are still being
+  tested. A package a node already holds is never replaced by this setting.
+- `engines.packages_enabled`: `true` by default. Set to `false`, every node
+  ignores the engine packages it holds: it offers none, installs none and
+  loads no model on one. Packages on disk stay there and come back when it is
+  turned on again. A model already running on a packaged engine keeps running
+  until it is stopped. `SKULK_ENGINE_PACKAGES_DISABLE=1` at launch turns
+  packages off on that one node, whatever the setting says.
 
 A compatible Comfy renderer update can also be prepared through this flow while
 the base engine is already installed. The notice then quotes the small published

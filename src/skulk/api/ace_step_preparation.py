@@ -281,6 +281,7 @@ class AceStepMountPreparer:
                         fresh,
                         self.state().instances,
                         now_unix_ms=int(self.wall_clock() * 1000),
+                        package_needs=self.state().engine_package_needs,
                     )
                 except ValueError as error:
                     errors.append(str(error))

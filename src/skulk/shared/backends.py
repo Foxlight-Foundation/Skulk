@@ -28,6 +28,8 @@ written against the original ``{"mlx"}`` vocabulary keep matching unchanged.
 from __future__ import annotations
 
 import os
+import re
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import AbstractSet, Final, Literal
@@ -208,6 +210,165 @@ ENGINE_UNAVAILABLE_FAILURE_MARKER: Final = "engine-not-installed"
 """Marks a runner that started without its on-demand engine installed. The
 worker gives the instance up instead of relaunching into the same gap."""
 
+ENGINE_UNKNOWN_FAILURE_MARKER: Final = "engine-unknown"
+"""Marks a runner whose placement names an engine this build does not have.
+The worker gives the instance up at once: relaunching cannot make this node
+learn an engine."""
+
+
+ENGINE_PACKAGES_DISABLE_ENV: Final = "SKULK_ENGINE_PACKAGES_DISABLE"
+"""Set to ``1`` to make one node ignore installed engine packages entirely.
+
+The node then reads no package from disk, offers no package backend, runs no
+package and installs none: it behaves as a build without engine packages.
+Packages already on disk are left where they are and come back when the
+variable is cleared. The cluster setting ``engines.packages_enabled`` does the
+same for every node and is the lever a packaged Skulk has, since a person
+cannot change its launch environment."""
+
+EnginePackagesOffSource = Literal["launch", "settings"]
+"""What turned engine packages off on this node."""
+
+_settings_lock: Final = threading.Lock()
+_settings_answer: tuple[tuple[str, int, int, int] | None, bool] | None = None
+"""The saved settings file as last seen (path, inode, change time, size) and
+whether it turned packages off. Reading the answer again costs one ``stat``
+until the file changes."""
+
+
+def _engine_packages_off_in_settings() -> bool:
+    """Whether the node's saved settings turn engine packages off.
+
+    Settings that cannot be read keep the last answer this process read from
+    the same file, and packages stay on when it never read one: a damaged
+    file is reported loudly elsewhere and must not also take a node's engines
+    away.
+    """
+    import yaml
+    from pydantic import ValidationError
+
+    from skulk.store.config import (
+        engine_packages_enabled,
+        load_skulk_config,
+        resolve_config_path,
+    )
+
+    global _settings_answer
+    path = resolve_config_path()
+    try:
+        status = path.stat()
+        seen = (str(path.resolve()), status.st_ino, status.st_mtime_ns, status.st_size)
+    except OSError:
+        seen = None
+    with _settings_lock:
+        known = _settings_answer
+        if known is not None and known[0] == seen:
+            return known[1]
+        if seen is None:
+            off = False
+        else:
+            try:
+                off = not engine_packages_enabled(load_skulk_config(path))
+            except (ValidationError, yaml.YAMLError, OSError):
+                # The last answer counts only for this same settings file.
+                same_file = (
+                    known is not None
+                    and known[0] is not None
+                    and known[0][0] == seen[0]
+                )
+                off = known[1] if known is not None and same_file else False
+        _settings_answer = (seen, off)
+        return off
+
+
+def engine_packages_off_source() -> EnginePackagesOffSource | None:
+    """What turned engine packages off for this process, or ``None`` when on.
+
+    Read on every call, so a runner process started by a worker gives the
+    same answer as the worker that started it, and a change made in Settings
+    is seen without a restart.
+    """
+    if os.environ.get(ENGINE_PACKAGES_DISABLE_ENV, "").strip() == "1":
+        return "launch"
+    if _engine_packages_off_in_settings():
+        return "settings"
+    return None
+
+
+def engine_packages_disabled() -> bool:
+    """Whether this process must ignore installed engine packages."""
+    return engine_packages_off_source() is not None
+
+
+def engine_packages_off_phrase() -> str:
+    """How to say where packages were turned off, for a refusal message."""
+    if engine_packages_off_source() == "settings":
+        return "turned off in Settings"
+    return f"{ENGINE_PACKAGES_DISABLE_ENV}=1"
+
+
+ENGINE_LOAD_REFUSED_FAILURE_MARKER: Final = "engine-load-refused"
+"""Marks a runner whose engine package refused to load its model. The refusal
+is the engine's answer for this build and checkpoint, so the worker does not
+relaunch it: loading again on the same node and build repeats it. It reports
+the refusal and the master places the model on the next engine. The node
+stays eligible for other models."""
+
+
+def engine_load_refusal(code: str, reason: str) -> str:
+    """The runner failure message for a load an engine package refused.
+
+    The typed ``code`` is kept in a form the worker can read back; the
+    engine's own ``reason`` follows for the node's log. Only the code reaches
+    replicated state.
+    """
+    return f"{ENGINE_LOAD_REFUSED_FAILURE_MARKER}[{code}]: {reason[:1024]}"
+
+
+def engine_load_refusal_code(failure_message: str) -> str | None:
+    """Read the typed code back out of a load-refusal failure message."""
+    found = re.search(
+        rf"{re.escape(ENGINE_LOAD_REFUSED_FAILURE_MARKER)}\[([a-z_]{{1,64}})\]",
+        failure_message,
+    )
+    return None if found is None else found.group(1)
+
+
+def unknown_engine_refusal(resolved_backend: str | None) -> str | None:
+    """Explain why a stamped backend cannot run here, or return ``None``.
+
+    A placement stamps the exact backend its shard must run on. When that
+    backend names an engine this build does not implement, nothing here can
+    serve it. Before this check such a shard reached the default runner and
+    was loaded as an MLX model, which serves the wrong engine without saying
+    so.
+
+    A shard with no stamped backend is a different case: it is resolved from
+    this node's own probe, as before, and is not refused here.
+
+    Args:
+        resolved_backend: The backend tag stamped on the shard, if any.
+
+    Returns:
+        A failure message starting with ``ENGINE_UNKNOWN_FAILURE_MARKER``
+        when the stamped backend's engine is unknown, otherwise ``None``.
+    """
+    if resolved_backend is None or engine_of(resolved_backend) is not None:
+        return None
+    # The tag arrived over the wire: bound what a log or failure record repeats.
+    shown = resolved_backend[:64]
+    if engine_packages_disabled():
+        return (
+            f"{ENGINE_UNKNOWN_FAILURE_MARKER}: this node has no engine for "
+            f"backend {shown!r}; it is not built into this Skulk build and "
+            f"engine packages are turned off here ({engine_packages_off_phrase()})"
+        )
+    return (
+        f"{ENGINE_UNKNOWN_FAILURE_MARKER}: this node has no engine for backend "
+        f"{shown!r}; it is not built into this Skulk build and no installed "
+        "engine package offers it"
+    )
+
 # audio.cpp is absent from the base environment. Only a verified installed
 # executable is eligible for placement; the on-demand package preparation path
 # sets this variable after it has checked the immutable wheel and binary.
@@ -319,6 +480,50 @@ def engine_of(tag: str) -> EngineType | None:
         if tag == engine or tag.startswith(f"{engine}{_TAG_SEPARATOR}"):
             return engine
     return None
+
+
+_PACKAGE_ENGINE_NAME: Final = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
+
+
+def package_engine_of(tag: str) -> str | None:
+    """Return the engine name of a tag shaped like an engine package's, else ``None``.
+
+    Engine packages add engines this build has no name for. Their tags keep
+    the built-in shape: ``<engine>`` or ``<engine>-<compute>``, where the
+    engine name uses lowercase letters, digits and underscores. A tag that
+    names a built-in engine is never a package tag, and neither is a compute
+    name on its own or a string of any other shape. Whether a node actually holds such a package is a
+    separate question, answered by the node's own inventory.
+    """
+    if engine_of(tag) is not None:
+        return None
+    name = tag
+    for compute in _COMPUTE_BACKENDS:
+        suffix = f"{_TAG_SEPARATOR}{compute}"
+        if tag.endswith(suffix):
+            name = tag[: -len(suffix)]
+            break
+    # A compute name alone is never an engine: ``cuda`` is not a package.
+    if name in _COMPUTE_BACKENDS or _PACKAGE_ENGINE_NAME.fullmatch(name) is None:
+        return None
+    return name
+
+
+def memory_settings_key(tag: str) -> str:
+    """Key of a backend's entry in a node's advertised engine memory settings.
+
+    A built-in engine has one entry for all its compute lanes, keyed by the
+    engine name. An engine package has one per backend tag, because each lane
+    is a separate signed build that declares its own memory need.
+    """
+    if package_engine_of(tag) is not None:
+        return tag
+    return tag.split(_TAG_SEPARATOR, 1)[0]
+
+
+def _engine_name_of(tag: str) -> str | None:
+    """The engine a tag selects, built in or packaged."""
+    return engine_of(tag) or package_engine_of(tag)
 
 
 # The hardware an engine needs, in an operator's words, for engines whose
@@ -664,6 +869,9 @@ def expand_engine_backends(compatible_backends: AbstractSet[str]) -> frozenset[s
                 for compute in _COMPUTE_BACKENDS
                 if (lane := f"{tag}-{compute}") not in _EMBEDDING_ONLY_LANES
             )
+        elif package_engine_of(tag) == tag:
+            # A bare package engine name accepts whichever lane a node holds.
+            expanded.update(f"{tag}-{compute}" for compute in _COMPUTE_BACKENDS)
     return frozenset(expanded)
 
 
@@ -677,8 +885,9 @@ def resolve_node_backend(
     Intersects the card's ``compatible_backends`` (hard filter) with the node's
     advertised ``node_backends``, orders the result by ``backend_preference``
     (preferred tags first, then the rest deterministically), and returns the top
-    tag (e.g. ``"llama_cpp-vulkan"``). Returns ``None`` when the node advertises
-    none of the model's compatible backends. This is the single point that turns
+    tag (e.g. ``"llama_cpp-vulkan"``). With no preference that applies, a
+    built-in engine is chosen ahead of an installed engine package. Returns
+    ``None`` when the node advertises none of the model's compatible backends. This is the single point that turns
     the backend-tag vocabulary into a concrete choice; both the master (to stamp
     ``resolved_backend`` on a shard at placement, #330) and the worker (to pick a
     runner) go through it so the two cannot disagree.
@@ -689,8 +898,10 @@ def resolve_node_backend(
     intersection = frozenset(
         tag
         for tag in intersection
-        if engine_of(tag) != tag
-        or not any(engine_of(other) == tag and other != tag for other in intersection)
+        if _engine_name_of(tag) != tag
+        or not any(
+            _engine_name_of(other) == tag and other != tag for other in intersection
+        )
     )
     if not intersection:
         return None
@@ -699,7 +910,10 @@ def resolve_node_backend(
         for preference in backend_preference
         for tag in sorted(intersection, key=lambda item: (item.endswith("-cpu"), item))
         if tag == preference
-        or (engine_of(preference) == preference and engine_of(tag) == preference)
+        or (
+            _engine_name_of(preference) == preference
+            and _engine_name_of(tag) == preference
+        )
     ]
     # Fallback for tags outside the card's preference list: deterministic, but
     # never let a CPU compute tag beat a GPU tag on alphabetical accident --
@@ -707,10 +921,21 @@ def resolve_node_backend(
     # without an explicit llama_server preference would otherwise resolve
     # ``llama_server-cpu`` over ``llama_server-vulkan`` and run ``-ngl 0`` on a
     # GPU-admitted node. Platform default, not card policy.
+    #
+    # An installed engine package ranks after every built-in engine here, CPU
+    # ones included. Nothing has chosen it: a package is used when a
+    # preference names it or when it is the only compatible engine the node
+    # has, so installing one never moves a model that was already served by a
+    # built-in engine. Without a package tag the order is what it always was.
     ordered += [
         tag
         for tag in sorted(
-            intersection, key=lambda tag: (tag.endswith(f"{_TAG_SEPARATOR}cpu"), tag)
+            intersection,
+            key=lambda tag: (
+                package_engine_of(tag) is not None,
+                tag.endswith(f"{_TAG_SEPARATOR}cpu"),
+                tag,
+            ),
         )
         if tag not in ordered
     ]

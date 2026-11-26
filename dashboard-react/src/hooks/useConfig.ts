@@ -17,6 +17,7 @@ export type {
   ExperimentsConfig,
   IntelligentFabricConfig,
   RestartRecoveryConfig,
+  EnginesConfig,
   ModelTrustConfig,
   FullConfig,
   EffectiveConfig,

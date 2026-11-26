@@ -8,6 +8,7 @@ resolution, and the thin ``probe_node_backends`` delegation.
 """
 
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -15,16 +16,22 @@ import skulk.facts
 from skulk.facts.derive import BackendDerivation
 from skulk.shared.backends import (
     ACE_STEP_COMPUTE_BACKENDS,
+    ENGINE_PACKAGES_DISABLE_ENV,
+    ENGINE_UNKNOWN_FAILURE_MARKER,
     backend_hardware_present,
     describe_backend_hardware,
     engine_of,
+    engine_packages_disabled,
+    engine_packages_off_source,
     engine_supports_multi_node,
     expand_engine_backends,
     make_backend_tag,
+    package_engine_of,
     platform_compatible_backends,
     probe_node_backends,
     resolve_node_backend,
     resolve_node_engine,
+    unknown_engine_refusal,
 )
 
 
@@ -459,3 +466,250 @@ def test_platform_compatible_backends_gates_new_families_off_in_process_llama_cp
     assert (
         platform_compatible_backends(declared, card_serves_vision=False) == declared
     )
+
+
+@pytest.mark.parametrize(
+    "tag", ["tensorfold-rocm", "tensorfold", "bogus-cuda", "cuda", "", "MLX-metal"]
+)
+def test_a_stamped_backend_of_an_unknown_engine_is_refused(tag: str) -> None:
+    refusal = unknown_engine_refusal(tag)
+
+    assert refusal is not None
+    assert refusal.startswith(f"{ENGINE_UNKNOWN_FAILURE_MARKER}: ")
+    assert repr(tag) in refusal
+
+
+@pytest.mark.parametrize(
+    "tag", [None, "mlx", "mlx-metal", "llama_server-vulkan", "vllm-cuda", "demucs-cpu"]
+)
+def test_a_known_or_unstamped_backend_is_not_refused(tag: str | None) -> None:
+    # No stamped backend means the node resolves the engine from its own
+    # probe, which is a separate path and not a refusal.
+    assert unknown_engine_refusal(tag) is None
+
+
+def _order_before_packages(
+    compatible: frozenset[str], preference: tuple[str, ...], node: frozenset[str]
+) -> str | None:
+    """The choice made before engine packages existed, for sets without one."""
+    usable = expand_engine_backends(compatible) & node
+    usable = frozenset(
+        tag
+        for tag in usable
+        if "-" in tag or not any(other.startswith(f"{tag}-") for other in usable)
+    )
+    if not usable:
+        return None
+    by_spelling = sorted(usable, key=lambda tag: (tag.endswith("-cpu"), tag))
+    for wanted in preference:
+        for tag in by_spelling:
+            if tag == wanted or ("-" not in wanted and tag.startswith(f"{wanted}-")):
+                return tag
+    return by_spelling[0]
+
+
+@pytest.mark.parametrize(
+    ("node", "expected"),
+    [
+        # Spelling alone would pick the package ahead of vLLM.
+        (frozenset({"vllm-cuda", "tensorfold-cuda"}), "vllm-cuda"),
+        (frozenset({"llama_server-vulkan", "tensorfold-rocm"}), "llama_server-vulkan"),
+        # A built-in CPU engine is what served the model before the package came.
+        (frozenset({"llama_cpp-cpu", "tensorfold-rocm"}), "llama_cpp-cpu"),
+        # The only compatible engine the node has is still used.
+        (frozenset({"tensorfold-rocm"}), "tensorfold-rocm"),
+        (frozenset({"tensorfold-cpu", "tensorfold-rocm"}), "tensorfold-rocm"),
+    ],
+)
+def test_with_no_preference_a_built_in_engine_is_chosen_before_a_package(
+    node: frozenset[str], expected: str
+) -> None:
+    compatible = frozenset({"vllm", "llama_server", "llama_cpp", "tensorfold"})
+
+    assert resolve_node_backend(compatible, (), node) == expected
+
+
+@pytest.mark.parametrize("preference", [("tensorfold-rocm",), ("tensorfold",)])
+def test_a_preference_that_names_a_package_chooses_it(
+    preference: tuple[str, ...],
+) -> None:
+    compatible = frozenset({"llama_server", "tensorfold"})
+    node = frozenset({"llama_server-vulkan", "tensorfold-rocm"})
+
+    assert resolve_node_backend(compatible, preference, node) == "tensorfold-rocm"
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        frozenset({"mlx", "mlx-metal"}),
+        frozenset({"llama_cpp", "llama_cpp-cpu", "llama_cpp-vulkan", "llama_cpp-rocm"}),
+        frozenset({"llama_server", "llama_server-cpu", "llama_server-cuda", "vllm", "vllm-cuda"}),
+        frozenset({"llama_cpp-cpu", "llama_server-vulkan"}),
+        frozenset({"vllm-rocm", "llama_server-rocm", "llama_cpp-vulkan"}),
+        frozenset[str](),
+    ],
+)
+@pytest.mark.parametrize(
+    "preference",
+    [(), ("llama_server-vulkan", "llama_cpp-rocm"), ("vllm",), ("llama_cpp",)],
+)
+def test_without_a_package_the_choice_is_what_it_was(
+    node: frozenset[str], preference: tuple[str, ...]
+) -> None:
+    compatible = frozenset({"mlx", "llama_cpp", "llama_server", "vllm"})
+
+    assert resolve_node_backend(compatible, preference, node) == _order_before_packages(
+        compatible, preference, node
+    )
+
+
+def test_the_packages_switch_is_off_unless_set_to_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(ENGINE_PACKAGES_DISABLE_ENV, raising=False)
+    assert not engine_packages_disabled()
+    for value in ("", "0", "true", "yes"):
+        monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, value)
+        assert not engine_packages_disabled()
+    for value in ("1", " 1 "):
+        monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, value)
+        assert engine_packages_disabled()
+
+
+def _save_settings(directory: Path, text: str) -> None:
+    _ = (directory / "skulk.yaml").write_text(text)
+
+
+def test_settings_turn_packages_off_and_on_without_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A packaged Skulk has no launch environment a person can change, so the
+    # off lever must also be a setting, and a change must not need a restart.
+    monkeypatch.delenv(ENGINE_PACKAGES_DISABLE_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert engine_packages_off_source() is None
+
+    _save_settings(tmp_path, "engines:\n  packages_enabled: false\n")
+    assert engine_packages_off_source() == "settings"
+    assert engine_packages_disabled()
+    refusal = unknown_engine_refusal("tensorfold-rocm")
+    assert refusal is not None and "turned off in Settings" in refusal
+
+    _save_settings(tmp_path, "engines:\n  packages_enabled: true\n")
+    assert not engine_packages_disabled()
+
+    _save_settings(tmp_path, "engines:\n  package_channel: candidate\n")
+    assert not engine_packages_disabled()
+
+    (tmp_path / "skulk.yaml").unlink()
+    assert not engine_packages_disabled()
+
+
+def test_the_launch_switch_turns_packages_off_whatever_settings_say(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _save_settings(tmp_path, "engines:\n  packages_enabled: true\n")
+    monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, "1")
+
+    assert engine_packages_off_source() == "launch"
+
+
+def test_settings_that_cannot_be_read_keep_the_last_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(ENGINE_PACKAGES_DISABLE_ENV, raising=False)
+    turned_off = tmp_path / "turned-off"
+    never_read = tmp_path / "never-read"
+    turned_off.mkdir()
+    never_read.mkdir()
+
+    monkeypatch.chdir(turned_off)
+    _save_settings(turned_off, "engines:\n  packages_enabled: false\n")
+    assert engine_packages_disabled()
+    _save_settings(turned_off, "engines: [damaged\n")
+    assert engine_packages_disabled()
+
+    # With no earlier answer, a damaged file must not take engines away.
+    monkeypatch.chdir(never_read)
+    _save_settings(never_read, "engines: [damaged\n")
+    assert not engine_packages_disabled()
+
+
+def test_a_refusal_says_when_packages_are_turned_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(ENGINE_PACKAGES_DISABLE_ENV, "1")
+
+    refusal = unknown_engine_refusal("tensorfold-rocm")
+    bounded = unknown_engine_refusal("x" * 5000)
+
+    assert refusal is not None
+    assert refusal.startswith(f"{ENGINE_UNKNOWN_FAILURE_MARKER}: ")
+    assert f"{ENGINE_PACKAGES_DISABLE_ENV}=1" in refusal
+    assert bounded is not None and len(bounded) < 300
+    # A built-in engine is never refused, whatever the switch says.
+    assert unknown_engine_refusal("mlx-metal") is None
+
+
+def test_an_unknown_engine_refusal_bounds_the_tag_it_repeats() -> None:
+    refusal = unknown_engine_refusal("x" * 5000)
+
+    assert refusal is not None and len(refusal) < 300
+
+
+@pytest.mark.parametrize(
+    ("tag", "name"),
+    [
+        ("tensorfold-rocm", "tensorfold"),
+        ("tensorfold", "tensorfold"),
+        ("tensor_fold2-cpu", "tensor_fold2"),
+    ],
+)
+def test_a_package_shaped_tag_names_its_engine(tag: str, name: str) -> None:
+    assert package_engine_of(tag) == name
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["mlx", "mlx-metal", "llama_server-cuda", "cuda", "rocm-cuda", "", "MLX-metal",
+     "tensor-fold-rocm", "tensor fold", "tensorfold-", "-rocm", "tensorfold-gpu"],
+)
+def test_built_in_reserved_and_malformed_tags_are_not_package_tags(tag: str) -> None:
+    assert package_engine_of(tag) is None
+
+
+def test_a_bare_package_engine_accepts_whichever_lane_a_node_holds() -> None:
+    expanded = expand_engine_backends(frozenset({"tensorfold"}))
+
+    assert expanded == frozenset(
+        {"tensorfold", "tensorfold-metal", "tensorfold-vulkan", "tensorfold-rocm",
+         "tensorfold-cuda", "tensorfold-cpu"}
+    )
+    # A named lane stays as narrow as the card wrote it.
+    assert expand_engine_backends(frozenset({"tensorfold-rocm"})) == frozenset(
+        {"tensorfold-rocm"}
+    )
+
+
+def test_a_card_naming_a_package_engine_resolves_to_the_nodes_lane() -> None:
+    node = frozenset({"tensorfold-rocm", "llama_server-vulkan", "llama_server"})
+
+    assert resolve_node_backend(frozenset({"tensorfold"}), (), node) == "tensorfold-rocm"
+    # Preference by bare engine name works for a package as for a built-in.
+    both = frozenset({"tensorfold", "llama_server"})
+    assert resolve_node_backend(both, ("tensorfold",), node) == "tensorfold-rocm"
+    assert resolve_node_backend(both, ("llama_server",), node) == "llama_server-vulkan"
+    # A node without the package is unaffected by the card naming it.
+    assert (
+        resolve_node_backend(both, ("tensorfold",), frozenset({"llama_server-vulkan"}))
+        == "llama_server-vulkan"
+    )
+    assert resolve_node_backend(frozenset({"tensorfold"}), (), frozenset({"mlx"})) is None
+
+
+def test_a_bare_package_alias_never_wins_over_its_lane() -> None:
+    node = frozenset({"tensorfold", "tensorfold-cuda"})
+
+    assert resolve_node_backend(frozenset({"tensorfold"}), (), node) == "tensorfold-cuda"

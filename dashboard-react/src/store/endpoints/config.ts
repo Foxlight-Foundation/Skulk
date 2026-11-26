@@ -89,6 +89,23 @@ export interface RestartRecoveryConfig {
   enabled: boolean;
 }
 
+/** Which published engine builds a cluster installs. */
+export type EnginePackageChannel = 'stable' | 'candidate';
+
+/** Engine package settings (cluster-synced). */
+export interface EnginesConfig {
+  /**
+   * `stable` (the default) installs released engine builds only; `candidate`
+   * also installs builds that are still being tested.
+   */
+  package_channel?: EnginePackageChannel;
+  /**
+   * Whether nodes use separately installed engines at all. On by default.
+   * Off, every node ignores the ones it holds; they stay on disk.
+   */
+  packages_enabled?: boolean;
+}
+
 /** Cluster-wide operator decisions for exact model-card identities. */
 export interface ModelTrustConfig {
   /** Cards approved to execute repository-supplied code on every node. */
@@ -103,6 +120,7 @@ export interface FullConfig {
   telemetry?: TelemetryConfig;
   intelligent_fabric?: IntelligentFabricConfig;
   restart_recovery?: RestartRecoveryConfig;
+  engines?: EnginesConfig;
   model_trust?: ModelTrustConfig;
   hf_token?: string;
 }

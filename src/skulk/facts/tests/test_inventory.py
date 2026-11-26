@@ -175,3 +175,35 @@ def test_multiple_identical_nvidia_devices_remain_visible() -> None:
     """Class deduplication must retain ambiguous device identity and memory."""
     classes = hardware_class_inventory(make_facts(gpus=(NVIDIA_A40, NVIDIA_A40)))
     assert "nvidia:multiple-devices" in classes
+
+
+def test_an_engine_package_build_is_its_measured_digest() -> None:
+    """A declared build string cannot stand in for the installed generation."""
+    digest = "b" * 64
+    facts = make_facts(gpus=(AMD_STRIX,)).model_copy(
+        update={"engine_package_builds": {"tensorfold-rocm": digest}}
+    )
+    backends = frozenset({"llama_cpp", "llama_cpp-vulkan", "tensorfold-rocm"})
+    declared = {
+        "SKULK_ENGINE_BUILDS": json.dumps(
+            {"tensorfold-rocm": "declared", "tensorfold": "declared"}
+        )
+    }
+
+    inventory = engine_build_inventory(backends, facts, environ=declared)
+    without = engine_build_inventory(
+        backends - {"tensorfold-rocm"}, make_facts(gpus=(AMD_STRIX,)), environ={}
+    )
+
+    assert inventory["tensorfold-rocm"] == digest
+    assert "tensorfold" not in inventory
+    # Every built-in entry is what a node without the package reports.
+    assert {
+        tag: build for tag, build in inventory.items() if tag != "tensorfold-rocm"
+    } == without
+
+
+def test_a_package_tag_without_an_installed_build_reports_none() -> None:
+    assert engine_build_inventory(
+        frozenset({"tensorfold-rocm"}), make_facts(), environ={}
+    ) == {}

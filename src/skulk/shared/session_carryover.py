@@ -66,6 +66,11 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
     - ``steward_action_proposals`` — bounded pending, approved, dispatched, and
       terminal audit truth. Actionable records drive the promoted master's
       exact-command recovery paths.
+    - ``model_engine_orders`` — each person-set engine order is a standing
+      choice for a model, not a fact about one session.
+    - ``engine_package_needs`` — what an engine package said a carried
+      placement's load takes. The placements carry with the same runners, so
+      the memory reserved for them carries too; a reload states it again.
     - ``restart_recovery_pending``, ``restart_recovery_placements``, and
       ``restart_recovery_intents`` — an unfinished cold-start restore passes to
       the promoted master rather than being dropped, with its settled plan, so
@@ -131,6 +136,8 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
             prior.model_trust_approved_remote_code_identities
         ),
         steward_action_proposals=prior.steward_action_proposals,
+        model_engine_orders=prior.model_engine_orders,
+        engine_package_needs=prior.engine_package_needs,
         # A failover in the middle of a cold-start restore hands the unfinished
         # restore to the new master instead of declaring it done.
         restart_recovery_pending=prior.restart_recovery_pending,

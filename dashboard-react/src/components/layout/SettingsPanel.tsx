@@ -6,6 +6,7 @@ import { generateInstallId } from './TelemetryConsentModal';
 import {
   useConfig,
   type StoreConfig,
+  type EnginesConfig,
   type FullConfig,
   type IntelligentFabricConfig,
   type LoggingConfig,
@@ -26,10 +27,11 @@ import { uiActions } from '../../store/slices/uiSlice';
 import type { ThemeName } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import { DevicesPanel } from './DevicesPanel';
+import { EnginesPanel } from './EnginesPanel';
 import { InferenceAccessPanel } from './InferenceAccessPanel';
 import { RightDrawer } from '../common/RightDrawer';
 import { CollapsibleSection } from '../common/Surfaces';
-import { FiArrowLeft, FiChevronRight, FiKey, FiSmartphone } from 'react-icons/fi';
+import { FiArrowLeft, FiChevronRight, FiCpu, FiKey, FiSmartphone } from 'react-icons/fi';
 
 /** Visibility and dismissal for the draft-owning Settings drawer. */
 export interface SettingsPanelProps {
@@ -192,15 +194,27 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const seeded = useRef(false);
   const [devicesOpen, setDevicesOpen] = useState(false);
   const [accessOpen, setAccessOpen] = useState(false);
+  const [enginesOpen, setEnginesOpen] = useState(false);
   const [width, setWidth] = useState(420);
   const [devicesWidth, setDevicesWidth] = useState(720);
   const devicesEntry = useRef<HTMLButtonElement>(null);
   const devicesBack = useRef<HTMLButtonElement>(null);
   const accessEntry = useRef<HTMLButtonElement>(null);
+  const enginesEntry = useRef<HTMLButtonElement>(null);
+  // One nested view at a time replaces the Settings body; the draft stays mounted behind it.
+  const nested = devicesOpen || accessOpen || enginesOpen;
+  const nestedTitle = accessOpen
+    ? t('inferenceAccess.title', 'Inference access')
+    : devicesOpen
+      ? t('devices.title', 'Devices & pairing')
+      : enginesOpen
+        ? t('engines.title', 'Add-on engines')
+        : t('settings.title', 'Settings');
   const returnToSettings = () => {
     setDevicesOpen(false);
     setAccessOpen(false);
-    requestAnimationFrame(() => (accessOpen ? accessEntry : devicesEntry).current?.focus());
+    setEnginesOpen(false);
+    requestAnimationFrame(() => (accessOpen ? accessEntry : enginesOpen ? enginesEntry : devicesEntry).current?.focus());
   };
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
     try {
@@ -231,6 +245,8 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   // On by default, unlike most sections: a restart bringing models back is the
   // expected behavior, so an absent section reads as on.
   const [recoveryDraft, setRecoveryDraft] = useState<RestartRecoveryConfig>({ enabled: true });
+  // An absent section means the defaults: add-on engines on, released builds only.
+  const [enginesDraft, setEnginesDraft] = useState<Required<EnginesConfig>>({ packages_enabled: true, package_channel: 'stable' });
   // Fetch config when panel opens
   useEffect(() => {
     if (!open) return;
@@ -264,6 +280,10 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
     });
     setRecoveryDraft({ enabled: fullConfig?.restart_recovery?.enabled ?? true });
+    setEnginesDraft({
+      packages_enabled: fullConfig?.engines?.packages_enabled ?? true,
+      package_channel: fullConfig?.engines?.package_channel ?? 'stable',
+    });
     setTelemetryDraft(
       fullConfig?.telemetry ?? {
         consent: 'unasked',
@@ -340,6 +360,12 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     if (fullConfig?.restart_recovery || !recoveryDraft.enabled) {
       updated.restart_recovery = { ...recoveryDraft };
     }
+    // Same rule: an untouched default stays absent. A build without the
+    // section refuses a settings document that carries it, so it is written
+    // only once the operator has chosen something.
+    if (fullConfig?.engines || !enginesDraft.packages_enabled || enginesDraft.package_channel !== 'stable') {
+      updated.engines = { ...(fullConfig?.engines ?? {}), ...enginesDraft };
+    }
     // Retain compatibility with nodes that still expose the retired model-trust
     // field, but never write the inert legacy allow-list back through Settings.
     delete updated.model_trust;
@@ -370,22 +396,23 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, storeDefaults, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, recoveryDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
+  }, [draft, storeDefaults, fullConfig, hfToken, kvBackend, servedContextText, loggingDraft, fabricDraft, recoveryDraft, enginesDraft, telemetryDraft, themeDraft, dispatch, onClose, saveFullConfig, t]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- Closing the modal resets its nested navigation for the next opening.
-  useEffect(() => { if (!open) { setDevicesOpen(false); setAccessOpen(false); } }, [open]);
+  useEffect(() => { if (!open) { setDevicesOpen(false); setAccessOpen(false); setEnginesOpen(false); } }, [open]);
 
   if (!open) return null;
 
   return (
-    <RightDrawer open={open} onClose={onClose} width={devicesOpen || accessOpen ? devicesWidth : width} minWidth={360} maxWidth={720} onWidthChange={devicesOpen || accessOpen ? setDevicesWidth : setWidth}
-      ariaLabel={accessOpen ? t('inferenceAccess.title', 'Inference access') : devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
-      title={accessOpen ? t('inferenceAccess.title', 'Inference access') : devicesOpen ? t('devices.title', 'Devices & pairing') : t('settings.title', 'Settings')}
-      headerLeading={devicesOpen || accessOpen ? <Button ref={devicesBack} variant="ghost" size="sm" aria-label={t('devices.backToSettings', 'Back to Settings')} onClick={returnToSettings}><FiArrowLeft /></Button> : undefined}
+    <RightDrawer open={open} onClose={onClose} width={nested ? devicesWidth : width} minWidth={360} maxWidth={720} onWidthChange={nested ? setDevicesWidth : setWidth}
+      ariaLabel={nestedTitle}
+      title={nestedTitle}
+      headerLeading={nested ? <Button ref={devicesBack} variant="ghost" size="sm" aria-label={t('devices.backToSettings', 'Back to Settings')} onClick={returnToSettings}><FiArrowLeft /></Button> : undefined}
       closeLabel={t('settings.close', 'Close settings')} resizeLabel={t('settings.resize', 'Resize settings')}>
       {devicesOpen ? <DevicesPanel /> : null}
       {accessOpen ? <InferenceAccessPanel /> : null}
-        <Body style={{ display: devicesOpen || accessOpen ? 'none' : undefined }}>
+      {enginesOpen ? <EnginesPanel /> : null}
+        <Body style={{ display: nested ? 'none' : undefined }}>
           {loading && <LoadingText>{t('settings.loadingConfig', 'Loading config...')}</LoadingText>}
           {error && <ErrorText>{error}</ErrorText>}
 
@@ -728,6 +755,59 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             )}
           </CollapsibleSection>
 
+          <CollapsibleSection
+            {...section('engines')}
+            title={t('settings.engines.legend', 'Add-on engines')}
+            summary={!enginesDraft.packages_enabled
+              ? t('common.off', 'Off')
+              : enginesDraft.package_channel === 'candidate'
+                ? t('settings.engines.summaryTesting', 'On, with test builds')
+                : t('common.on', 'On')}
+          >
+            <Row>
+              <FieldLabel>
+                {t('settings.engines.enabled', 'Use add-on engines')}
+                <InfoTooltip
+                  filled
+                  content={t(
+                    'settings.engines.enabledTooltip',
+                    'An engine is the program that runs a model. Skulk includes several. An add-on engine is installed separately, on the machine that needs it, the first time a model asks for it.',
+                  )}
+                />
+              </FieldLabel>
+              <Toggle aria-label={t('settings.engines.enabled', 'Use add-on engines')} $on={enginesDraft.packages_enabled} onClick={() => setEnginesDraft(prev => ({ ...prev, packages_enabled: !prev.packages_enabled }))} />
+            </Row>
+            {!enginesDraft.packages_enabled && (
+              <HintText>
+                {t(
+                  'settings.engines.offHint',
+                  'Every machine stops using its add-on engines within about a minute and installs no new ones. The engines stay on disk and come back when you turn this on. A model already running on one keeps running until you stop it.',
+                )}
+              </HintText>
+            )}
+            {enginesDraft.packages_enabled && (
+              <Row>
+                <FieldLabel>
+                  {t('settings.engines.testBuilds', 'Install test builds')}
+                  <InfoTooltip
+                    filled
+                    content={t(
+                      'settings.engines.testBuildsTooltip',
+                      'Machines also install engine builds that are still being tested, before they are released. Leave this off unless you are helping test an engine. An engine a machine already has is never replaced by this setting.',
+                    )}
+                  />
+                </FieldLabel>
+                <Toggle
+                  aria-label={t('settings.engines.testBuilds', 'Install test builds')}
+                  $on={enginesDraft.package_channel === 'candidate'}
+                  onClick={() => setEnginesDraft(prev => ({ ...prev, package_channel: prev.package_channel === 'candidate' ? 'stable' : 'candidate' }))}
+                />
+              </Row>
+            )}
+            {/* Changes made there are immediate and are not part of this draft. */}
+            <DevicesEntry ref={enginesEntry} style={{ marginBottom: 0 }} aria-label={t('engines.entry', 'Engines on your machines')} onClick={() => { setEnginesOpen(true); requestAnimationFrame(() => devicesBack.current?.focus()); }}><FiCpu aria-hidden /><span>{t('engines.entry', 'Engines on your machines')}<small>{t('engines.entryHint', 'See which machines have an add-on engine, switch builds or remove one')}</small></span><FiChevronRight size={14} aria-hidden /></DevicesEntry>
+          </CollapsibleSection>
+
           {/* Field telemetry: consent lives in skulk.yaml (survives restarts,
               synced like other settings). Both switches stay permanently
               available here; the first-run modal only acquires the initial
@@ -826,7 +906,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
           {configPath && <ConfigPath style={{ marginTop: 16, overflowWrap: 'anywhere' }}>{t('settings.configPath', 'Config: {configPath}', { configPath })}</ConfigPath>}
         </Body>
 
-        <Footer style={{ display: devicesOpen || accessOpen ? 'none' : undefined }}>
+        <Footer style={{ display: nested ? 'none' : undefined }}>
           <Spacer />
           <Button variant="outline" size="md" onClick={onClose}>
             {t('common.cancel', 'Cancel')}

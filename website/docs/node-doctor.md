@@ -45,6 +45,10 @@ Verifies at least one inference engine is usable: in-process MLX on macOS, an im
 
 Verifies the served ComfyUI video engine. A node passes when the engine is configured (SKULK_COMFY_BIN plus SKULK_COMFY_ROOT), already installed under the engines directory, or installable on demand: a Linux node with a supported NVIDIA or AMD GPU installs it (about 7 GB) the first time a video model is placed there, and `--fix` installs it now. A GPU node that cannot install it (opted out, offline, git or uv missing, or an unsupported GPU) is degraded: video cards never place there. Management nodes and nodes with video models hidden (SKULK_ENABLE_VIDEO_MODELS=false) pass. Supports `--fix`.
 
+### Add-on engines (`engine-packages`)
+
+Verifies every add-on engine this node holds can be used for a new launch. An add-on engine is installed separately from Skulk, on the machine that needs it. One is reported when its files are missing or changed, when this Skulk version can no longer run it, or when two installed engines claim the same backend name. The node does not offer such an engine, so a model that can only run on it is not placed there; the built-in engines are unaffected. Files are compared by name, size and executable bit, never hashed, so the check stays fast. `--fix` switches new launches to another intact build of the same engine that is already on the node's disk, the earlier one first; it deletes nothing, because only the running node knows which build a model is using. With no other build to switch to, remove the engine from the dashboard or with `skulk engines remove`, and the node installs it again when a model needs it. A node with no add-on engine, or with add-on engines turned off, passes. Supports `--fix`.
+
 ### Capability conflicts (`capability-conflicts`)
 
 Runs backend derivation over the node facts snapshot and surfaces every observation-vs-declaration conflict: a GPU that no engine would use (silent CPU serving), degraded NVIDIA detection (missing nvidia-ml-py or a driver mismatch), an engine binary override pointing at an unusable path, or a declared backend the observed hardware cannot support. Supports `--fix`.

@@ -342,6 +342,88 @@ def test_ordinary_shared_gpu_cost_is_one_physical_reservation() -> None:
     assert costs[0].shared_peak_bytes == expected
 
 
+def test_engine_package_need_raises_another_engines_commitment() -> None:
+    """What an engine package said its load takes is charged, never less than the card."""
+    observed = resources("rocm")
+    ordinary = ordinary_instance("llama_cpp-vulkan")
+    held = {ordinary.instance_id: ordinary}
+    runner = RunnerId("ordinary-runner")
+
+    def cost(needs: dict[RunnerId, int] | None) -> int:
+        budgets = native_music_placement_commitments(
+            NODE,
+            observed,
+            held,
+            target_device="rocm",
+            node_is_unified=True,
+            package_needs=needs,
+        )
+        assert len(budgets) == 1
+        assert (
+            budgets[0].host_peak_bytes
+            == budgets[0].device_peak_bytes
+            == budgets[0].shared_peak_bytes
+        )
+        return budgets[0].shared_peak_bytes
+
+    card_estimate = cost(None)
+    assert cost({}) == card_estimate
+    assert cost({runner: card_estimate + 3 * GIB}) == card_estimate + 3 * GIB
+    # A smaller statement never shrinks the reservation, and a statement for
+    # some other runner is not this placement's.
+    assert cost({runner: 1}) == card_estimate
+    assert cost({RunnerId("elsewhere"): 40 * GIB}) == card_estimate
+
+
+def test_engine_package_need_can_refuse_a_native_music_mount() -> None:
+    """A mount that fits beside the card estimate is refused beside the stated need."""
+    observed = resources("rocm")
+    ordinary = ordinary_instance("llama_cpp-vulkan")
+    held = {ordinary.instance_id: ordinary}
+    fits = assess_native_music_placement(
+        card_with_layouts(), "ace_step-rocm", NODE, observed, held, now_unix_ms=1000
+    )
+    assert fits.refusal is None
+    refused = assess_native_music_placement(
+        card_with_layouts(),
+        "ace_step-rocm",
+        NODE,
+        observed,
+        held,
+        now_unix_ms=1000,
+        package_needs={RunnerId("ordinary-runner"): 40 * GIB},
+    )
+    assert refused.refusal is not None and "unified physical memory" in refused.refusal
+    assert (
+        fits.remaining.shared_available_bytes is not None
+        and refused.remaining.shared_available_bytes is not None
+    )
+    assert (
+        refused.remaining.shared_available_bytes
+        < fits.remaining.shared_available_bytes
+    )
+
+
+def test_engine_package_need_never_changes_a_native_music_budget() -> None:
+    """Native music holds its own phase budget; a stated figure for its runner is ignored."""
+    observed = resources("rocm")
+    current = instance(observed)
+    runner = next(iter(current.shard_assignments.runner_to_shard))
+    held = {current.instance_id: current}
+    plain = native_music_placement_commitments(
+        NODE, observed, held, target_device="rocm", node_is_unified=True
+    )
+    stated = native_music_placement_commitments(
+        NODE,
+        observed,
+        held,
+        target_device="rocm",
+        node_is_unified=True,
+        package_needs={runner: 60 * GIB},
+    )
+    assert stated == plain
+
+
 def test_discrete_gpu_commitment_cannot_borrow_spare_host_memory() -> None:
     """A native GPU mount must fit selected device zero after ordinary GPU costs."""
     observed = resources("cuda")

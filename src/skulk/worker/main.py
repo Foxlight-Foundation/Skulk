@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal, final
 
 import anyio
 from anyio import (
@@ -36,6 +36,11 @@ from skulk.download.download_utils import (
     companion_download_specs,
     installed_artifact_in_path,
     resolve_native_music_source_directory,
+)
+from skulk.engines.load_results import (
+    PROCESS_ENGINE_LOAD_RESULTS,
+    EngineLoadResults,
+    with_load_results,
 )
 from skulk.provisioning.ace_step_inventory import (
     ACE_STEP_PACKAGES,
@@ -58,9 +63,12 @@ from skulk.routing.vision_media import VisionMediaPacket
 from skulk.routing.zenoh_status import ZenohPeerSampler
 from skulk.shared.apply import apply
 from skulk.shared.backends import (
+    ENGINE_LOAD_REFUSED_FAILURE_MARKER,
     ENGINE_UNAVAILABLE_FAILURE_MARKER,
-    EngineType,
+    ENGINE_UNKNOWN_FAILURE_MARKER,
+    engine_load_refusal_code,
     engine_of,
+    package_engine_of,
 )
 from skulk.shared.constants import (
     SKULK_ENGINES_DIR,
@@ -75,7 +83,10 @@ from skulk.shared.constants import (
     SKULK_VIDEO_OUTPUT_DIR,
 )
 from skulk.shared.log_summaries import summarize_task_for_log
-from skulk.shared.models.engine_memory_settings import observe_engine_memory_settings
+from skulk.shared.models.engine_memory_settings import (
+    backend_engine_memory_settings,
+    observe_engine_memory_settings,
+)
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     LOAD_FIT_TOLERANCE,
@@ -128,6 +139,7 @@ from skulk.shared.types.diagnostics import (
     RunnerTaskCancelResponse,
     VisionMediaIngressDiagnostics,
 )
+from skulk.shared.types.engine_packages import NodeEngineLoadResult
 from skulk.shared.types.events import (
     AceStepPreparationCompleted,
     AceStepPreparationRequested,
@@ -137,6 +149,9 @@ from skulk.shared.types.events import (
     CustomModelCardDeleted,
     DemucsPreparationCompleted,
     DemucsPreparationRequested,
+    EnginePackageChangeCompleted,
+    EnginePackageChangeRequested,
+    EnginePackageNeedStated,
     Event,
     IndexedEvent,
     ModelTrustApprovalChanged,
@@ -199,6 +214,7 @@ from skulk.shared.types.worker.downloads import (
     DownloadProgress,
 )
 from skulk.shared.types.worker.instances import (
+    Instance,
     InstanceFailureCode,
     InstanceId,
     LlamaRpcInstance,
@@ -250,7 +266,7 @@ from skulk.worker.native_music_media import (
     local_native_music_task,
 )
 from skulk.worker.native_music_output import NativeMusicTask
-from skulk.worker.plan import plan
+from skulk.worker.plan import awaited_engine_package, plan
 from skulk.worker.runner.ace_step.context import NativeMusicRunnerContext
 from skulk.worker.runner.ace_step.resources import NativeMusicHostGuard
 from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
@@ -420,8 +436,15 @@ def _model_files_incomplete_instance_failure_message(model_id: ModelId) -> str:
     )
 
 
-def _engine_install_failure_message(step: str | None, engine: EngineType = "comfy") -> str:
+def _engine_install_failure_message(step: str | None, engine: str = "comfy") -> str:
     """Return safe operator guidance for a failed on-demand engine install."""
+    if package_engine_of(engine) == engine:
+        return _instance_failure_message(
+            f"Could not install the {engine} engine package on this node: "
+            f"{step or 'the install'} failed. Check the node's internet "
+            "connection and free disk space, then place the model again. The "
+            "reason is in the node's log."
+        )
     if engine == "vllm":
         return _instance_failure_message(
             f"Could not install the vLLM runtime on this node: {step or 'the install'} failed. "
@@ -454,11 +477,44 @@ def _engine_unavailable_instance_failure_message(model_id: ModelId) -> str:
     )
 
 
+def _engine_unknown_instance_failure_message(model_id: ModelId) -> str:
+    """Return safe operator guidance for a placement this node's build cannot run."""
+    return _instance_failure_message(
+        f"runner for {model_id} was placed on an engine this node does not "
+        "have: it is neither built into its Skulk build nor installed as an "
+        "engine package; not retrying."
+    )
+
+
+def _engine_load_refused_reason(model_id: ModelId, code: str) -> str:
+    """Return the payload-safe reason for a load an engine package refused.
+
+    Only the engine's typed code is kept. Its own explanation may name local
+    paths, so it stays in this node's log.
+    """
+    return (
+        f"the engine package refused to load {model_id} ({code}); the engine's "
+        "own reason is in the node's log"
+    )
+
+
+_ENGINE_PACKAGE_LIST_FIRST_REFRESH_SECONDS: Final = 60.0
+"""Wait after worker start before first asking the store for the package
+list, so it never competes with start-up."""
+
+_ENGINE_PACKAGE_LIST_REFRESH_SECONDS: Final = 3600.0
+"""How often a worker asks the store for a newer package list."""
+
+_ENGINE_PACKAGE_SETTINGS_CHECK_SECONDS: Final = 60.0
+"""How often a worker re-reads its saved settings for engine packages: which
+builds the cluster follows and whether packages are on. No network access."""
+
+
 @dataclass
 class _EngineInstallJob:
     """One on-demand engine install shared by every instance waiting for it."""
 
-    engine: EngineType
+    engine: str
     resolved_backend: str | None = None
     expected_build: str | None = None
     waiters: dict[InstanceId, TaskId] = field(default_factory=dict)
@@ -554,6 +610,134 @@ def engine_unavailable_live_instances(
                 )
             )
     return unavailable
+
+
+def engine_unknown_live_instances(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+    live_instances: Container[InstanceId],
+) -> list[tuple[InstanceId, ModelId, str]]:
+    """Return live instances whose runner was placed on an engine this build lacks.
+
+    The runner refuses such a placement before it chooses a runner type.
+    Relaunching cannot change the build, so the instance is given up once.
+    """
+    unknown: list[tuple[InstanceId, ModelId, str]] = []
+    for supervisor in runners.values():
+        instance_id = supervisor.bound_instance.instance.instance_id
+        status = supervisor.status
+        if (
+            instance_id in live_instances
+            and isinstance(status, RunnerFailed)
+            and status.error_message is not None
+            and ENGINE_UNKNOWN_FAILURE_MARKER in status.error_message
+        ):
+            unknown.append(
+                (
+                    instance_id,
+                    supervisor.shard_metadata.model_card.model_id,
+                    status.error_message,
+                )
+            )
+    return unknown
+
+
+def engine_load_refused_live_instances(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+    live_instances: Container[InstanceId],
+) -> list[tuple[InstanceId, ModelId, str, str]]:
+    """Return live instances whose engine package refused to load their model.
+
+    A refusal is the engine's answer for one build and one checkpoint, so the
+    instance is reported once and never relaunched here. Each entry is the
+    instance, its model, the engine's typed code and the full failure message
+    for the log.
+    """
+    refused: list[tuple[InstanceId, ModelId, str, str]] = []
+    for supervisor in runners.values():
+        instance_id = supervisor.bound_instance.instance.instance_id
+        status = supervisor.status
+        if (
+            instance_id in live_instances
+            and isinstance(status, RunnerFailed)
+            and status.error_message is not None
+            and ENGINE_LOAD_REFUSED_FAILURE_MARKER in status.error_message
+        ):
+            refused.append(
+                (
+                    instance_id,
+                    supervisor.shard_metadata.model_card.model_id,
+                    engine_load_refusal_code(status.error_message) or "load_refused",
+                    status.error_message,
+                )
+            )
+    return refused
+
+
+def engine_package_load_results(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+) -> list[tuple[str, NodeEngineLoadResult]]:
+    """Return how each engine package runner's model load ended, by backend tag.
+
+    Only a runner stamped with an engine package's backend tag and build is
+    read; a built-in engine's load is not part of the engines report. Reading
+    is repeatable: the same runner yields the same result every time.
+    """
+    results: list[tuple[str, NodeEngineLoadResult]] = []
+    for supervisor in runners.values():
+        observed = supervisor.load_observation
+        shard = supervisor.shard_metadata
+        tag, build = shard.resolved_backend, shard.resolved_engine_build
+        if (
+            observed is None
+            or not isinstance(tag, str)
+            or not isinstance(build, str)
+            or package_engine_of(tag) is None
+            or len(build) != 64
+            or not set(build) <= set("0123456789abcdef")
+        ):
+            continue
+        results.append(
+            (
+                tag,
+                NodeEngineLoadResult(
+                    build=build,
+                    outcome=observed.outcome,
+                    code=observed.code,
+                    model_id=str(shard.model_card.model_id)[:256],
+                    at_unix_ms=observed.at_unix_ms,
+                ),
+            )
+        )
+    return results
+
+
+@final
+class _EveryBuild:
+    """Stands for every build of a lane, when a runner does not say which it uses."""
+
+    def __contains__(self, build: object) -> bool:
+        return True
+
+
+def engine_package_builds_in_use(
+    runners: Mapping[RunnerId, "RunnerSupervisor"], backend_tag: str
+) -> Container[str]:
+    """Return the builds of one engine package lane that a runner here is on.
+
+    A runner counts from the moment the worker holds it, whatever its status,
+    because its engine process may be using the build's files. A runner with
+    no stamped build runs on whichever build was active when it started, so
+    every build is then treated as in use.
+    """
+    builds: set[str] = set()
+    for supervisor in runners.values():
+        shard = supervisor.shard_metadata
+        if shard.resolved_backend != backend_tag:
+            continue
+        if shard.resolved_engine_build is None:
+            return _EveryBuild()
+        builds.add(shard.resolved_engine_build)
+    return frozenset(builds)
 
 
 def model_trust_failed_live_instances(
@@ -1465,8 +1649,36 @@ class Worker:
             self._send_native_music_source_packet, self._send_separation_output_packet,
             self._fail_native_music, self._native_music_reader_drained,
         )
-        self._engine_install_jobs: dict[EngineType | tuple[EngineType, str | None, str | None], _EngineInstallJob] = {}
+        self._engine_install_jobs: dict[str | tuple[str, str | None, str | None], _EngineInstallJob] = {}
+        # Process-wide, so what this node learned about its engine package
+        # builds survives the worker being replaced at an election change.
+        self._engine_load_results: EngineLoadResults = PROCESS_ENGINE_LOAD_RESULTS
         self._stopped: anyio.Event = anyio.Event()
+
+    def _note_engine_package_loads(self) -> bool:
+        """Record how the engine package loads this worker can see ended.
+
+        Returns:
+            Whether a load ended that this node has not reported yet.
+        """
+        changed = False
+        for tag, result in engine_package_load_results(self.runners):
+            changed = self._engine_load_results.record(tag, result) or changed
+        return changed
+
+    async def _report_engine_package_loads(self) -> None:
+        """Advertise this node's resources after an engine package load ended.
+
+        The report is a courtesy to a person reading the engines page. A
+        failure to gather or send it must never reach the planning loop, and
+        the routine reading carries the same facts a little later.
+        """
+        try:
+            await self._publish_fresh_node_resources()
+        except Exception as error:  # noqa: BLE001 - optional report, never fatal
+            logger.warning(
+                f"Engine package load result not reported yet: {type(error).__name__}"
+            )
 
     async def _gather_node_resources(self) -> NodeResources:
         """Compose current facts with this worker's verified native observations.
@@ -1484,6 +1696,7 @@ class Worker:
             data_transport=self._data_transport,
             zenoh_connected_peers=peers,
         )
+        self._note_engine_package_loads()
         ready = self._demucs_preparation.engine_builds()
         # Derive builds from one locked probe snapshot. Separate build/probe
         # reads could straddle a concurrent withdrawal or successful prepare.
@@ -1568,6 +1781,9 @@ class Worker:
                     **installable,
                 },
                 "native_music_probes": native_probes,
+                "engine_packages": with_load_results(
+                    resources.engine_packages, self._engine_load_results
+                ),
             }
         )
 
@@ -1796,6 +2012,68 @@ class Worker:
             resources=resources if success else None,
         ))
 
+    async def _change_engine_package(
+        self, request: EnginePackageChangeRequested
+    ) -> None:
+        """Make one requested engine package change here and answer it.
+
+        The change, the fresh reading of this node's facts and the answer are
+        one unit: a person told the change was made can launch at once and
+        get the build that is now active.
+        """
+        if request.expires_at <= time.time():
+            return
+        from skulk.engines.actions import change_engine_package
+        from skulk.facts import current_backend_derivation, refresh_node_facts
+        from skulk.provisioning.engine_packages import EnginePackageRefusedError
+
+        code: str | None = None
+        resources: NodeResources | None = None
+        try:
+            in_use = engine_package_builds_in_use(
+                self.runners,
+                f"{request.engine_id.split('.', 1)[1]}-{request.lane}",
+            )
+            await to_thread.run_sync(
+                lambda: change_engine_package(
+                    request.engine_id,
+                    request.lane,
+                    request.action,
+                    request.build,
+                    builds_in_use=in_use,
+                )
+            )
+            await to_thread.run_sync(refresh_node_facts)
+            derivation = await to_thread.run_sync(current_backend_derivation)
+            self._on_demand_backends = derivation.on_demand_backends
+            resources = await self._gather_node_resources()
+            if self._telemetry_sender is not None:
+                await self._telemetry_sender.send(
+                    NodeTelemetry(node_id=self.node_id, info=resources)
+                )
+        except EnginePackageRefusedError as refused:
+            code = refused.code
+            logger.warning(
+                f"Engine package {request.action} refused for {request.engine_id} "
+                f"({request.lane}): {refused.code}: {refused}"
+            )
+        except Exception as failure:  # noqa: BLE001 - the asker gets one answer
+            code = "change_failed"
+            logger.opt(exception=failure).error(
+                f"Engine package {request.action} failed for {request.engine_id} "
+                f"({request.lane})"
+            )
+        await self.event_sender.send(
+            EnginePackageChangeCompleted(
+                request_id=request.request_id,
+                target_node=self.node_id,
+                owner_node=request.owner_node,
+                success=code is None,
+                code=code,
+                resources=resources if code is None else None,
+            )
+        )
+
     def _effective_downloads(self) -> dict[NodeId, list[DownloadProgress]]:
         """Return durable outcomes overlaid with live download telemetry."""
 
@@ -1821,7 +2099,11 @@ class Worker:
         return 1.0 / shard.world_size if shard.world_size > 0 else 1.0
 
     def _local_shard_fit_error(
-        self, shard: ShardMetadata, context_token_limit: int | None = None
+        self,
+        shard: ShardMetadata,
+        context_token_limit: int | None = None,
+        *,
+        engine_need: Memory | None = None,
     ) -> str | None:
         """Reason this node cannot hold ``shard``, or ``None`` if it fits.
 
@@ -1847,6 +2129,12 @@ class Worker:
         VRAM has dropped since placement (stale telemetry, a concurrently loaded
         instance). MLX grows KV lazily (no up-front window), so the budget floor is
         the correct estimate there, capped by a smaller enforced serving window.
+
+        ``engine_need`` is what an engine package's own adapter said this exact
+        load takes, in the pool this guard checks (see
+        ``_engine_package_stated_need``). The guard checks the larger of it and
+        the admitted footprint, so an engine that needs more than its declared
+        figure is refused only when this node cannot hold what it asks for now.
         """
         if shard.model_card.separation is not None:
             from skulk.shared.models.separation_runtime import resolve_demucs_policy
@@ -1858,12 +2146,26 @@ class Worker:
             if shard.separation_policy != policy:
                 return "Native separation policy differs from placement; refresh resources and replan this configuration"
         if shard.memory_settings is not None and shard.resolved_backend is not None:
-            actual = observe_engine_memory_settings(
-                os.environ,
-                engine=shard.resolved_backend.split("-", 1)[0]
-                if "TextGeneration" in shard.model_card.tasks
-                else "non_text",
-            )
+            if package_engine_of(shard.resolved_backend) is not None:
+                from skulk.facts import known_node_facts
+
+                # The same figure this node advertised: the memory the
+                # package build it holds (or was offered) declares. With no
+                # facts gathered yet nothing vouches for the stamped figure,
+                # so the comparison below refuses.
+                facts = known_node_facts()
+                actual = backend_engine_memory_settings(
+                    shard.resolved_backend,
+                    facts.engine_package_overhead_bytes if facts is not None else {},
+                    os.environ,
+                )
+            else:
+                actual = observe_engine_memory_settings(
+                    os.environ,
+                    engine=shard.resolved_backend.split("-", 1)[0]
+                    if "TextGeneration" in shard.model_card.tasks
+                    else "non_text",
+                )
             if actual.configuration_error is not None:
                 return f"Engine cache configuration is invalid: {actual.configuration_error}"
             if actual != shard.memory_settings:
@@ -1878,6 +2180,18 @@ class Worker:
             memory_settings=shard.memory_settings,
             cache_layer_count=shard.end_layer - shard.start_layer,
         )
+        if engine_need is not None and engine_need > footprint:
+            # The master reserved the admitted figure, so its accounting for
+            # this instance is short by the difference until the engine's
+            # figure is carried to it. This node's live memory is checked
+            # against what the engine says it takes.
+            logger.warning(
+                f"The engine package serving {shard.model_card.model_id} states "
+                f"~{engine_need.in_gb:.1f}GB for this load, above the "
+                f"~{footprint.in_gb:.1f}GB the launch was admitted on; checking "
+                "the engine's figure against this node's memory"
+            )
+            footprint = engine_need
         # On a discrete-GPU node the engine allocates from VRAM, not system RAM,
         # so size the guard against local usable VRAM or it would falsely refuse
         # the very placement the (VRAM-aware) master just admitted. None on
@@ -1955,6 +2269,68 @@ class Worker:
             )
         return None
 
+    async def _engine_package_stated_need(
+        self, instance: Instance, shard: ShardMetadata
+    ) -> Memory | None:
+        """Ask an engine package what this exact load takes, for the fit guard.
+
+        Called when a load is dispatched: the model's files are on the node
+        and the engine is installed, so the adapter can read both. It is asked
+        about the same model and settings the runner then states at load. The
+        adapter runs off the event loop in a short session of its own that
+        loads nothing.
+
+        Returns ``None``, leaving the admitted figure in force, for a built-in
+        engine, when the engine does not know or cannot be asked, and when it
+        names a memory pool other than the one its lane was admitted against:
+        the figure cannot then be compared with this guard's pool, and the
+        disagreement is logged.
+        """
+        backend = shard.resolved_backend
+        if backend is None or package_engine_of(backend) is None:
+            return None
+        from skulk.engines.estimate import EngineNeed, ask_engine_need
+        from skulk.worker.runner.bootstrap import installed_engine_package
+        from skulk.worker.runner.engine_package.request import package_load_request
+
+        def ask() -> EngineNeed | None:
+            try:
+                installed = installed_engine_package(
+                    backend, shard.resolved_engine_build
+                )
+                if installed is None:
+                    return None
+                model, settings = package_load_request(
+                    shard, instance.context_token_limit
+                )
+            except (RuntimeError, ValueError, OSError) as error:
+                # The runner's own load reports a missing package or model.
+                logger.warning(
+                    f"No engine memory estimate for {shard.model_card.model_id}: "
+                    f"{type(error).__name__}: {error}"
+                )
+                return None
+            return ask_engine_need(
+                installed,
+                instance_id=str(instance.instance_id),
+                model=model,
+                settings=settings,
+            )
+
+        need = await to_thread.run_sync(ask)
+        if need is None:
+            return None
+        admitted_pool = "gpu" if backend_offloads_to_vram(backend) else "host"
+        if need.pool != admitted_pool:
+            logger.warning(
+                f"The engine package serving {shard.model_card.model_id} reports "
+                f"its memory need in the {need.pool} pool, but its {backend} lane "
+                f"was admitted against the {admitted_pool} pool; using the "
+                "admitted figure"
+            )
+            return None
+        return Memory.from_bytes(need.bytes)
+
     async def _give_up_on_instance(
         self,
         instance_id: InstanceId,
@@ -1987,9 +2363,17 @@ class Worker:
         )
 
     async def _refuse_instance_placement(
-        self, instance_id: InstanceId, reason: str
+        self,
+        instance_id: InstanceId,
+        reason: str,
+        *,
+        engine_refusal_code: str | None = None,
     ) -> None:
         """Ask the master to re-place this instance on a wider split (#290).
+
+        With ``engine_refusal_code`` the refusal is an engine package's, not
+        the memory guard's: the master then places the model again at the same
+        width on another engine.
 
         Used instead of :meth:`_give_up_on_instance` when the give-up is driven
         by the *memory fit guard* rather than a runner crash or GPU wedge. The
@@ -2005,7 +2389,9 @@ class Worker:
         """
         logger.error(
             f"Worker: refusing instance {instance_id} for placement "
-            f"(asking master to re-place wider): {reason}"
+            f"(asking master to re-place "
+            f"{'wider' if engine_refusal_code is None else 'on another engine'}): "
+            f"{reason}"
         )
         await self.command_sender.send(
             ForwarderCommand(
@@ -2014,6 +2400,7 @@ class Worker:
                     instance_id=instance_id,
                     node_id=self.node_id,
                     reason=reason,
+                    engine_refusal_code=engine_refusal_code,
                 ),
             )
         )
@@ -2163,6 +2550,7 @@ class Worker:
             tg.start_soon(info_gatherer.run)
             tg.start_soon(self._forward_info, info_recv)
             tg.start_soon(self._restore_cached_native_runtimes)
+            tg.start_soon(self._keep_engine_package_list_fresh)
             tg.start_soon(self.plan_step)
             tg.start_soon(self._event_applier)
             tg.start_soon(self._poll_connection_updates)
@@ -3839,6 +4227,13 @@ class Worker:
                     self._tg.start_soon(self._prepare_audio_cpp_engine, event)
 
                 if (
+                    isinstance(event, EnginePackageChangeRequested)
+                    and event.target_node == self.node_id
+                    and event.expires_at > time.time()
+                ):
+                    self._tg.start_soon(self._change_engine_package, event)
+
+                if (
                     isinstance(event, DemucsPreparationRequested)
                     and event.target_node == self.node_id
                     and event.expires_at > time.time()
@@ -4044,6 +4439,11 @@ class Worker:
             self._crash_breaker.retain(self.state.instances)
             self._refresh_in_use_markers()
             self._terminal_load_failures_handled.intersection_update(self.state.instances)
+            if self._note_engine_package_loads():
+                # A load just ended on an engine package. Say so now: the
+                # routine resource reading may be a minute away, and a person
+                # who just launched a model looks at the engines report next.
+                self._tg.start_soon(self._report_engine_package_loads)
             for finished_instance in [
                 instance_id
                 for instance_id in self._engine_install_tasks
@@ -4068,6 +4468,43 @@ class Worker:
                             unavailable_model_id
                         ),
                         error_code="engine_install_failed",
+                    )
+
+            for (
+                unknown_instance_id,
+                unknown_model_id,
+                unknown_error,
+            ) in engine_unknown_live_instances(self.runners, self.state.instances):
+                if unknown_instance_id not in self._terminal_load_failures_handled:
+                    self._terminal_load_failures_handled.add(unknown_instance_id)
+                    logger.error(
+                        f"Worker: unknown engine for instance "
+                        f"{unknown_instance_id}: {unknown_error}"
+                    )
+                    await self._give_up_on_instance(
+                        unknown_instance_id,
+                        _engine_unknown_instance_failure_message(unknown_model_id),
+                        error_code="placement_failed",
+                    )
+
+            for (
+                refused_instance_id,
+                refused_model_id,
+                refusal_code,
+                refusal_error,
+            ) in engine_load_refused_live_instances(self.runners, self.state.instances):
+                if refused_instance_id not in self._terminal_load_failures_handled:
+                    self._terminal_load_failures_handled.add(refused_instance_id)
+                    logger.error(
+                        f"Worker: engine package refused the load for instance "
+                        f"{refused_instance_id}: {refusal_error}"
+                    )
+                    # Loading again on this build repeats the answer, so the
+                    # master places the model on the next engine instead.
+                    await self._refuse_instance_placement(
+                        refused_instance_id,
+                        _engine_load_refused_reason(refused_model_id, refusal_code),
+                        engine_refusal_code=refusal_code,
                     )
 
             for (
@@ -4216,7 +4653,12 @@ class Worker:
                 case InstallEngine():
                     await self._start_engine_install(task)
                 case Shutdown(runner_id=runner_id):
+                    # A runner that failed its load is removed here, possibly
+                    # before the next reading would have seen it.
+                    removed_load_ended = self._note_engine_package_loads()
                     runner = self.runners.pop(runner_id)
+                    if removed_load_ended:
+                        self._tg.start_soon(self._report_engine_package_loads)
                     shard_for_eviction = runner.shard_metadata
                     # Only evict staged files if the instance has been deleted.
                     # If the instance still exists (e.g., runner crashed but will
@@ -4617,7 +5059,7 @@ class Worker:
         await self.event_sender.send(
             TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Running)
         )
-        key = (task.engine, task.resolved_backend, task.expected_build) if task.engine in {"stable_diffusion_cpp", "mlx_video", "vllm"} or (task.engine == "comfy" and task.expected_build is not None) else task.engine
+        key = (task.engine, task.resolved_backend, task.expected_build) if task.engine in {"stable_diffusion_cpp", "mlx_video", "vllm"} or (task.engine == "comfy" and task.expected_build is not None) or package_engine_of(task.engine) == task.engine else task.engine
         job = self._engine_install_jobs.get(key)
         if job is not None and job.finished and job.succeeded:
             await self.event_sender.send(
@@ -4663,6 +5105,9 @@ class Worker:
             install_vllm_on_demand,
         )
 
+        if package_engine_of(job.engine) == job.engine:
+            await self._run_engine_package_install(job)
+            return
         failure_step: str | None = None
         stop = threading.Event()
         try:
@@ -4741,6 +5186,76 @@ class Worker:
         except Exception as error:  # noqa: BLE001 - each waiter gets one explained failure
             failure_step = "the engine install"
             logger.opt(exception=error).error("Engine install failed")
+        await self._release_engine_install_waiters(job, failure_step)
+
+    async def _run_engine_package_install(self, job: _EngineInstallJob) -> None:
+        """Install one engine package a placement named, then release its waiters.
+
+        The package build is the one the placement was stamped with. After
+        the install the node's facts are read again, and the job succeeds
+        only when the node now holds exactly that build as the active one.
+
+        Side effects: downloads, installs and activates the package,
+        refreshes the facts snapshot and the cached on-demand backends, and
+        publishes fresh node resources.
+        """
+        from skulk.engines.on_demand import (
+            EnginePackageInstallError,
+            install_engine_package_on_demand,
+        )
+        from skulk.facts import (
+            current_backend_derivation,
+            current_node_facts,
+            refresh_node_facts,
+        )
+
+        failure_step: str | None = None
+        stop = threading.Event()
+        try:
+            backend, build = job.resolved_backend, job.expected_build
+            if backend is None or build is None:
+                raise EnginePackageInstallError(
+                    "the placement check",
+                    "engine package placement lacks backend/build identity",
+                )
+            facts = await to_thread.run_sync(current_node_facts)
+            try:
+                await to_thread.run_sync(
+                    lambda: install_engine_package_on_demand(
+                        backend, build, facts, offline=self._offline, stop=stop
+                    ),
+                    abandon_on_cancel=True,
+                )
+            except anyio.get_cancelled_exc_class():
+                stop.set()
+                raise
+            refreshed_facts = await to_thread.run_sync(refresh_node_facts)
+            derivation = await to_thread.run_sync(current_backend_derivation)
+            if (
+                refreshed_facts.engine_package_builds.get(backend) != build
+                or backend not in derivation.installed_backends
+            ):
+                raise EnginePackageInstallError(
+                    "the engine check",
+                    "the installed package does not report as usable on this node",
+                )
+            self._on_demand_backends = derivation.on_demand_backends
+            await self._publish_fresh_node_resources()
+            job.succeeded = True
+        except EnginePackageInstallError as error:
+            failure_step = error.step
+            logger.error(
+                f"Engine package {job.engine} install failed at {error.step}: {error.detail}"
+            )
+        except Exception as error:  # noqa: BLE001 - each waiter gets one explained failure
+            failure_step = "the engine install"
+            logger.opt(exception=error).error("Engine package install failed")
+        await self._release_engine_install_waiters(job, failure_step)
+
+    async def _release_engine_install_waiters(
+        self, job: _EngineInstallJob, failure_step: str | None
+    ) -> None:
+        """Mark a finished install job and answer every instance waiting on it."""
         job.finished = True
         waiters = dict(job.waiters)
         job.waiters.clear()
@@ -4758,6 +5273,71 @@ class Worker:
                     instance_id,
                     _engine_install_failure_message(failure_step, job.engine),
                     error_code="engine_install_failed",
+                )
+
+    async def _keep_engine_package_list_fresh(self) -> None:
+        """Keep what this node says about engine packages true for its life.
+
+        Two things can change it while the node runs. The store may publish a
+        newer package list: the node asks a minute after start and hourly
+        after that, unless it may not install packages (offline, or installs
+        or packages turned off). And Settings may change which builds the
+        cluster follows or turn packages off or on: that is read from the
+        node's saved settings every minute, with no network access, so a
+        change made in Settings takes effect without a restart.
+
+        The node's facts are read again only when the packages it holds or
+        would offer changed. Every failure is quiet: the node keeps reporting
+        what it reported before.
+        """
+        from skulk.engines.on_demand import (
+            installable_engine_package_builds,
+            on_demand_gates_pass,
+            refresh_engine_package_list,
+        )
+        from skulk.facts import (
+            current_backend_derivation,
+            current_node_facts,
+            refresh_node_facts,
+        )
+        from skulk.shared.backends import engine_packages_disabled
+
+        packages_off = await to_thread.run_sync(engine_packages_disabled)
+        next_list_refresh = (
+            anyio.current_time() + _ENGINE_PACKAGE_LIST_FIRST_REFRESH_SECONDS
+        )
+        while True:
+            await anyio.sleep(_ENGINE_PACKAGE_SETTINGS_CHECK_SECONDS)
+            try:
+                if (
+                    anyio.current_time() >= next_list_refresh
+                    and not self._offline
+                    and await to_thread.run_sync(on_demand_gates_pass)
+                ):
+                    next_list_refresh = (
+                        anyio.current_time() + _ENGINE_PACKAGE_LIST_REFRESH_SECONDS
+                    )
+                    await to_thread.run_sync(
+                        lambda: refresh_engine_package_list(offline=self._offline),
+                        abandon_on_cancel=True,
+                    )
+                off_now = await to_thread.run_sync(engine_packages_disabled)
+                switched = off_now != packages_off
+                packages_off = off_now
+                facts = await to_thread.run_sync(current_node_facts)
+                offered = await to_thread.run_sync(
+                    lambda facts=facts: installable_engine_package_builds(
+                        facts, offline=self._offline
+                    )
+                )
+                if switched or offered != facts.engine_package_installable_builds:
+                    await to_thread.run_sync(refresh_node_facts)
+                    derivation = await to_thread.run_sync(current_backend_derivation)
+                    self._on_demand_backends = derivation.on_demand_backends
+                    await self._publish_fresh_node_resources()
+            except Exception as error:  # noqa: BLE001 - optional engine packages must never stop a worker
+                logger.opt(exception=error).debug(
+                    "Engine package check failed; keeping the current report"
                 )
 
     async def _publish_fresh_node_resources(self) -> None:
@@ -4963,6 +5543,7 @@ class Worker:
                         assessment = assess_native_music_placement(
                             shard.model_card, backend, self.node_id, observed, self.state.instances,
                             now_unix_ms=int(time.time() * 1000), excluded_instance=bound.instance,
+                            package_needs=self.state.engine_package_needs,
                         )
                         if assessment.policy != policy:
                             raise ValueError("Native music placement policy differs from current card/library math")
@@ -5236,8 +5817,27 @@ class Worker:
                 # has loaded, so this is the last accurate point - current free
                 # memory now reflects those other loads - to refuse before the
                 # runner allocates and risks an OOM-abort that leaks GPU memory.
+                engine_need: Memory | None = None
+                if package_engine_of(shard.resolved_backend or "") is not None:
+                    engine_need = await self._engine_package_stated_need(
+                        instance, shard
+                    )
+                    if (
+                        self.state.instances.get(task.instance_id) != instance
+                        or self.runners.get(runner_id) is not runner
+                    ):
+                        # The placement changed while the engine was being
+                        # asked. The created task is closed, and planning
+                        # runs again on current state.
+                        await self.event_sender.send(
+                            TaskStatusUpdated(
+                                task_id=task.task_id,
+                                task_status=TaskStatus.Cancelled,
+                            )
+                        )
+                        return
                 fit_error = self._local_shard_fit_error(
-                    shard, instance.context_token_limit
+                    shard, instance.context_token_limit, engine_need=engine_need
                 )
                 if fit_error is not None:
                     logger.error(fit_error)
@@ -5253,6 +5853,21 @@ class Worker:
                             task.instance_id, fit_error
                         )
                     return
+                if (
+                    engine_need is not None
+                    and self.state.engine_package_needs.get(runner_id)
+                    != engine_need.in_bytes
+                ):
+                    # The load is going ahead. The master reserved this
+                    # placement on its own estimate; tell it what the engine
+                    # said, so a later placement on this node is not admitted
+                    # against memory this load is about to take. Sent once
+                    # per figure, so a reload does not grow the event log.
+                    await self.event_sender.send(
+                        EnginePackageNeedStated(
+                            runner_id=runner_id, need_bytes=engine_need.in_bytes
+                        )
+                    )
             logger.info(
                 "Dispatching worker task "
                 f"({_summarize_worker_task(task)}, "
@@ -5328,6 +5943,10 @@ class Worker:
             separation_context=separation_context,
             native_music_context=native_music_context,
             context_token_limit=context_token_limit,
+            engine_package_awaited=awaited_engine_package(
+                shard, self._on_demand_backends
+            )
+            is not None,
             data_sender=self._data_sender.clone()
             if self._data_sender is not None
             else None,

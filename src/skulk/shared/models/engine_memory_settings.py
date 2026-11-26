@@ -1,10 +1,11 @@
 """Effective runner cache controls shared by node facts and memory admission."""
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Final, Literal, final
 
 from pydantic import Field
 
+from skulk.shared.backends import memory_settings_key, package_engine_of
 from skulk.utils.pydantic_ext import FrozenModel
 
 CacheBackend = Literal[
@@ -19,6 +20,10 @@ CACHE_BACKENDS: tuple[CacheBackend, ...] = (
 )
 
 VLLM_DEFAULT_MAX_CONCURRENT_REQUESTS: Final = 32
+
+
+def _is_none(value: object) -> bool:
+    return value is None
 VLLM_MAX_CONCURRENT_REQUESTS_ENV: Final = "SKULK_VLLM_MAX_CONCURRENT_REQUESTS"
 
 
@@ -67,6 +72,13 @@ class EngineMemorySettings(FrozenModel):
         default=VLLM_DEFAULT_MAX_CONCURRENT_REQUESTS,
         ge=1,
         description="Effective vLLM sequence/admission limit, used for native MTP workspace sizing; ignored by other engines.",
+    )
+    package_overhead_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        le=64 * 1024**3,
+        exclude_if=_is_none,
+        description="Memory an engine package's signed manifest adds to a model's weight bytes for admission; absent for built-in engines, so their settings read and serialize as before.",
     )
 
 
@@ -125,6 +137,48 @@ def resolve_engine_memory_settings(
         value_bits=bits,
         fp16_edge_layers=int(environment.get("SKULK_OPTIQ_FP16_LAYERS", "4")),
     )
+
+
+def engine_package_memory_settings(overhead_bytes: int) -> EngineMemorySettings:
+    """The memory settings of one engine package build on a node.
+
+    A package states its own memory need in its signed manifest. Core's cache
+    controls for built-in engines do not apply to it, so nothing is read from
+    the environment.
+    """
+    return EngineMemorySettings(package_overhead_bytes=overhead_bytes)
+
+
+def backend_engine_memory_settings(
+    backend: str,
+    package_overhead_bytes: Mapping[str, int],
+    environment: Mapping[str, str],
+) -> EngineMemorySettings:
+    """The settings this node applies to one backend tag.
+
+    The node's advertisement and its own load guard both come through here,
+    so the figure placement stamped is the figure the guard compares.
+    """
+    overhead = package_overhead_bytes.get(backend)
+    if overhead is not None and package_engine_of(backend) is not None:
+        return engine_package_memory_settings(overhead)
+    return observe_engine_memory_settings(
+        environment, engine=backend.split("-", 1)[0]
+    )
+
+
+def node_engine_memory_settings(
+    backends: Iterable[str],
+    package_overhead_bytes: Mapping[str, int],
+    environment: Mapping[str, str],
+) -> dict[str, EngineMemorySettings]:
+    """Every engine's settings on this node, keyed as ``memory_settings_key`` keys them."""
+    return {
+        memory_settings_key(backend): backend_engine_memory_settings(
+            backend, package_overhead_bytes, environment
+        )
+        for backend in backends
+    }
 
 
 def observe_engine_memory_settings(

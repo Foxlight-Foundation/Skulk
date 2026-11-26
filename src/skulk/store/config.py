@@ -555,6 +555,8 @@ class SkulkConfig(FrozenModel):
             ``None`` means the mode is off.
         restart_recovery: Restart recovery settings. ``None`` means the
             defaults: models come back after a restart.
+        engines: Engine package settings. ``None`` means the defaults: nodes
+            install released engine builds only.
         model_trust: Deprecated persisted compatibility state from the retired
             secondary repository-code approval ceremony. Current execution
             authorization does not consult it.
@@ -571,6 +573,7 @@ class SkulkConfig(FrozenModel):
     telemetry: "TelemetryConfig | None" = None
     intelligent_fabric: "IntelligentFabricConfig | None" = None
     restart_recovery: "RestartRecoveryConfig | None" = None
+    engines: "EnginesConfig | None" = None
     model_trust: "ModelTrustConfig | None" = None
     hf_token: str | None = None
 
@@ -665,6 +668,71 @@ class RestartRecoveryConfig(FrozenModel):
     """
 
     enabled: bool = True
+
+
+EnginePackageChannel = Literal["stable", "candidate"]
+"""Which published engine builds a cluster installs: released builds only, or
+also builds still being tested."""
+
+
+@final
+class EnginesConfig(FrozenModel):
+    """Engine package settings (cluster-synced).
+
+    Attributes:
+        package_channel: Which published builds of an engine package the
+            cluster's nodes install when a model needs one. ``stable`` (the
+            default) means released builds only. ``candidate`` means a node
+            also installs builds that are still being tested. It is a setting
+            and not a launch switch because a packaged Skulk has no launch
+            environment a person can change. A node applies a change within
+            about a minute, and a package a node already holds is never
+            replaced by this setting.
+        packages_enabled: Whether nodes use engine packages at all. On by
+            default.
+    """
+
+    package_channel: EnginePackageChannel = "stable"
+    packages_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether the cluster's nodes use engine packages at all. Turned "
+            "off, every node ignores the packages it holds: it offers none, "
+            "installs none and loads no model on one. Packages already on "
+            "disk stay there and come back when this is turned on again. A "
+            "model already running on a packaged engine keeps running until "
+            "it is stopped. SKULK_ENGINE_PACKAGES_DISABLE=1 turns packages "
+            "off on one node at launch, whatever this says."
+        ),
+    )
+
+
+def engine_package_channel(config: "SkulkConfig | None") -> EnginePackageChannel:
+    """Return the engine package channel from a loaded config.
+
+    Args:
+        config: The loaded ``skulk.yaml``, or ``None`` when none exists.
+
+    Returns:
+        ``engines.package_channel``, or ``stable`` when the section is absent.
+    """
+    if config is None or config.engines is None:
+        return "stable"
+    return config.engines.package_channel
+
+
+def engine_packages_enabled(config: "SkulkConfig | None") -> bool:
+    """Return whether a loaded config leaves engine packages turned on.
+
+    Args:
+        config: The loaded ``skulk.yaml``, or ``None`` when none exists.
+
+    Returns:
+        ``engines.packages_enabled``, or ``True`` when the section is absent.
+    """
+    if config is None or config.engines is None:
+        return True
+    return config.engines.packages_enabled
 
 
 @final

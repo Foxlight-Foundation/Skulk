@@ -36,6 +36,10 @@ from skulk.connectivity.local_network import (
 from skulk.connectivity.tailscale import query_tailscale_status
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.download.impl_shard_downloader import skulk_shard_downloader
+from skulk.engines.order_record import (
+    ModelEngineOrderRecorder,
+    read_model_engine_orders,
+)
 from skulk.extensions import load_extensions
 from skulk.extensions.host_network import (
     namespace_fingerprint,
@@ -1203,6 +1207,9 @@ class Node:
                 if skulk_config is not None and skulk_config.model_trust is not None
                 else ()
             ),
+            # This first master has no replicated view to carry, so it starts
+            # from the engine orders this node saved.
+            initial_model_engine_orders=read_model_engine_orders() or {},
             restart_recovery_record=_load_restart_recovery_record(),
             restart_recovery_enabled=RESTART_RECOVERY_ENABLED,
             restart_recovery_restores_placements=_restart_recovery_restores_placements(),
@@ -1293,6 +1300,9 @@ class Node:
                     lambda: self.telemetry_view.local_pairing_gateway_active,
                 )
             tg.start_soon(self._monitor_zenoh_isolation)
+            tg.start_soon(
+                ModelEngineOrderRecorder(state_provider=self._replicated_view).run
+            )
             if RESTART_RECOVERY_ENABLED:
                 tg.start_soon(
                     ClusterIntentRecorder(
@@ -1958,6 +1968,15 @@ class Node:
                             )
                             else None
                         ),
+                        # A view that applied an event carries the cluster's
+                        # engine orders. One that never did carries none, so
+                        # this node's saved orders stand in for it.
+                        initial_model_engine_orders=(
+                            None
+                            if prior_state is not None
+                            and prior_state.last_event_applied_idx >= 0
+                            else read_model_engine_orders() or {}
+                        ),
                         restart_recovery_record=_load_restart_recovery_record(),
                         restart_recovery_enabled=RESTART_RECOVERY_ENABLED,
                         restart_recovery_restores_placements=_restart_recovery_restores_placements(),
@@ -2199,6 +2218,11 @@ def main():
         from skulk.operator.cli import main as operator_main
 
         sys.exit(operator_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "engines":
+        # `skulk engines` asks the node already running here; it launches none.
+        from skulk.engines.cli import main as engines_main
+
+        sys.exit(engines_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "doctor":
         # `skulk doctor` is a standalone audit, not a node launch: dispatch
         # before Args.parse() so the node argument parser never sees it.

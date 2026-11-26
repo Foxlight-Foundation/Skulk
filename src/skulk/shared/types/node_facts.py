@@ -28,6 +28,10 @@ from typing import Final, Literal, final
 
 from pydantic import ConfigDict, Field
 
+from skulk.shared.types.engine_packages import (
+    MAX_NODE_ENGINE_PACKAGES,
+    NodeEnginePackage,
+)
 from skulk.utils.pydantic_ext import CamelCaseModel
 
 GpuVendor = Literal["nvidia", "amd", "apple", "intel"]
@@ -322,6 +326,32 @@ class NodeFacts(CamelCaseModel):
     )
     comfy_extension_installed_builds: dict[str, str] = Field(
         default_factory=dict, description="Archive-verified Comfy overlays bound to this snapshot's actual base interpreter; existing instances retain their stamped build."
+    )
+
+    engine_package_builds: dict[str, str] = Field(
+        default_factory=dict,
+        description="Backend tag to build identity (the package manifest digest) for each installed engine package's usable active generation. Empty when none is installed or engine packages are turned off.",
+    )
+
+    engine_package_installable_builds: dict[str, str] = Field(
+        default_factory=dict,
+        description="Backend tag to build identity for each engine package this node does not hold but may install when a model needs it, from the package list it last verified. Empty when nothing fits, the node is offline, installs are turned off, or engine packages are turned off.",
+    )
+
+    engine_package_overhead_bytes: dict[str, int] = Field(
+        default_factory=dict,
+        description="Backend tag to the memory each installed or installable engine package build declares beyond a model's weight bytes, from its signed manifest or the signed package list. Admission counts it until the build has answered with its own estimate.",
+    )
+
+    engine_package_problems: tuple[str, ...] = Field(
+        default=(),
+        description="One short line per installed engine package lane whose active generation cannot be offered: engine ID, lane and the refusal code.",
+    )
+
+    engine_packages: tuple[NodeEnginePackage, ...] = Field(
+        default=(),
+        max_length=MAX_NODE_ENGINE_PACKAGES,
+        description="One entry per engine package lane this node holds or may install, for the cluster's engines report. Empty when there is none or engine packages are turned off.",
     )
 
     audio_cpp_binary: EngineBinaryFact = Field(

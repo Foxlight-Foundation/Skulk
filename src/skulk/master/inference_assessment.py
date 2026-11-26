@@ -1,7 +1,7 @@
 """Assess workloads with production admission and isolated candidate snapshots."""
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from skulk.master.placement import (
@@ -45,7 +45,7 @@ from skulk.shared.models.model_cards import (
 from skulk.shared.models.registry import RegistryEngineSupportClaim
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import PlaceInstance
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage, NodeNetworkInfo, NodeResources
 from skulk.shared.types.telemetry import TelemetryView
@@ -73,6 +73,7 @@ def _plan_replica(
     unified: frozenset[NodeId],
     excluded: set[NodeId],
     request_count: int = 1,
+    model_engine_orders: Mapping[ModelId, Sequence[str]] | None = None,
 ) -> tuple[Instance | None, tuple[str, ...], bool]:
     failures: list[str] = []
     pending = False
@@ -98,6 +99,7 @@ def _plan_replica(
                     node_vram=vram,
                     unified_memory_gpu_nodes=unified,
                     excluded_nodes=excluded,
+                    model_engine_orders=model_engine_orders,
                 )
                 instance = next(
                     value for key, value in planned.items() if key not in instances
@@ -326,8 +328,15 @@ def assess_inference(
     runners: Mapping[RunnerId, RunnerStatus] | None = None,
     excluded_nodes: set[NodeId] | None = None,
     now: datetime | None = None,
+    model_engine_orders: Mapping[ModelId, Sequence[str]] | None = None,
+    package_needs: Mapping[RunnerId, int] | None = None,
 ) -> InferenceAssessment:
     """Return estimated local fit and complete external alternatives without effects.
+
+    ``model_engine_orders`` holds each person-set engine order by model name,
+    so the local estimate ranks engines the way a real placement would.
+    ``package_needs`` holds what an engine package said a placed load takes,
+    by runner, so the estimate reserves what a real placement reserves.
 
     Uses authorized artifact metadata, current reservations and ordinary placer
     compatibility/sharding checks. Concurrency is conservatively represented by
@@ -490,12 +499,14 @@ def assess_inference(
         ),
         unreflected=unreflected,
         node_resources=telemetry.node_resources,
+        package_needs=package_needs,
     )
     vram = usable_vram_by_node(
         telemetry.node_system,
         telemetry.node_resources,
         memory,
         instances,
+        package_needs=package_needs,
     )
     planned = dict(instances)
     replicas: list[AssessedReplica] = []
@@ -581,6 +592,7 @@ def assess_inference(
                 unified,
                 excluded | stale,
                 request_count=requests,
+                model_engine_orders=model_engine_orders,
             )
             if instance is not None:
                 break

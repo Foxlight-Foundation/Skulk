@@ -248,6 +248,12 @@ def engine_build_inventory(
     for backend in backends:
         engine = engine_of(backend)
         if engine is None:
+            # An engine package's build is its measured manifest digest. A
+            # declared string cannot stand in for it: the runner looks the
+            # stamped build up by that digest.
+            package_build = facts.engine_package_builds.get(backend)
+            if package_build is not None:
+                inventory[backend] = package_build
             continue
         # A declared build string cannot stand in for this engine's measured
         # executable digest when registry support is exact-build bound.

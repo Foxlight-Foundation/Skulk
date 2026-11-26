@@ -69,6 +69,8 @@ from .api import LicenseSection as LicenseSection
 from .api import Logprobs as Logprobs
 from .api import LogprobsContentItem as LogprobsContentItem
 from .api import ModalitiesCapabilitySection as ModalitiesCapabilitySection
+from .api import ModelEngineOrder as ModelEngineOrder
+from .api import ModelEngineOrdersResponse as ModelEngineOrdersResponse
 from .api import ModelList as ModelList
 from .api import ModelListModel as ModelListModel
 from .api import ModelRequirements as ModelRequirements
@@ -83,6 +85,7 @@ from .api import OpenUrlToolRequest as OpenUrlToolRequest
 from .api import OpenUrlToolResponse as OpenUrlToolResponse
 from .api import PlaceInstanceParams as PlaceInstanceParams
 from .api import PlacementEngineInstall as PlacementEngineInstall
+from .api import PlacementEnginePick as PlacementEnginePick
 from .api import PlacementPreview as PlacementPreview
 from .api import PlacementPreviewResponse as PlacementPreviewResponse
 from .api import PowerUsage as PowerUsage
@@ -95,6 +98,7 @@ from .api import RemoteCodeApprovalView as RemoteCodeApprovalView
 from .api import ResolvedModelCapabilities as ResolvedModelCapabilities
 from .api import RuntimeCapabilitySection as RuntimeCapabilitySection
 from .api import SeparationCapabilitySection as SeparationCapabilitySection
+from .api import SetModelEngineOrderRequest as SetModelEngineOrderRequest
 from .api import StartDownloadParams as StartDownloadParams
 from .api import StartDownloadResponse as StartDownloadResponse
 from .api import StoreDownloadRequest as StoreDownloadRequest

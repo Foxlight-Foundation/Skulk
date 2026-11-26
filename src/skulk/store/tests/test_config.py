@@ -396,6 +396,36 @@ def test_restart_recovery_config_defaults_to_bringing_models_back() -> None:
     assert not parsed.restart_recovery.enabled
 
 
+def test_engines_config_defaults_to_released_builds_only() -> None:
+    from pydantic import ValidationError
+
+    from skulk.store.config import (
+        EnginesConfig,
+        SkulkConfig,
+        engine_package_channel,
+        engine_packages_enabled,
+    )
+
+    assert SkulkConfig.model_validate({}).engines is None
+    assert EnginesConfig().package_channel == "stable"
+    assert engine_package_channel(None) == "stable"
+    assert engine_package_channel(SkulkConfig()) == "stable"
+    following = SkulkConfig.model_validate(
+        {"engines": {"package_channel": "candidate"}}
+    )
+    assert engine_package_channel(following) == "candidate"
+    with pytest.raises(ValidationError):
+        _ = SkulkConfig.model_validate({"engines": {"package_channel": "nightly"}})
+
+    assert EnginesConfig().packages_enabled
+    assert engine_packages_enabled(None)
+    assert engine_packages_enabled(SkulkConfig())
+    assert engine_packages_enabled(following)
+    turned_off = SkulkConfig.model_validate({"engines": {"packages_enabled": False}})
+    assert not engine_packages_enabled(turned_off)
+    assert engine_package_channel(turned_off) == "stable"
+
+
 def test_enabled_store_refuses_blank_host() -> None:
     """The installer-shaped brokenness fails loudly at validation (#888).
 
