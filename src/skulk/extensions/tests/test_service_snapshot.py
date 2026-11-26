@@ -407,8 +407,16 @@ async def test_staging_refuses_a_copy_whose_paths_would_not_fit(
         )
 
     monkeypatch.setattr(service_snapshot, "_sources", lambda: one_file(longest + "mm"))
-    with pytest.raises(ValueError, match="2 characters longer than Windows allows"):
+    with pytest.raises(
+        ValueError, match="2 characters longer than Windows allows"
+    ) as refused:
         await stage_service_runtime(tmp_path)
+    # What the owner can do, and nothing they cannot: on Windows the service's
+    # folder is fixed inside the account's own, so no other folder is offered.
+    said = str(refused.value)
+    assert "Switch on long paths in Windows" in said
+    assert "user folder" in said
+    assert "folder with a shorter path" not in said
     assert not (tmp_path / "core-runtimes").exists()
     RuntimeLock(tmp_path).close()
 

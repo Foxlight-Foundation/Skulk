@@ -1657,7 +1657,9 @@ before it creates anything, a copy whose deepest file would not fit below the
 service root on a machine without long paths (`copied_path_excess()` in
 `extensions/runtime_integrity.py`): the copy's files begin 56 characters
 after the root's path, so the 144-character file a development environment
-holds needs a root of 59 characters or fewer.
+holds needs a root of 59 characters or fewer. On Windows that root is fixed
+inside the account's own folder, so the refusal names long paths as the way
+out and never a shorter folder, which the owner cannot choose there.
 Staging starts by measuring the host (`measure_host()`), and a Windows host
 has a name: `current_platform()` answers `windows-x86_64` or
 `windows-aarch64`, and `service_platform()` in the standalone registration
