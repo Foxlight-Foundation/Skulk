@@ -71,6 +71,9 @@ def export(repository: Path, channel: str, run_id: int) -> None:
         "source_files": files,
     }
     (site / "openapi.json").write_bytes(contract)
+    # The branded host advertises the canonical URL sets. Publishing a second
+    # sitemap of duplicate GitHub URLs would contradict the preferred metadata.
+    (site / "sitemap.xml").unlink(missing_ok=True)
     (site / "docs-export.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 

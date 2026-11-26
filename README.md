@@ -8,10 +8,10 @@
 [![Tests](https://img.shields.io/github/actions/workflow/status/Foxlight-Foundation/Skulk/pipeline.yml?branch=main&label=tests&style=flat-square&logo=github)](https://github.com/Foxlight-Foundation/Skulk/actions/workflows/pipeline.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-4c72b0?style=flat-square)](LICENSE)
 
-[![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/)
-[![Install Skulk](https://img.shields.io/badge/docs-install_skulk-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/install/)
-[![Release Notes](https://img.shields.io/badge/release_notes-v2.0.2-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.2/)
-[![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/architecture/)
+[![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://docs.foxlight.ai/skulk/)
+[![Install Skulk](https://img.shields.io/badge/docs-install_skulk-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://docs.foxlight.ai/skulk/install/)
+[![Release Notes](https://img.shields.io/badge/release_notes-v2.0.2-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://docs.foxlight.ai/skulk/release-notes/2.0.2/)
+[![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://docs.foxlight.ai/skulk/architecture/)
 
   <br>
   <img src="docs/imgs/skulk-logo-2.png" width="200" height="200" alt="Skulk logo">
@@ -23,11 +23,11 @@ Skulk is an interconnect fabric for multi-node AI compute. It joins several mach
 On top of that, Skulk adds:
 
 - Heterogeneous clusters: Apple Silicon nodes serving MLX models, AMD nodes serving GGUF models through a Vulkan or ROCm llama.cpp engine, and NVIDIA nodes serving GGUF through a CUDA llama.cpp build or vLLM, all in one cluster, with each model routed to a node that can run it.
-- Multi-node GGUF inference: a GGUF model that fits no single GPU node pools the GPU memory of several (one driver node plus memory donors over llama.cpp RPC), so two AMD Strix Halo boxes can together serve a quant neither could load alone. Guide: [AMD / Strix Halo nodes](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes/).
+- Multi-node GGUF inference: a GGUF model that fits no single GPU node pools the GPU memory of several (one driver node plus memory donors over llama.cpp RPC), so two AMD Strix Halo boxes can together serve a quant neither could load alone. Guide: [AMD / Strix Halo nodes](https://docs.foxlight.ai/skulk/amd-strix-halo-nodes/).
 - Production-grade speculative decoding delivering 1.16–2.2× speedups across nodes and on heterogeneous hardware.
 - Concurrent GPU serving: a served vLLM engine brings continuous batching and paged attention to NVIDIA nodes, coexisting with the llama.cpp engines (the planner picks by hardware and expected concurrency), and the served llama.cpp engine itself decodes concurrent requests with dynamically sized context.
-- A speech fabric: OpenAI-compatible `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`, and `/v1/audio/voices` endpoints, voice cloning with ten bundled reference voices, a realtime transcription WebSocket at `/v1/realtime` with server-side voice-activity detection, a composable speech-to-chat-to-speech WebSocket at `/v1/fabric/chains/speech`, and a hands-free voice loop in the dashboard chat. Guide: [Speech providers and realtime transcription](https://foxlight-foundation.github.io/Skulk/speech-fabric-realtime/).
-- An extension (plugin) API: separately installed Python packages hook the serving path (request transform, response observer, in-process embeddings) and can serve self-describing provider capabilities that stream media through the fabric and advertise themselves on the telemetry plane. A raising extension is contained and skipped, and extensions never own the response stream. Guide: [Extensions](https://foxlight-foundation.github.io/Skulk/extensions/).
+- A speech fabric: OpenAI-compatible `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`, and `/v1/audio/voices` endpoints, voice cloning with ten bundled reference voices, a realtime transcription WebSocket at `/v1/realtime` with server-side voice-activity detection, a composable speech-to-chat-to-speech WebSocket at `/v1/fabric/chains/speech`, and a hands-free voice loop in the dashboard chat. Guide: [Speech providers and realtime transcription](https://docs.foxlight.ai/skulk/speech-fabric-realtime/).
+- An extension (plugin) API: separately installed Python packages hook the serving path (request transform, response observer, in-process embeddings) and can serve self-describing provider capabilities that stream media through the fabric and advertise themselves on the telemetry plane. A raising extension is contained and skipped, and extensions never own the response stream. Guide: [Extensions](https://docs.foxlight.ai/skulk/extensions/).
 - Managed engine delivery: Linux GPU nodes get pinned `llama-server` builds as ordinary pip wheels (`skulk-llama-server-cuda`, `skulk-llama-server-vulkan`) from the Foxlight wheel index at `wheels.foxlight.ai`, built from pinned llama.cpp source with sigstore build-provenance attestations.
 - A signed external model-card registry: each selectable quant or file is an immutable card, refreshed independently of the Skulk distribution. Complete store and node-cache artifacts retain that full card beside their bytes, so installed models remain self-describing and launchable when the cluster is air-gapped.
 - A real-time React dashboard with easy access to:
@@ -75,7 +75,7 @@ keep a Dock window open. Choose **Start Skulk**, approve **Local Network** acces
 on macOS, wait for **Ready**, and open the dashboard from the app. A single
 machine is already a valid one-node cluster. Skulk never requires Screen &
 System Audio Recording.
-See the [installation guide](https://foxlight-foundation.github.io/Skulk/install/)
+See the [installation guide](https://docs.foxlight.ai/skulk/install/)
 for updates, headless Linux, cluster namespaces, and removal.
 
 For contributors, development builds, unsupported Linux distributions, and
@@ -91,9 +91,9 @@ hardware, and finishes with `skulk doctor --fix`. Re-running it is safe. Pass
 `--headless` only when you intentionally want a source-based API-only node.
 
 For manual development setup and what the source installer does in detail, see
-[Source Builds & Runtime Paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime/);
+[Source Builds & Runtime Paths](https://docs.foxlight.ai/skulk/build-and-runtime/);
 to audit a node at any later point, see
-[Node doctor](https://foxlight-foundation.github.io/Skulk/node-doctor/).
+[Node doctor](https://docs.foxlight.ai/skulk/node-doctor/).
 
 ## Why Skulk
 
@@ -101,7 +101,7 @@ Why would you use Skulk over another solution? What does it get you?
 
 ### Performance
 
-- **Speculative decoding that actually ships.** Multi-token-prediction (MTP) drafting with a bonus-driven verify loop, chained draft depths measured per model card (`mtp_max_depth`), and support for both greedy and temperature sampling. Works on single-node, pipeline-sharded, and tensor-parallel placements, including heterogeneous multi-node rings where draft/accept decisions are explicitly broadcast so mixed hardware cannot silently diverge and wedge the GPU. On by default for supported cards, with a per-card `speculative_multi_node` opt-out; the dashboard shows a ⚡ MTP badge with the active depth on each running instance. Full guide: [Speculative Decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding/). **Why it matters:** measured 1.16–2.2× decode speedups with verification-exact output: the accepted tokens are identical to what plain decode would have produced.
+- **Speculative decoding that actually ships.** Multi-token-prediction (MTP) drafting with a bonus-driven verify loop, chained draft depths measured per model card (`mtp_max_depth`), and support for both greedy and temperature sampling. Works on single-node, pipeline-sharded, and tensor-parallel placements, including heterogeneous multi-node rings where draft/accept decisions are explicitly broadcast so mixed hardware cannot silently diverge and wedge the GPU. On by default for supported cards, with a per-card `speculative_multi_node` opt-out; the dashboard shows a ⚡ MTP badge with the active depth on each running instance. Full guide: [Speculative Decoding](https://docs.foxlight.ai/skulk/speculative-decoding/). **Why it matters:** measured 1.16–2.2× decode speedups with verification-exact output: the accepted tokens are identical to what plain decode would have produced.
 
 - **Continuous batching.** `BatchGenerator` queues incoming requests and decodes them together token-by-token. `SKULK_MAX_CONCURRENT_REQUESTS` (default 8) controls the per-runner ceiling. **Why it matters:** multiple concurrent users share one model's forward pass; throughput scales with concurrency instead of head-of-line blocking.
 
@@ -265,7 +265,7 @@ Build/runtime note:
 
 ## Choose Your Path
 
-- **I want the fastest first success**: follow the [app installation guide](https://foxlight-foundation.github.io/Skulk/install/).
+- **I want the fastest first success**: follow the [app installation guide](https://docs.foxlight.ai/skulk/install/).
 - **I want to build from source**: follow [Source-Based Single-Node Quick Start](#source-based-single-node-quick-start).
 - **I want a multi-node cluster**: install the app on every supported machine, then follow [Cluster Quick Start](#cluster-quick-start).
 - **I want shared storage and fewer duplicate downloads**: read [Model Store](#model-store) after the cluster quick start.
@@ -278,7 +278,7 @@ Build/runtime note:
 | macOS on Apple Silicon | Primary target. Best experience today. Serves MLX models. |
 | Multi-Mac clusters | Supported. Best results on matched macOS versions and fast networking. |
 | RDMA over Thunderbolt 5 | Supported on eligible macOS 26.2+ hardware after OS-level setup. |
-| AMD / Linux GPU (for example Strix Halo) | Supported. Joins a cluster and serves GGUF models on its GPU, alongside Apple Silicon nodes, through two engines: in-process `llama_cpp` (Vulkan or ROCm), and a served `llama_server` engine that unlocks llama.cpp's **native multi-token prediction** (`--spec-type draft-mtp`) so speculative decoding runs on AMD too. The installer wires the pinned `skulk-llama-server-vulkan` engine wheel automatically. See the [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes). |
+| AMD / Linux GPU (for example Strix Halo) | Supported. Joins a cluster and serves GGUF models on its GPU, alongside Apple Silicon nodes, through two engines: in-process `llama_cpp` (Vulkan or ROCm), and a served `llama_server` engine that unlocks llama.cpp's **native multi-token prediction** (`--spec-type draft-mtp`) so speculative decoding runs on AMD too. The installer wires the pinned `skulk-llama-server-vulkan` engine wheel automatically. See the [AMD / Strix Halo node guide](https://docs.foxlight.ai/skulk/amd-strix-halo-nodes/). |
 | NVIDIA / Linux GPU (CUDA) | Supported, with parity to AMD. Serves GGUF through the served `llama_server` engine via the `skulk-llama-server-cuda` wheel (installed automatically) or an in-process CUDA `llama_cpp` build, and can additionally serve through vLLM (`SKULK_VLLM_BIN`, or the installer's `--with-vllm`) for high-concurrency GPU serving. |
 | Linux (CPU only) | Supported as a control/API node; GGUF serving on CPU is possible but slow. |
 
@@ -471,8 +471,8 @@ Skulk exposes several API surfaces:
 
 The most important API documentation lives here:
 
-- [API guide](https://foxlight-foundation.github.io/Skulk/api-guide/)
-- [Generated OpenAPI reference](https://foxlight-foundation.github.io/Skulk/api/skulk-api/)
+- [API guide](https://docs.foxlight.ai/skulk/api-guide/)
+- [Generated OpenAPI reference](https://docs.foxlight.ai/skulk/api/skulk-api/)
 - [website/docs/tracing.md](website/docs/tracing.md)
 
 That guide is written to be both newcomer-friendly and integration-friendly. It includes:
@@ -665,7 +665,7 @@ Important caveats:
   <img src="docs/benchmarks/skulk/mtp-speedups.png" alt="Bar chart of measured speculative-decoding speedups: +30% to +120% across eight model and placement configurations" width="85%" />
 </p>
 
-Protocol: production API, greedy decoding, 200-token completions, median of 3 runs per arm on the same live instance, M4-class Apple Silicon. The output is verification-exact: speculation produces the identical tokens plain decoding would have produced, so the gain is free. The ratios hold under longer generations and temperature sampling, and the percentage is the portable number: absolute tok/s scales with memory bandwidth, the ratio travels with the model. Full methodology and per-configuration discussion in the [Speculative Decoding guide](https://foxlight-foundation.github.io/Skulk/speculative-decoding/).
+Protocol: production API, greedy decoding, 200-token completions, median of 3 runs per arm on the same live instance, M4-class Apple Silicon. The output is verification-exact: speculation produces the identical tokens plain decoding would have produced, so the gain is free. The ratios hold under longer generations and temperature sampling, and the percentage is the portable number: absolute tok/s scales with memory bandwidth, the ratio travels with the model. Full methodology and per-configuration discussion in the [Speculative Decoding guide](https://docs.foxlight.ai/skulk/speculative-decoding/).
 
 <p align="center">
   <img src="docs/benchmarks/skulk/mtp-vs-published.png" alt="Skulk's measured speculation gains against the published production band for datacenter GPUs" width="85%" />
@@ -699,20 +699,20 @@ Draft depth is a measured property, not a guess: deeper chains trade acceptance 
 ## More Documentation
 
 The full documentation site is published at
-[foxlight-foundation.github.io/Skulk](https://foxlight-foundation.github.io/Skulk/).
+[docs.foxlight.ai/skulk](https://docs.foxlight.ai/skulk/).
 Highlights:
 
-- [Install Skulk](https://foxlight-foundation.github.io/Skulk/install/) (recommended macOS and Linux apps, headless Linux, and source/development paths)
-- [Source builds & runtime paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime) (source installer and engine provisioning) and [Node doctor](https://foxlight-foundation.github.io/Skulk/node-doctor)
-- [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes) (heterogeneous clusters, the llama.cpp engine)
-- [Speech providers and realtime transcription](https://foxlight-foundation.github.io/Skulk/speech-fabric-realtime) (TTS, STT, and the realtime WebSocket)
-- [Cluster communication](https://foxlight-foundation.github.io/Skulk/cluster-communication) (the control, telemetry, and data planes; the Zenoh transport)
-- [Model store](https://foxlight-foundation.github.io/Skulk/model-store)
-- [Model cards](https://foxlight-foundation.github.io/Skulk/model-cards) and [model capabilities](https://foxlight-foundation.github.io/Skulk/model-capabilities)
-- [Thunderbolt clustering](https://foxlight-foundation.github.io/Skulk/thunderbolt-clustering) and [RDMA on macOS](https://foxlight-foundation.github.io/Skulk/build-and-runtime)
-- [Speculative decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding)
-- [API guide](https://foxlight-foundation.github.io/Skulk/api-guide) and [architecture](https://foxlight-foundation.github.io/Skulk/architecture)
-- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/2.0.2/)
+- [Install Skulk](https://docs.foxlight.ai/skulk/install/) (recommended macOS and Linux apps, headless Linux, and source/development paths)
+- [Source builds & runtime paths](https://docs.foxlight.ai/skulk/build-and-runtime/) (source installer and engine provisioning) and [Node doctor](https://docs.foxlight.ai/skulk/node-doctor/)
+- [AMD / Strix Halo node guide](https://docs.foxlight.ai/skulk/amd-strix-halo-nodes/) (heterogeneous clusters, the llama.cpp engine)
+- [Speech providers and realtime transcription](https://docs.foxlight.ai/skulk/speech-fabric-realtime/) (TTS, STT, and the realtime WebSocket)
+- [Cluster communication](https://docs.foxlight.ai/skulk/cluster-communication/) (the control, telemetry, and data planes; the Zenoh transport)
+- [Model store](https://docs.foxlight.ai/skulk/model-store/)
+- [Model cards](https://docs.foxlight.ai/skulk/model-cards/) and [model capabilities](https://docs.foxlight.ai/skulk/model-capabilities/)
+- [Thunderbolt clustering](https://docs.foxlight.ai/skulk/thunderbolt-clustering/) and [RDMA on macOS](https://docs.foxlight.ai/skulk/build-and-runtime/)
+- [Speculative decoding](https://docs.foxlight.ai/skulk/speculative-decoding/)
+- [API guide](https://docs.foxlight.ai/skulk/api-guide/) and [architecture](https://docs.foxlight.ai/skulk/architecture/)
+- [Release notes](https://docs.foxlight.ai/skulk/release-notes/2.0.2/)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Contributing

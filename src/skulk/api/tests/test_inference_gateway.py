@@ -2,18 +2,14 @@
 
 import asyncio
 import json
-import os
 import time
 from collections.abc import AsyncGenerator
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
-from threading import Event
 
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
     Ed25519PublicKey,
 )
 from pydantic import JsonValue, TypeAdapter
@@ -311,64 +307,6 @@ async def test_public_chat_route_roundtrip_and_direct_owner_boundary(
             assert "print('hello')" in json.dumps(collected)
             assert response.json()["usage"]["total_tokens"] == 3
         assert fixture.calls == (3 if fixture.local else 1) and fixture.closed
-
-
-def test_signer_key_stays_private_and_stable(tmp_path: Path) -> None:
-    """Restart retains only gateway identity; it never needs account credentials."""
-    path = tmp_path / "gateway.key"
-    signer = GatewaySigner(path)
-    public = signer.public_key()
-    assert GatewaySigner(path).public_key() == public
-    assert path.stat().st_mode & 0o077 == 0
-    path.chmod(0o644)
-    with pytest.raises(ValueError):
-        signer.public_key()
-
-
-def test_concurrent_first_signers_publish_one_complete_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A paused first writer cannot expose an empty key or replace the winner."""
-    path = tmp_path / "gateway.key"
-    generating, resume = Event(), Event()
-    generate = Ed25519PrivateKey.generate
-
-    def pause_first_generation() -> Ed25519PrivateKey:
-        if not generating.is_set():
-            generating.set()
-            assert resume.wait(5)
-        return generate()
-
-    monkeypatch.setattr(Ed25519PrivateKey, "generate", pause_first_generation)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(GatewaySigner(path).public_key)
-        try:
-            assert generating.wait(5)
-            winner = executor.submit(GatewaySigner(path).public_key).result(timeout=5)
-        finally:
-            resume.set()
-        assert first.result(timeout=5) == winner
-    assert GatewaySigner(path).public_key() == winner
-    assert path.stat().st_mode & 0o077 == 0
-    assert tuple(tmp_path.iterdir()) == (path,)
-
-
-def test_interrupted_signer_creation_does_not_publish_a_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A failed file sync leaves no published key and the next request recovers."""
-    path = tmp_path / "gateway.key"
-    sync = os.fsync
-
-    def fail_sync(descriptor: int) -> None:
-        raise OSError("interrupted key creation")
-
-    monkeypatch.setattr(os, "fsync", fail_sync)
-    with pytest.raises(OSError, match="interrupted key creation"):
-        GatewaySigner(path).public_key()
-    assert not tuple(tmp_path.iterdir())
-    monkeypatch.setattr(os, "fsync", sync)
-    assert GatewaySigner(path).public_key() == GatewaySigner(path).public_key()
 
 
 async def test_managed_catalog_read_can_outlive_one_second(

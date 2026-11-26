@@ -4310,7 +4310,10 @@ cannot discard either version.
   adapts provider-neutral `chat.completions@0.1.0` and `@0.2.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority
   precedes signing; capability-owned policy independently admits the request.
-  Gateway keys stay host-local. No account credentials or provider HTTP clients
+  Gateway keys stay host-local; `utils/runtime_files.py` supplies owner-only
+  POSIX/Windows custody and durable complete-before-publish key creation without
+  replacing a concurrent winner. Unsafe existing state is refused without key
+  rotation. No account credentials or provider HTTP clients
   enter Core. Capability models are separate from mounted instances; chat reuses
   Markdown, function-call handling and mounted TTS. Discovery is local-host only.
   Version 0.2 keeps a signed body digest/length in control messages and transfers

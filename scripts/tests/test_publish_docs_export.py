@@ -47,7 +47,9 @@ def repository(tmp_path: Path) -> Path:
 
 def test_export_binds_exact_source_and_contract(repository: Path) -> None:
     """A channel binds its own checkout, not the workflow trigger's revision."""
+    (repository / "website/build/sitemap.xml").write_text("Legacy duplicate URLs")
     export(repository, "stable", 42)
+    assert not (repository / "website/build/sitemap.xml").exists()
     manifest = json.loads((repository / "website/build/docs-export.json").read_text())
     assert (
         manifest["revision"]
