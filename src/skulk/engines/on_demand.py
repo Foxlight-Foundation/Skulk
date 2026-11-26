@@ -360,7 +360,10 @@ def refresh_engine_package_list(
     index_client: EngineIndexClient | None = None,
     now: int | None = None,
 ) -> bool:
-    """Ask the store for a newer engine trust and package list, and keep them.
+    """Ask for a newer engine trust and package list, and keep them.
+
+    The trust comes from the capability store and the list from the engine
+    store; they are different addresses.
 
     Does nothing on a node that may not install packages. Every failure is
     quiet: the kept copies stay in force and the node offers what it offered
@@ -370,7 +373,7 @@ def refresh_engine_package_list(
         True when a verified package list is in force afterwards.
 
     Side effects:
-        Network access to the store; writes the kept trust and package list.
+        Network access to both stores; writes the kept trust and package list.
     """
     if offline or not on_demand_gates_pass(environ):
         return False

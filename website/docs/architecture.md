@@ -2193,9 +2193,14 @@ installed and at no other time: a package that is already installed starts
 without it, and an expired trust document or an unreachable store stops only
 a new installation.
 
-**How a node learns what exists.** The store publishes one signed list of
-every published build, the package index (`provisioning/engine_index.py`,
-`index-v1.json` under the store's `engines/` directory). A node keeps the last
+**How a node learns what exists.** Engine files are served from the engine
+store, `https://engines.foxlight.ai/`, an address of its own. It is kept apart
+from the capability store on purpose: the capability store keeps a single
+writer and vouches only for which key may sign an engine, while the engine
+store holds files that are each covered by that key's signature or by a digest
+in a signed manifest, so it is trusted for nothing. It publishes one signed
+list of every published build, the package index
+(`provisioning/engine_index.py`, `index-v1.json`). A node keeps the last
 index it verified; that copy is the revision floor and is all a node reads to
 decide what it offers, so offering needs no network. A worker fetches a newer
 index about a minute after it starts and then hourly. The index decides only

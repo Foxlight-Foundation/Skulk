@@ -597,8 +597,8 @@ def _check_engine_packages(facts: NodeFacts) -> Sequence[CheckResult]:
                 "remove it from the dashboard (Settings, Add-on engines, Engines "
                 f"on your machines) or with `skulk engines remove {package.engine_id} "
                 f"--lane {package.lane}`; this node installs the engine again the "
-                "first time a model placed here needs it, if the store offers a "
-                "build this Skulk version can run"
+                "first time a model placed here needs it, if a build this Skulk "
+                "version can run is published"
             )
         results.append(
             CheckResult(

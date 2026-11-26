@@ -3467,7 +3467,7 @@ step that failed (the download, the disk-space check, or the GPU check).
 An engine package a node does not hold but can install is announced the same
 way. `engine` is then the package's engine name (for example `tensorfold`),
 and `approximate_download_bytes` is read from the answering node's own copy of
-the store's package list, so it is `0` when that node does not list the build.
+the engine store's package list, so it is `0` when that node does not list the build.
 The node advertises the package's backend tag in `onDemandBackends` and the
 exact build in `installableEngineBuilds`; the placement is stamped with that
 build, and the worker installs and activates exactly that build before the

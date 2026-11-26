@@ -1,6 +1,7 @@
 """The signed list of engine packages a node may install, and what fits this node.
 
-A node can only offer to install an engine it knows exists. The store
+A node can only offer to install an engine it knows exists. The engine store
+(``ENGINE_STORE_URL``, an address of its own, apart from the capability store)
 publishes one small document, the **package index**, that lists every
 published package build: which engine, which platform and accelerator, which
 channel, and the identity of its signed manifest. An engine publisher signs
@@ -70,9 +71,16 @@ ENGINE_INDEX_SIGNATURE_DOMAIN: Final = b"skulk-engine-index-v1\n"
 """Prefix of the signed bytes. It separates the index from a package manifest
 and from every other document signed with the same kind of key."""
 
-ENGINE_STORE_URL: Final = "https://skulkapps.foxlight.ai/engines/"
-"""Directory of the built-in store that serves engine packages. Fixed in host
-code: no index, manifest, request or setting can point a node elsewhere."""
+ENGINE_STORE_URL: Final = "https://engines.foxlight.ai/"
+"""The engine store: the address that serves the package index and every
+published build. Fixed in host code: no index, manifest, request or setting
+can point a node elsewhere.
+
+It is deliberately not the capability store. The capability store keeps one
+writer and vouches only for which key may sign an engine
+(``v1/engine-trust.json``). The engine store holds files, each covered by that
+key's signature or by a digest inside a signed manifest, so it is trusted for
+nothing: a node refuses any byte that does not verify."""
 
 ENGINE_INDEX_DOCUMENT: Final = "index-v1.json"
 """Basename of the signed package index under ``ENGINE_STORE_URL``."""
