@@ -1,3 +1,4 @@
+import socket
 import time
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Sequence
@@ -715,6 +716,54 @@ class TelemetryTopicRouter(TopicRouter[NodeTelemetry]):
         return len(self._pending)
 
 
+def why_no_peer_listener(port: int) -> str:
+    """Say why the node could not listen for peers, which libp2p does not.
+
+    When libp2p cannot take its TCP port, its error has no text at all (the
+    transport's own failure prints as an empty string), and it has already
+    logged "listening on" by then, because it logs before it binds. The node
+    then ends with a bare ``RuntimeError`` that names neither the port nor the
+    reason. The usual reason is that another program holds the port: the
+    default lies inside the range an operating system hands out to programs
+    that ask for any free port, on Windows, macOS and Linux alike.
+
+    The operating system is asked afterwards, with a plain bind, what it has
+    against the port now. That is a second question and not libp2p's own
+    answer: it can find the port free again.
+
+    Args:
+        port: The TCP port the node was told to listen on; 0 for one chosen
+            by the operating system.
+
+    Returns:
+        One sentence for the owner: the port, what the operating system says
+        about it, and what to do.
+    """
+    if port == 0:
+        return (
+            "Skulk could not start listening for peers on a TCP port of the "
+            "operating system's choosing, and the network layer gave no reason."
+        )
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("0.0.0.0", port))
+    except OSError as reason:
+        return (
+            f"Skulk could not listen for peers on TCP port {port}: {reason}. "
+            "Another program is most likely using that port. Stop it, or give "
+            "Skulk another port with --libp2p-port or SKULK_LIBP2P_PORT."
+        )
+    finally:
+        probe.close()
+    return (
+        f"Skulk could not start listening for peers on TCP port {port}, and "
+        "the network layer gave no reason. The port is free now, so another "
+        "program may have held it for a moment: start Skulk again. If it "
+        "keeps happening, choose another port with --libp2p-port or "
+        "SKULK_LIBP2P_PORT."
+    )
+
+
 class Router:
     async def host_network(
         self, network_version: str, namespace_token: str
@@ -763,11 +812,13 @@ class Router:
         # so the Router subscribes only to its own id; default to the keypair's
         # node id when the caller doesn't override it.
         resolved_node_id = node_id if node_id is not None else identity.to_node_id()
-        return cls(
-            handle=NetworkingHandle(identity, list(bootstrap_peers), listen_port),
-            zenoh=zenoh,
-            node_id=resolved_node_id,
-        )
+        try:
+            handle = NetworkingHandle(identity, list(bootstrap_peers), listen_port)
+        except RuntimeError as failure:
+            if str(failure):
+                raise
+            raise RuntimeError(why_no_peer_listener(listen_port)) from failure
+        return cls(handle=handle, zenoh=zenoh, node_id=resolved_node_id)
 
     def __init__(
         self,
