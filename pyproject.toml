@@ -27,7 +27,7 @@ dependencies = [
   # (src/skulk/tests/test_windows_bindings_wheel.py enforces it): bump both
   # together and publish the Windows wheel before running `uv lock`.
   "skulk_pyo3_bindings; sys_platform != 'win32'",
-  "skulk_pyo3_bindings==0.2.11; sys_platform == 'win32'",
+  "skulk_pyo3_bindings==0.2.12; sys_platform == 'win32'",
   "anyio==4.14.2",
   "mlx==0.32.4; sys_platform == 'darwin'",
   "mlx[cpu]==0.32.4; sys_platform == 'linux'",

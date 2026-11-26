@@ -2603,8 +2603,8 @@ dependencies = [
     { name = "skulk-capability-kernel", version = "0.7.0", source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0/skulk_capability_kernel-0.7.0-cp313-abi3-macosx_11_0_arm64.whl" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "skulk-capability-kernel", version = "0.7.0", source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0/skulk_capability_kernel-0.7.0-cp313-abi3-manylinux_2_34_aarch64.whl" }, marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
     { name = "skulk-capability-kernel", version = "0.7.0", source = { url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0/skulk_capability_kernel-0.7.0-cp313-abi3-manylinux_2_34_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "skulk-pyo3-bindings", version = "0.2.11", source = { registry = "https://wheels.foxlight.ai/simple/" }, marker = "sys_platform == 'win32'" },
-    { name = "skulk-pyo3-bindings", version = "0.2.11", source = { editable = "rust/skulk_pyo3_bindings" }, marker = "sys_platform != 'win32'" },
+    { name = "skulk-pyo3-bindings", version = "0.2.12", source = { registry = "https://wheels.foxlight.ai/simple/" }, marker = "sys_platform == 'win32'" },
+    { name = "skulk-pyo3-bindings", version = "0.2.12", source = { editable = "rust/skulk_pyo3_bindings" }, marker = "sys_platform != 'win32'" },
     { name = "tiktoken" },
     { name = "tomlkit" },
     { name = "torchvision", marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
@@ -2678,7 +2678,7 @@ requires-dist = [
     { name = "skulk-capability-kernel", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'", url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0/skulk_capability_kernel-0.7.0-cp313-abi3-manylinux_2_34_aarch64.whl" },
     { name = "skulk-capability-kernel", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/Foxlight-Foundation/skulk-capability-sdk/releases/download/native-v0.7.0/skulk_capability_kernel-0.7.0-cp313-abi3-manylinux_2_34_x86_64.whl" },
     { name = "skulk-pyo3-bindings", marker = "sys_platform != 'win32'", editable = "rust/skulk_pyo3_bindings" },
-    { name = "skulk-pyo3-bindings", marker = "sys_platform == 'win32'", specifier = "==0.2.11", index = "https://wheels.foxlight.ai/simple/" },
+    { name = "skulk-pyo3-bindings", marker = "sys_platform == 'win32'", specifier = "==0.2.12", index = "https://wheels.foxlight.ai/simple/" },
     { name = "tiktoken", specifier = ">=0.12.0" },
     { name = "tomlkit", specifier = ">=0.14.0" },
     { name = "torchvision", marker = "sys_platform == 'darwin'", specifier = "==0.28.0" },
@@ -2780,18 +2780,18 @@ wheels = [
 
 [[package]]
 name = "skulk-pyo3-bindings"
-version = "0.2.11"
+version = "0.2.12"
 source = { registry = "https://wheels.foxlight.ai/simple/" }
 resolution-markers = [
     "python_full_version < '3.14' and platform_machine == 'AMD64' and sys_platform == 'win32'",
 ]
 wheels = [
-    { url = "https://wheels.foxlight.ai/wheels/skulk_pyo3_bindings-0.2.11-cp313-cp313-win_amd64.whl", hash = "sha256:696c44d5f5078f132ebdca286c28b484750d525e40def455a3cd3b2d9759c800" },
+    { url = "https://wheels.foxlight.ai/wheels/skulk_pyo3_bindings-0.2.12-cp313-cp313-win_amd64.whl", hash = "sha256:9f21ae0644740481732e2b32d218d88a6781f32f52813c72e9918639fac6ccfd" },
 ]
 
 [[package]]
 name = "skulk-pyo3-bindings"
-version = "0.2.11"
+version = "0.2.12"
 source = { editable = "rust/skulk_pyo3_bindings" }
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
