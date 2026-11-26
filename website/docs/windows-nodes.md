@@ -117,8 +117,13 @@ belongs to the first configuration that set it up.
 
 ## Plugins on Windows
 
-The first time you open the **Plugins** page, Skulk offers to set up the plugin
-service, as it does on macOS and Linux. On Windows, setup:
+The first time you open the **Plugins** page in a dashboard on the Windows PC
+itself, Skulk starts setting up the plugin service and shows its progress, as
+it does on macOS and Linux. It does not ask first. A dashboard opened from
+another machine does not start setup, unless it reaches the node over
+Tailscale as its owner; it says to open Plugins on the PC itself.
+
+On Windows, setup:
 
 1. Copies Skulk's own Python environment into
    `%LOCALAPPDATA%\Skulk\plugins`, about 450 MB.
@@ -144,6 +149,20 @@ Things to know about the service:
 - **Stopping it is done by setup**, which switches the task off and asks the
   service to stop. Ending the task in Task Scheduler also stops it, but the
   next minute starts it again unless the task is disabled.
+- **It stays after Skulk is stopped.** The copy and the task belong to your
+  account, not to the node's window or the checkout. Stopping the node, or
+  deleting the checkout, removes neither.
+
+### Remove the plugin service
+
+Skulk has no command for this on Windows yet. By hand:
+
+1. Open **Task Scheduler** and select **Task Scheduler Library**.
+2. Find the task whose name begins `foundation.foxlight.skulk.plugins.`,
+   choose **End**, then **Delete**.
+3. Delete the folder `%LOCALAPPDATA%\Skulk\plugins`.
+
+Opening the Plugins page on the PC again sets the service up again.
 
 ### If setup says the path is too long
 
