@@ -735,8 +735,10 @@ def peer_listener_refused(said: str, port: int) -> str:
     Bindings before 0.2.12 passed libp2p's error on as it was, and it prints
     as nothing, so a node ended with a ``RuntimeError`` that had no message.
     For a while this module then asked the operating system about the port a
-    second time. That could find the port free again, and it would have blamed
-    the port for any other failure that came without words.
+    second time, with a plain bind. That could find the port free again, it
+    would have blamed the port for any other failure that came without words,
+    and its answer was not libp2p's: on Windows a plain bind to a held port is
+    refused with error 10048 and libp2p's bind with 10013.
 
     Args:
         said: The network layer's error, which begins with

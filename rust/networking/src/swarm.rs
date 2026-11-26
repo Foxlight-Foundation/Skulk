@@ -656,10 +656,13 @@ mod tests {
         };
         let message = error.to_string();
         let named = format!("{LISTEN_FAILURE_PREFIX}TCP port {port}: ");
-        assert!(message.starts_with(&named), "{message}");
-        // What the operating system said, in whatever words it uses.
-        let refused = std::net::TcpListener::bind(("0.0.0.0", port)).expect_err("still held");
-        assert!(message.ends_with(&refused.to_string()), "{message}");
+        let reason = message
+            .strip_prefix(named.as_str())
+            .expect("the port is named first");
+        // The operating system's own error, in whatever words it uses. Which
+        // error is the platform's business: Windows refuses libp2p's bind
+        // with 10013 where it refuses a plain bind with 10048.
+        assert!(reason.contains("(os error "), "{message}");
         drop(holder);
     }
 

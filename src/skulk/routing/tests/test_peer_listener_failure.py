@@ -7,8 +7,8 @@ layer now names the port and passes libp2p's reason on, and the router adds
 what the owner can do.
 """
 
+import re
 import socket
-import sys
 
 import pytest
 from skulk_pyo3_bindings import Keypair
@@ -79,17 +79,17 @@ def test_the_real_network_layer_cannot_take_a_held_port_and_the_node_says_so() -
     """With the real bindings: the port, the system's own reason, and what to do."""
     holder, port = _held()
     try:
-        with pytest.raises(OSError) as refused:
-            socket.socket(socket.AF_INET, socket.SOCK_STREAM).bind(("0.0.0.0", port))
         with pytest.raises(RuntimeError) as caught:
             Router.create(Keypair.generate(), listen_port=port)
     finally:
         holder.close()
     message = str(caught.value)
-    assert message.startswith(f"Skulk {PEER_LISTENER_REFUSED}TCP port {port}: ")
-    # The operating system's own error number, whatever language it speaks.
-    number = refused.value.winerror if sys.platform == "win32" else refused.value.errno
-    assert f"(os error {number})" in message
+    named = f"Skulk {PEER_LISTENER_REFUSED}TCP port {port}: "
+    assert message.startswith(named)
+    # The operating system's own error, whatever language it speaks. Which
+    # error is the platform's business: Windows refuses libp2p's bind with
+    # 10013 where it refuses a plain bind with 10048.
+    assert re.match(r".+ \(os error \d+\)\. ", message[len(named) :])
     assert "--libp2p-port" in message
     # The network layer's own words, which the sentence was made from.
     assert str(caught.value.__cause__).startswith(PEER_LISTENER_REFUSED)
