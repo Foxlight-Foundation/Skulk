@@ -169,18 +169,27 @@ To stop the service and keep it stopped: open **Task Scheduler**, select
 that order. Disabled first, the task is not started again by the next minute.
 Enable it again to bring the service back.
 
-Skulk has no command that removes the service on Windows yet, and removing it
-by hand has not been tested from end to end. The service has three parts:
+Skulk has no command that removes the service on Windows yet. It can be
+removed by hand, and it has three parts. Remove all three, with Skulk stopped:
 
-- the scheduled task;
-- the folder `%LOCALAPPDATA%\Skulk\plugins`;
-- the node's own record of its connection to the service, in
-  `managed-service` inside the node's settings folder
-  (`%USERPROFILE%\.skulk`).
+1. Stop the node (**Ctrl+Break** in its window).
+2. In Task Scheduler, **Disable**, **End** and then **Delete** the task.
+3. Delete the folder `%LOCALAPPDATA%\Skulk\plugins`. If Windows says a file
+   is in use, the service is still ending: wait a few seconds and try again.
+4. Delete the folder `managed-service` inside the node's settings folder
+   (`%USERPROFILE%\.skulk`). It holds the node's own record of its
+   connection to the service.
 
-Deleting the task and the folder while that record is still there leaves the
-Plugins page reporting a service that is set up and does not answer. Whether
-setup then repairs it has not been tried on Windows.
+After that the node reads as never set up, and opening Plugins sets the
+service up again from nothing. On the test machine that was done with the
+task's three steps given as commands, not by clicking, and with no plugin
+installed.
+
+**Do not skip step 4.** With the task and the folder gone and that record
+still there, the node tries to set the service up again by itself and fails
+with "Skulk already has a different local service profile", and **Try again**
+fails the same way. The way out of that state was not tested as such, but it
+is the same list again: stop the node, and remove the folder and the record.
 
 ### If setup says a path is too long
 
@@ -246,6 +255,7 @@ All on one Windows 11 machine (x86-64), from a clean checkout:
   on the network.
 - Setting up the plugin service from nothing to ready, reconnecting to it
   after the node restarted, and stopping it.
+- Removing the plugin service by hand and setting it up again.
 
 ## What has not been tested
 
@@ -253,6 +263,7 @@ All on one Windows 11 machine (x86-64), from a clean checkout:
 - An account that was never an administrator. The test account is an
   administrator that runs Skulk with ordinary rights.
 - The plugin service coming back after signing out and in again.
-- Removing the plugin service by hand, and setting it up again afterwards.
+- Removing the plugin service by hand with a plugin installed. No plugin can
+  be installed on Windows yet.
 - A chat request sent through a Windows node to a model on another node.
 - A cluster of more than two nodes with a Windows node in it.
