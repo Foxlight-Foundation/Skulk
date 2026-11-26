@@ -425,8 +425,21 @@ async def test_explicit_download_rejects_forged_same_alias_card(
     ]
 
 
+@pytest.mark.parametrize(
+    ("claimed_engine", "node_backends", "stamped_backend"),
+    [
+        ("vllm", ("vllm", "vllm-cuda"), "vllm-cuda"),
+        # An engine package has no built-in name and advertises lanes only; a
+        # signed entry may name the engine or one lane.
+        ("tensorfold", ("tensorfold-cuda",), "tensorfold-cuda"),
+        ("tensorfold-cuda", ("tensorfold-cuda",), "tensorfold-cuda"),
+    ],
+)
 async def test_preview_exposes_upstream_engine_compatibility(
     monkeypatch: pytest.MonkeyPatch,
+    claimed_engine: str,
+    node_backends: tuple[str, ...],
+    stamped_backend: str,
 ) -> None:
     """Operators can distinguish matrix-admitted placements from legacy cards."""
     api = _build_api()
@@ -437,11 +450,8 @@ async def test_preview_exposes_upstream_engine_compatibility(
         NodeTelemetry(
             node_id=node_id,
             info=NodeResources(
-                backends=frozenset({"vllm", "vllm-cuda"}),
-                engine_builds={
-                    "vllm": "vllm@9.9.9",
-                    "vllm-cuda": "vllm@9.9.9",
-                },
+                backends=frozenset(node_backends),
+                engine_builds=dict.fromkeys(node_backends, "vllm@9.9.9"),
                 hardware_classes=frozenset({"nvidia"}),
             ),
         ),
@@ -474,7 +484,7 @@ async def test_preview_exposes_upstream_engine_compatibility(
     support = RegistryEngineSupportClaim.model_validate(
         {
             "claim_id": "support_" + "b" * 52,
-            "engine": "vllm",
+            "engine": claimed_engine,
             "engine_build": "vllm@9.9.9",
             "architecture": "future_architecture_v1",
             "artifact_format": "safetensors",
@@ -499,7 +509,7 @@ async def test_preview_exposes_upstream_engine_compatibility(
     def _fake_placements(
         _command: PlaceInstance, **_kwargs: object
     ) -> dict[InstanceId, MlxRingInstance]:
-        instance = _single_node_instance(str(node_id), resolved_backend="vllm-cuda")
+        instance = _single_node_instance(str(node_id), resolved_backend=stamped_backend)
         return {instance.instance_id: instance}
 
     def _support_for_card(_card: ModelCard) -> tuple[RegistryEngineSupportClaim, ...]:

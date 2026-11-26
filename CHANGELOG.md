@@ -52,6 +52,9 @@ This project records release notes here and mirrors public-facing notes in
   published separately, signed by its publisher, and installed by the machine itself the first
   time a model placed there needs it. The launch preview says when an engine will be installed
   and how much there is to download. Add-on engines serve text generation on one machine.
+- An add-on engine runs a model when the model's card names it, or when the Foxlight model
+  registry lists it for the model. The model behind Talk to Skulk (the steward) is never
+  placed on an add-on engine, because add-on engines do not carry tool calls.
 - Skulk chooses among the engines that can run a model by the order a person set for the
   model, then the order on the model's card, then a built-in order that puts add-on engines
   last. An order only ranks; it never makes a model impossible to launch.

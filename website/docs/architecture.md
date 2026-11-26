@@ -2241,6 +2241,19 @@ stamped on the instance so a repair ranks engines the way the launch did. An
 order only ranks: entries a node does not have are skipped, so an order can
 never make a model impossible to launch.
 
+**Which models a package may run.** An order ranks only engines that are
+eligible for the model, and a package becomes eligible in one of two ways. The
+card names it in `placement.compatible_backends`, which is how a person lists
+it for a card they add. Or the registry's signed engine-support list carries a
+supported upstream-compatibility entry for the card's architecture and artifact
+format that names the engine (or one of its backend tags), which is how it is
+listed for a signed card nobody on the cluster can edit. A signed card with no
+curated architecture has an architecture that is its own identity, so an entry
+for it covers that card and no other. A system placement, which today is the
+steward, is never put on a package whichever way the package became eligible:
+the steward runs every turn with tools, and the chat dialect of a package
+carries none.
+
 **A launch on a package.** Admission counts the model's weights plus the memory
 the build declares. If the chosen node only offers the build, the worker's
 `InstallEngine` task installs and activates exactly that build beside the model
