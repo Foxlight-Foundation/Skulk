@@ -154,11 +154,14 @@ the path is. Use a shorter folder, or switch long paths on in Windows.
 
 ## Troubleshooting
 
-**"could not listen for peers on TCP port 52416".** Another program holds the
-port Skulk uses to talk to other nodes. The default lies in the range Windows
-hands out to programs that ask for any free port, so this can happen by
-chance. Start Skulk again, or give it another port with `--libp2p-port` or
-`SKULK_LIBP2P_PORT`.
+**"could not listen for peers on TCP port 52416".** Skulk could not take the
+port it uses to talk to other nodes. The message goes on to give Windows' own
+reason, with an error number; read that first. Most often another program
+holds the port: the default lies in the range Windows hands out to programs
+that ask for any free port, so this can happen by chance. In that case start
+Skulk again, or give it another port with `--libp2p-port` or
+`SKULK_LIBP2P_PORT`. If the reason is something else, a different port may not
+help.
 
 **The node runs but sees no other node.** Check, in this order: that Windows
 Firewall allows Skulk on your network (see [Start it](#start-it)); that the
