@@ -220,6 +220,7 @@ jobs:
           src/skulk/extensions/tests/test_runtime_manager_platforms.py
           src/skulk/extensions/tests/test_runtime_catalog.py
           src/skulk/extensions/tests/test_capability_store.py
+          src/skulk/routing/tests/test_peer_listener_failure.py
 
       - name: Run the plugin installer tests as an ordinary user
         # scripts/run_as_ordinary_windows_user.py starts a command with this
