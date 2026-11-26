@@ -40,6 +40,26 @@ This project records release notes here and mirrors public-facing notes in
   the base section; before, one broadcast filled in every default and the override stopped
   inheriting. A staging folder a person wrote is still shared as written.
 
+### Add-on engines
+
+- A machine can now run a model on an engine that is not part of Skulk. An add-on engine is
+  published separately, signed by its publisher, and installed by the machine itself the first
+  time a model placed there needs it. The launch preview says when an engine will be installed
+  and how much there is to download. Add-on engines serve text generation on one machine.
+- Skulk chooses among the engines that can run a model by the order a person set for the
+  model, then the order on the model's card, then a built-in order that puts add-on engines
+  last. An order only ranks; it never makes a model impossible to launch.
+- When an add-on engine refuses to load a model, Skulk places the model again on the next
+  engine that can run it, on the same machine when it has one. An engine that says it cannot
+  run the model at all is not given that model again until the machine restarts or the engine
+  is replaced.
+- **Settings** has a new **Add-on engines** section: **Use add-on engines** (on by default),
+  **Install test builds** (off by default), and **Engines on your machines**, where you can
+  switch a machine to another build it already has or remove one. `skulk engines` does the
+  same from a terminal, and `skulk doctor` reports an add-on engine a machine cannot use.
+- A cluster that uses no add-on engine behaves as before. See
+  [Add-on engines](website/docs/add-on-engines.md).
+
 ### Windows management node
 
 - A Skulk node now starts on Windows from a source checkout, as a management node only. It
