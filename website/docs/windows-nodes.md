@@ -118,10 +118,15 @@ belongs to the first configuration that set it up.
 ## Plugins on Windows
 
 The first time you open the **Plugins** page in a dashboard on the Windows PC
-itself, Skulk starts setting up the plugin service and shows its progress, as
-it does on macOS and Linux. It does not ask first. A dashboard opened from
-another machine does not start setup, unless it reaches the node over
-Tailscale as its owner; it says to open Plugins on the PC itself.
+itself, at `http://localhost:52415`, Skulk starts setting up the plugin
+service and shows its progress, as it does on macOS and Linux. It does not ask
+first.
+
+A dashboard opened from another machine on the network, or on the PC through
+its network address, does not start setup and cannot manage plugins; it says
+to open Plugins on the host itself. On macOS and Linux a dashboard reached
+over Tailscale counts as being on the host too. That has not been tried on
+Windows.
 
 On Windows, setup:
 
@@ -167,12 +172,27 @@ Skulk has no command for this on Windows yet. By hand:
 
 Opening the Plugins page on the PC again sets the service up again.
 
-### If setup says the path is too long
+### If setup says a path is too long
 
-Windows limits how long a file's path may be unless long paths are switched on
-for the machine. An install whose files would not fit is refused before
-anything is downloaded, with a sentence that says how many characters too long
-the path is. Use a shorter folder, or switch long paths on in Windows.
+Windows limits a file's path to 259 characters unless long paths are switched
+on for the machine, and they are off by default.
+
+The plugin service lives in your user folder, at
+`C:\Users\` your user name `\AppData\Local\Skulk\plugins`, and cannot be put
+anywhere else. The copy of Skulk inside it has deeply nested files. With the
+environment a source checkout gives today, the copy fits when that folder's
+path is 59 characters or shorter, which means a user name of about 22
+characters or fewer.
+
+If it does not fit, setup stops before it creates anything and says how many
+characters too long the path is. The way out is to switch long paths on in
+Windows: the **Enable Win32 long paths** policy, or the `LongPathsEnabled`
+value in the registry. Either needs an administrator. The message also
+suggests a folder with a shorter path; on Windows that would mean a user
+folder with a shorter name.
+
+Installing a plugin has the same kind of check, with its own message, for the
+folder the plugin goes into. No plugin can be installed on Windows yet.
 
 ## Troubleshooting
 
