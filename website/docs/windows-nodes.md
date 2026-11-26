@@ -194,12 +194,17 @@ environment a source checkout gives today, the copy fits when that folder's
 path is 59 characters or shorter, which means a user name of about 22
 characters or fewer.
 
-If it does not fit, setup stops before it creates anything and says how many
-characters too long the path is. The way out is to switch long paths on in
-Windows: the **Enable Win32 long paths** policy, or the `LongPathsEnabled`
-value in the registry. Either needs an administrator. The message also
-suggests a folder with a shorter path; on Windows that would mean a user
-folder with a shorter name.
+If it does not fit, setup stops before it copies anything and says how many
+characters too long the path is. By then it has made the service's folder and
+a record of the attempt inside it, and nothing else: there is no copy and no
+scheduled task, and the Plugins page shows the failure with a **Try again**
+button.
+
+The way out is to switch long paths on in Windows: the **Enable Win32 long
+paths** policy, or the `LongPathsEnabled` value in the registry. Either needs
+an administrator. Trying again after that has not been tested on a machine
+where setup was first refused. The only other way is a user folder with a
+shorter name.
 
 Installing a plugin has the same kind of check, with its own message, for the
 folder the plugin goes into. No plugin can be installed on Windows yet.
