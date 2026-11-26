@@ -34,6 +34,7 @@ from skulk.shared.models.separation import separation_is_absent
 from skulk.shared.models.video_support import video_engine_feature_builds
 from skulk.shared.types.audio_separation import SeparationStemName
 from skulk.shared.types.common import CommandId, NodeId
+from skulk.shared.types.engine_orders import engine_order_problem
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.music import MusicJobStatus, MusicOutputManifest
 from skulk.shared.types.text_generation import ReasoningEffort
@@ -2431,6 +2432,29 @@ class PlaceInstanceParams(BaseModel):
     )
 
 
+    engine_order: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional. Engines to try for this launch only: backend tags, most "
+            "preferred first, such as `llama_server-vulkan`. They are consulted "
+            "ahead of the model's person-set engine order and the card's "
+            "default, and set no standing order. A launch that cannot run on "
+            "any listed engine starts on the next engine in line, and the "
+            "response's `engine_pick` says so."
+        ),
+    )
+
+    @field_validator("engine_order")
+    @classmethod
+    def _require_well_formed_engine_order(
+        cls, value: list[str] | None
+    ) -> list[str] | None:
+        """Answer 422 for a malformed order instead of failing later."""
+        if value is not None and (problem := engine_order_problem(value)) is not None:
+            raise ValueError(problem)
+        return value
+
+
 class CreateInstanceParams(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -2483,6 +2507,28 @@ class PlacementEngineInstall(BaseModel):
         ge=0, description="Approximate download the install adds on each node."
     )
     detail: str = Field(description="Operator-readable notice about the install.")
+
+
+class PlacementEnginePick(BaseModel):
+    """How a launch that named its engines was planned."""
+
+    asked: list[str] = Field(
+        description="The engines the launch asked for, most preferred first."
+    )
+    engines: list[str] = Field(
+        description=(
+            "Backend tags the launch is planned on, from this node's dry run. "
+            "Empty when the plan does not name its engine yet."
+        )
+    )
+    used: bool | None = Field(
+        description=(
+            "True when every part of the launch is planned on an engine that "
+            "was asked for. False when none of those engines can run the model "
+            "here right now and the launch starts on the next engine in line "
+            "instead. Null when the plan does not name its engine yet."
+        )
+    )
 
 
 class PlacementPreview(BaseModel):
@@ -2629,6 +2675,15 @@ class CreateInstanceResponse(BaseModel):
             "(the video engine) on a node, so loading takes longer than usual. "
             "The same notice a placement preview carries; computed from this "
             "node's dry run of the placement."
+        ),
+    )
+    engine_pick: PlacementEnginePick | None = Field(
+        default=None,
+        description=(
+            "Set when the launch named its engines (`engine_order`): the "
+            "engines it is planned on and whether one of those asked for is "
+            "used. The instance's shards in `/state` carry the engine it "
+            "actually started on."
         ),
     )
 
@@ -3535,6 +3590,56 @@ class TraceListItem(CamelCaseModel):
 
 class TraceListResponse(CamelCaseModel):
     traces: list[TraceListItem]
+
+
+class ModelEngineOrder(CamelCaseModel):
+    """One model's engine order, as placement reads it."""
+
+    model_id: str = Field(description="Name of the model.")
+    engine_order: list[str] | None = Field(
+        default=None,
+        description=(
+            "The person-set order for this model: backend tags, most preferred "
+            "first. ``null`` when none is set, in which case the card's default "
+            "order decides."
+        ),
+    )
+    card_engine_order: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The model card's default order, used when no person-set order "
+            "exists. Empty when the card has none or is not in the catalog."
+        ),
+    )
+
+
+class ModelEngineOrdersResponse(CamelCaseModel):
+    """Every person-set engine order the cluster holds."""
+
+    orders: list[ModelEngineOrder] = Field(
+        description="One entry per model that has an order of its own."
+    )
+
+
+class SetModelEngineOrderRequest(CamelCaseModel):
+    """Set a person's engine order for one model."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "modelId": "unsloth/Qwen3.6-35B-A3B-GGUF",
+                "engineOrder": ["llama_server-vulkan", "llama_cpp-vulkan"],
+            }
+        }
+    )
+
+    model_id: str = Field(min_length=1, max_length=512, description="Name of the model.")
+    engine_order: list[str] = Field(
+        description=(
+            "Backend tags, most preferred first. Each is an engine name, "
+            "optionally followed by its hardware, such as ``llama_server-vulkan``."
+        ),
+    )
 
 
 class TracingStateResponse(CamelCaseModel):

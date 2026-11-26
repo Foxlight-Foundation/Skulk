@@ -4,10 +4,13 @@ from collections.abc import Mapping, Sequence, Set
 
 from skulk.download.download_utils import MODEL_FILES_INCOMPLETE_MARKER
 from skulk.shared.backends import (
+    ENGINE_LOAD_REFUSED_FAILURE_MARKER,
     ENGINE_UNAVAILABLE_FAILURE_MARKER,
+    ENGINE_UNKNOWN_FAILURE_MARKER,
     ON_DEMAND_ENGINE_DOWNLOAD_BYTES,
     EngineType,
     engine_of,
+    package_engine_of,
 )
 from skulk.shared.models.capabilities import is_gemma4_family
 from skulk.shared.models.model_cards import same_model_artifact
@@ -136,10 +139,11 @@ def plan(
 def _retried_on_failure(status: RunnerStatus) -> bool:
     """Whether a local runner's failure goes through shutdown and relaunch.
 
-    A GPU wedge, a model-trust refusal, incomplete model files, and a missing
-    on-demand engine are terminal for the instance: the worker gives the
-    instance up as soon as it observes them, because relaunching into any of
-    them repeats the failure (a wedge also leaks wired GPU memory each time).
+    A GPU wedge, a model-trust refusal, incomplete model files, a missing
+    on-demand engine, a placement for an engine this build does not have, and
+    a load an engine package refused are terminal for the instance: the worker gives the instance up as soon as
+    it observes them, because relaunching into any of them repeats the failure
+    (a wedge also leaks wired GPU memory each time).
     Every other failure is a crash the worker's circuit breaker relaunches
     and, past its threshold, gives up.
     """
@@ -153,6 +157,8 @@ def _retried_on_failure(status: RunnerStatus) -> bool:
             MODEL_TRUST_FAILURE_MARKER,
             MODEL_FILES_INCOMPLETE_MARKER,
             ENGINE_UNAVAILABLE_FAILURE_MARKER,
+            ENGINE_UNKNOWN_FAILURE_MARKER,
+            ENGINE_LOAD_REFUSED_FAILURE_MARKER,
         )
     )
 
@@ -332,6 +338,21 @@ def awaited_engine(
     return engine_of(backend)
 
 
+def awaited_engine_package(
+    shard: ShardMetadata, on_demand_backends: Set[str]
+) -> str | None:
+    """The engine package a shard still waits for on this node, if any.
+
+    A package backend the node advertises but does not hold yet is installed
+    before the model loads, exactly as a built-in on-demand engine is.
+    Returns the package's engine name.
+    """
+    backend = shard.resolved_backend
+    if backend is None or backend not in on_demand_backends:
+        return None
+    return package_engine_of(backend)
+
+
 def _engine_needs_install(
     runners: Mapping[RunnerId, RunnerSupervisor],
     on_demand_backends: Set[str],
@@ -364,6 +385,16 @@ def _engine_needs_install(
                 expected_build=runner.bound_instance.bound_shard.resolved_engine_build,
                 approximate_download_bytes=download_bytes,
             )
+        package = awaited_engine_package(
+            runner.bound_instance.bound_shard, on_demand_backends
+        )
+        if package is not None:
+            return InstallEngine(
+                instance_id=instance_id,
+                engine=package,
+                resolved_backend=runner.bound_instance.bound_shard.resolved_backend,
+                expected_build=runner.bound_instance.bound_shard.resolved_engine_build,
+            )
     return None
 
 
@@ -384,6 +415,8 @@ def _load_model(
             on_demand_backends,
             native_image_ready=instance.instance_id in engine_install_ready,
             comfy_extension_ready=instance.instance_id in engine_install_ready,
+        ) or awaited_engine_package(
+            runner.bound_instance.bound_shard, on_demand_backends
         ):
             continue
 

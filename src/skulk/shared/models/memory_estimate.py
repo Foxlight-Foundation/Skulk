@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from typing import Final
 
+from skulk.shared.backends import package_engine_of
 from skulk.shared.models.engine_memory_settings import EngineMemorySettings
 from skulk.shared.models.llama_server_settings import (
     LLAMA_SERVER_DEFAULT_DRAFT_DEPTH,
@@ -398,6 +399,25 @@ def estimate_vllm_mtp_workspace(
     return _VLLM_MTP_REFERENCE_WORKSPACE * scale
 
 
+def declared_package_overhead(
+    memory_settings: EngineMemorySettings | None,
+) -> Memory | None:
+    """Runtime memory an engine package declares beyond weights, or ``None``.
+
+    A package's signed manifest states what its engine needs on top of a
+    model's weight bytes. That figure replaces core's weight multiplier, which
+    was tuned for the built-in engines, and is never read as less than the
+    ordinary overhead floor. ``None`` means the settings name no package, so
+    the caller keeps the built-in engine formula.
+    """
+    if memory_settings is None or memory_settings.package_overhead_bytes is None:
+        return None
+    return max(
+        Memory.from_bytes(memory_settings.package_overhead_bytes),
+        MEMORY_OVERHEAD_FLOOR,
+    )
+
+
 def estimate_weight_runtime_bytes(
     model_card: ModelCard,
     shard_fraction: float,
@@ -408,7 +428,8 @@ def estimate_weight_runtime_bytes(
     """Return shard weights and engine workspace, excluding attention cache.
 
     The vLLM floor covers cold compilation even for small models. Both context
-    sizing and the master/worker footprint use this same reservation.
+    sizing and the master/worker footprint use this same reservation. An
+    engine package's declared overhead replaces the weight multiplier.
     """
     if shard_fraction <= 0.0:
         return Memory()
@@ -428,6 +449,9 @@ def estimate_weight_runtime_bytes(
         if staged_weights is not None
         else engine_parameter_bytes(model_card, resolved_backend=resolved_backend)
     ) * shard_fraction
+    package_overhead = declared_package_overhead(memory_settings)
+    if package_overhead is not None:
+        return weights + package_overhead
     footprint = (
         weights * memory_overhead_factor(model_card, resolved_backend=resolved_backend)
         + MEMORY_OVERHEAD_FLOOR
@@ -575,7 +599,12 @@ def shard_preallocates_kv_upfront(shard: ShardMetadata) -> bool:
     """
     resolved = shard.resolved_backend
     if resolved is not None:
-        return resolved.startswith(_UPFRONT_WINDOW_ENGINE_PREFIXES)
+        # An engine package is launched with its context window stated
+        # outright and commits it at load, like the served engines.
+        return (
+            resolved.startswith(_UPFRONT_WINDOW_ENGINE_PREFIXES)
+            or package_engine_of(resolved) is not None
+        )
     card = shard.model_card
     if card.gguf_file:
         return True
@@ -638,6 +667,10 @@ def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
         # Every Metal lane (audio.cpp, the llama-server embedding lane) uses
         # Apple unified memory, which placement admits against system RAM.
         return False
+    if package_engine_of(resolved_backend) is not None:
+        # An engine package's lane names its memory pool: a GPU lane loads
+        # into VRAM, a CPU lane or a bare engine name into system RAM.
+        return resolved_backend.endswith(("-cuda", "-rocm", "-vulkan"))
     return resolved_backend.startswith(
         ("llama_cpp-", "llama_server-", "vllm-", "comfy-", "audio_cpp-")
     ) and not resolved_backend.endswith("-cpu")

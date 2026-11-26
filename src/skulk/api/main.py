@@ -110,6 +110,17 @@ from skulk.api.diagnostics_compatibility import (
     compare_diagnostics_builds,
     parse_peer_node_diagnostics,
 )
+from skulk.api.engines import (
+    EngineActivateRequest,
+    EngineChangeResponse,
+    EngineRemoveRequest,
+    EngineRollbackRequest,
+    EnginesResponse,
+    engine_change_refusal,
+    engines_view,
+    held_engine_package,
+    reported_engine_package,
+)
 from skulk.api.field_telemetry import (
     FieldTelemetryCollector,
     hardware_class,
@@ -269,6 +280,8 @@ from skulk.api.types import (
     InstanceImageGenerationRequest,
     LicenseSection,
     ModalitiesCapabilitySection,
+    ModelEngineOrder,
+    ModelEngineOrdersResponse,
     ModelList,
     ModelListModel,
     ModelRequirements,
@@ -282,6 +295,7 @@ from skulk.api.types import (
     OpenUrlToolResponse,
     PlaceInstanceParams,
     PlacementEngineInstall,
+    PlacementEnginePick,
     PlacementPreview,
     PlacementPreviewResponse,
     PurgeStagingRequest,
@@ -292,6 +306,7 @@ from skulk.api.types import (
     ResolvedModelCapabilities,
     RuntimeCapabilitySection,
     SeparationCapabilitySection,
+    SetModelEngineOrderRequest,
     StartDownloadParams,
     StartDownloadResponse,
     StoreDownloadRequest,
@@ -428,11 +443,12 @@ from skulk.shared.backends import (
     AUDIO_CPP_CUDA_TARGETS_BY_ARCHITECTURE,
     AUDIO_CPP_CUDA_TARGETS_BY_BUILD,
     ON_DEMAND_ENGINE_DOWNLOAD_BYTES,
-    EngineType,
     audio_cpp_cuda_hardware_matches,
     engine_install_notice,
     engine_of,
+    engine_packages_disabled,
     expand_engine_backends,
+    package_engine_of,
 )
 from skulk.shared.constants import (
     DASHBOARD_DIR,
@@ -557,6 +573,7 @@ from skulk.shared.types.chunks import (
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     AudioTranscription,
+    ChangeEnginePackage,
     Command,
     CreateInstance,
     DecideStewardAction,
@@ -576,6 +593,7 @@ from skulk.shared.types.commands import (
     ProposeStewardAction,
     RealtimeAudioTranscription,
     RetryDownload,
+    SetModelEngineOrder,
     SetModelTrustApproval,
     SetTracingEnabled,
     SpeechSynthesis,
@@ -617,12 +635,22 @@ from skulk.shared.types.diagnostics import (
     TelemetryPlaneDiagnostics,
     VisionMediaIngressDiagnostics,
 )
+from skulk.shared.types.engine_orders import (
+    MAX_MODEL_ENGINE_ORDERS,
+    engine_order_level,
+    engine_order_problem,
+)
+from skulk.shared.types.engine_packages import (
+    EnginePackageAction,
+    EnginePackageLane,
+)
 from skulk.shared.types.events import (
     AceStepPreparationCompleted,
     AudioCppPreparationCompleted,
     CustomModelCardAdded,
     CustomModelCardDeleted,
     DemucsPreparationCompleted,
+    EnginePackageChangeCompleted,
     Event,
     IndexedEvent,
     InstanceCreated,
@@ -1462,6 +1490,14 @@ _TERMINAL_TASK_STATUSES: frozenset[task_types.TaskStatus] = frozenset(
         task_types.TaskStatus.Cancelled,
     }
 )
+
+# How long an engine order change may take to appear in replicated State
+# before the caller is told it is unconfirmed.
+_ENGINE_ORDER_CONFIRM_SECONDS: Final = 10.0
+
+# How long an engine package change may take to be answered by its node. A
+# large build is hashed in full before it is activated.
+_ENGINE_CHANGE_CONFIRM_SECONDS: Final = 100.0
 
 # How long POST /place_instance waits for node memory info to finish
 # gossiping before giving up with 503. Covers the window between cluster
@@ -2498,6 +2534,8 @@ class API:
         self._music_output_sources: dict[CommandId, NodeId] = {}
         self._audio_cpp_prepare_events: dict[CommandId, anyio.Event] = {}
         self._audio_cpp_prepare_results: dict[CommandId, AudioCppPreparationCompleted] = {}
+        self._engine_change_events: dict[CommandId, anyio.Event] = {}
+        self._engine_change_results: dict[CommandId, EnginePackageChangeCompleted] = {}
         self._demucs_mount_preparer = DemucsMountPreparer(
             self.node_id,
             lambda: self.state,
@@ -2845,6 +2883,111 @@ class API:
             summary="Delete a running instance",
             description="Send a deletion command for the exact instance ID and return its acknowledgement. Unknown instances return 404; the maintained Steward placement returns 409 while intelligent fabric is enabled.",
         )(self.delete_instance)
+        self.app.get(
+            "/models/engine-orders",
+            tags=["Models"],
+            summary="List person-set engine orders",
+            description=(
+                "Return every model that has an engine order of its own, with "
+                "that order and the model card's default order. When several "
+                "engines can run a model, placement ranks them by the person-set "
+                "order, then the card's default order, then the built-in "
+                "fallback (built-in engines before installed engine packages). "
+                "An order only ranks: entries a node does not have are skipped, "
+                "and it never makes a model impossible to launch."
+            ),
+        )(self.list_model_engine_orders)
+        self.app.put(
+            "/models/engine-order",
+            tags=["Models"],
+            summary="Set a model's engine order",
+            description=(
+                "Set the person's own engine order for one model in the catalog "
+                "and share it with every node. The order replaces any earlier "
+                "one for that model and takes effect at the next launch; running "
+                "instances are not moved. Launching a model never sets an order. "
+                "Returns 404 for a model the catalog does not hold, 422 for a "
+                "malformed order, 409 when the cluster already holds the most "
+                "orders it keeps, and 503 when the change was sent but not "
+                "confirmed in time."
+            ),
+        )(self.set_model_engine_order)
+        self.app.delete(
+            "/models/engine-order",
+            tags=["Models"],
+            summary="Clear a model's engine order",
+            description=(
+                "Remove the person-set engine order for one model, so its card's "
+                "default order decides again. Clearing a model that has no order "
+                "succeeds. Returns 503 when the change was sent but not confirmed "
+                "in time."
+            ),
+        )(self.clear_model_engine_order)
+        self.app.get(
+            "/v1/engines",
+            tags=["Engines"],
+            summary="List engine packages across the cluster",
+            description=(
+                "Return every engine package a node holds or may install, "
+                "grouped by engine ID, from what each node last advertised. "
+                "For each node and lane: whether the build is active, held but "
+                "unusable (with a short reason), or offered for install on "
+                "first use; the build's manifest digest, engine version, "
+                "package generation and publisher; the builds on the node's "
+                "disk and the one a rollback would return to, and how the "
+                "last model load on each build ended since the node started. "
+                "Read-only: it "
+                "starts nothing, installs nothing and changes no state. Built-in "
+                "engines are not listed here; they appear in each node's "
+                "resources in /state."
+            ),
+        )(self.list_engines)
+        self.app.post(
+            "/v1/engines/{engine_id}/activate",
+            tags=["Engines"],
+            summary="Activate an installed engine package build",
+            description=(
+                "Make one build that is already on a node's disk the build new "
+                "launches there use. The build is hashed in full first, and the "
+                "build that was active is kept as the one a rollback returns "
+                "to. Models already running keep the build they started on. "
+                "Nothing is downloaded. Returns the lane as the node reports it "
+                "afterwards. 404 when the node, the package or the build is not "
+                "there; 409 when the build is damaged, this Skulk version cannot "
+                "run it, or engine packages are turned off on the node; 503 when "
+                "the node did not answer in time."
+            ),
+        )(self.activate_engine_build)
+        self.app.post(
+            "/v1/engines/{engine_id}/rollback",
+            tags=["Engines"],
+            summary="Return an engine package to its earlier build",
+            description=(
+                "Make the build that was active before the current one the "
+                "build new launches use again. The two swap places, so a second "
+                "rollback undoes the first. Models already running keep the "
+                "build they started on. 404 when the node or the package is not "
+                "there or no earlier build is kept; 409 when the earlier build "
+                "is damaged or cannot run on this Skulk version; 503 when the "
+                "node did not answer in time."
+            ),
+        )(self.rollback_engine_build)
+        self.app.post(
+            "/v1/engines/{engine_id}/remove",
+            tags=["Engines"],
+            summary="Remove an engine package build, or the whole package, from a node",
+            description=(
+                "Delete one build from a node's disk, or every build of the "
+                "package when no build is named. The build new launches use "
+                "cannot be removed alone. Nothing a model is running on is "
+                "removed. Model files are never touched. After the whole "
+                "package is removed the node may offer it again, and installs "
+                "it again the first time a model placed there needs it. 404 "
+                "when the node, the package or the build is not there; 409 "
+                "when the build is the active one or a model is running on it; "
+                "503 when the node did not answer in time."
+            ),
+        )(self.remove_engine_build)
         self.app.get(
             "/models/requirements",
             tags=["Models"],
@@ -4081,6 +4224,7 @@ class API:
             node_memory=self._telemetry_view.node_memory,
             current_instances=self.state.instances,
             node_resources=self._telemetry_view.node_resources,
+            package_needs=self.state.engine_package_needs,
         )
         node_ram = reserve_system_ram_usage(
             self._telemetry_view.node_memory,
@@ -4092,6 +4236,7 @@ class API:
                 node_memory=self._telemetry_view.node_memory,
             ),
             node_resources=self._telemetry_view.node_resources,
+            package_needs=self.state.engine_package_needs,
         )
 
         def supports_with_capacity(node_id: NodeId, backends: frozenset[str]) -> bool:
@@ -4353,6 +4498,7 @@ class API:
             ),
             excluded_nodes=list(payload.excluded_nodes),
             requested_context_tokens=payload.context_tokens,
+            engine_order=payload.engine_order,
         )
 
         # Dry-run the placement against this node's replicated state before
@@ -4391,6 +4537,7 @@ class API:
                         placement_resources,
                         node_memory=self._telemetry_view.node_memory,
                         current_instances=self.state.instances,
+                        package_needs=self.state.engine_package_needs,
                     ),
                     unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                         self._telemetry_view.node_system,
@@ -4398,6 +4545,7 @@ class API:
                         node_memory=self._telemetry_view.node_memory,
                     ),
                     approved_remote_code_identities=self._cluster_remote_code_approvals(),
+                    model_engine_orders=self.state.model_engine_orders,
                 )
                 break
             except PlacementInfoPendingError as exc:
@@ -4421,13 +4569,47 @@ class API:
                     headers={"X-Skulk-Placement-Failure": "no_valid_placement"},
                 ) from exc
 
+        instance_id = InstanceId(str(command.command_id))
         await self._send(command)
 
-        instance_id = InstanceId(str(command.command_id))
         # The master places the command itself; this node's dry run is the same
         # algorithm over the same replicated state, so it is what a quick launch
         # without a preview can show about an engine install.
         planned_instance = planned.get(instance_id)
+        engine_pick: PlacementEnginePick | None = None
+        if payload.engine_order is not None:
+            # An order only ranks, so a launch whose engines cannot run the
+            # model here starts on the next engine in line. Say so in the
+            # answer: a person trying an engine must not take another
+            # engine's numbers for it.
+            planned_backends = sorted(
+                {
+                    shard.resolved_backend
+                    for shard in (
+                        planned_instance.shard_assignments.runner_to_shard.values()
+                        if planned_instance is not None
+                        else ()
+                    )
+                    if shard.resolved_backend is not None
+                }
+            )
+            engine_pick = PlacementEnginePick(
+                asked=list(payload.engine_order),
+                engines=planned_backends,
+                used=(
+                    all(
+                        engine_order_level(
+                            backend,
+                            card_order=(),
+                            launch_order=payload.engine_order,
+                        )
+                        == "launch"
+                        for backend in planned_backends
+                    )
+                    if planned_backends
+                    else None
+                ),
+            )
         return CreateInstanceResponse(
             message="Command received.",
             command_id=command.command_id,
@@ -4438,6 +4620,7 @@ class API:
                 if planned_instance is None
                 else self._engine_install_for_instance(planned_instance)
             ),
+            engine_pick=engine_pick,
         )
 
     async def create_instance(
@@ -4569,6 +4752,7 @@ class API:
                     self._telemetry_view.node_resources,
                     node_memory=self._telemetry_view.node_memory,
                     current_instances=self.state.instances,
+                    package_needs=self.state.engine_package_needs,
                 ),
                 unified_memory_gpu_nodes=unified_memory_gpu_node_ids(
                     self._telemetry_view.node_system,
@@ -4576,6 +4760,7 @@ class API:
                     node_memory=self._telemetry_view.node_memory,
                 ),
                 approved_remote_code_identities=self._cluster_remote_code_approvals(),
+                model_engine_orders=self.state.model_engine_orders,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4749,6 +4934,7 @@ class API:
             self._telemetry_view.node_resources,
             node_memory=self._telemetry_view.node_memory,
             current_instances=self.state.instances,
+            package_needs=self.state.engine_package_needs,
         )
         placement_unified_memory_gpu_nodes = unified_memory_gpu_node_ids(
             self._telemetry_view.node_system,
@@ -4791,6 +4977,7 @@ class API:
                     node_vram=placement_node_vram,
                     unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
                     approved_remote_code_identities=self._cluster_remote_code_approvals(),
+                    model_engine_orders=self.state.model_engine_orders,
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:
@@ -4952,6 +5139,7 @@ class API:
                             node_vram=placement_node_vram,
                             unified_memory_gpu_nodes=placement_unified_memory_gpu_nodes,
                             approved_remote_code_identities=self._cluster_remote_code_approvals(),
+                            model_engine_orders=self.state.model_engine_orders,
                         )
                     except ValueError:
                         continue
@@ -5023,11 +5211,12 @@ class API:
         preview says so before the operator places it.
         """
         node_resources = self._telemetry_view.node_resources
+        from skulk.engines.on_demand import engine_package_download_bytes
         from skulk.provisioning.comfy_extension import extension_for_build
 
-        installing: dict[EngineType, list[str]] = {}
-        sizes: dict[EngineType, int] = {}
-        extension_only: dict[EngineType, bool] = {}
+        installing: dict[str, list[str]] = {}
+        sizes: dict[str, int] = {}
+        extension_only: dict[str, bool] = {}
         assignments = instance.shard_assignments
         for node_id, runner_id in assignments.node_to_runner.items():
             shard = assignments.runner_to_shard.get(runner_id)
@@ -5051,6 +5240,34 @@ class API:
                 sizes[engine] = max(sizes.get(engine, 0), size)
                 extension_only[engine] = extension_only.get(engine, True) and wheel is not None and not base_missing
                 installing.setdefault(engine, []).append(str(node_id))
+                continue
+            package = package_engine_of(backend)
+            if package is not None and backend in resources.on_demand_backends:
+                # The installing node's own report of the build it offers is
+                # the first source: this node may keep no package list (it may
+                # not install packages itself) or an older one. Failing that,
+                # this node's kept list; a build neither names is announced
+                # without a size.
+                build = shard.resolved_engine_build if shard is not None else None
+                reported = next(
+                    (
+                        offer.download_bytes
+                        for offer in resources.engine_packages
+                        if offer.status == "offered"
+                        and offer.backend_tag == backend
+                        and offer.build == build
+                        and offer.download_bytes
+                    ),
+                    None,
+                )
+                sizes[package] = max(
+                    sizes.get(package, 0),
+                    reported
+                    if reported is not None
+                    else engine_package_download_bytes(build),
+                )
+                extension_only[package] = False
+                installing.setdefault(package, []).append(str(node_id))
         if not installing:
             return None
         engine, node_ids = next(iter(installing.items()))
@@ -10933,6 +11150,8 @@ class API:
             network=self.state.node_network, telemetry=self._telemetry_view,
             runners=self.state.runners,
             excluded_nodes=set(excluded_node_ids or ()),
+            model_engine_orders=self.state.model_engine_orders,
+            package_needs=self.state.engine_package_needs,
         )
 
     async def get_model_requirements(
@@ -12615,6 +12834,15 @@ class API:
                     if waiter is not None:
                         self._audio_cpp_prepare_results[event.request_id] = event
                         waiter.set()
+
+                if (
+                    isinstance(event, EnginePackageChangeCompleted)
+                    and event.owner_node == self.node_id
+                ):
+                    change_waiter = self._engine_change_events.get(event.request_id)
+                    if change_waiter is not None:
+                        self._engine_change_results[event.request_id] = event
+                        change_waiter.set()
 
                 if isinstance(event, DemucsPreparationCompleted):
                     self._demucs_mount_preparer.record(event)
@@ -16737,6 +16965,280 @@ class API:
                 )
             response.raise_for_status()
             return parse_peer_node_diagnostics(cast(object, response.json()))
+
+    def _model_engine_order_view(self, model_id: ModelId) -> ModelEngineOrder:
+        """Describe one model's person-set order beside its card's default."""
+        order = self.state.model_engine_orders.get(model_id)
+        card = get_card(model_id)
+        return ModelEngineOrder(
+            model_id=str(model_id),
+            engine_order=list(order) if order else None,
+            card_engine_order=(
+                list(card.placement.backend_preference) if card is not None else []
+            ),
+        )
+
+    async def list_engines(self) -> EnginesResponse:
+        """Return every engine package the cluster's nodes hold or may install.
+
+        Returns:
+            One entry per engine ID, assembled from the node resources each
+            node last advertised. Nothing is read from disk or started.
+        """
+        return engines_view(
+            self._telemetry_view.node_resources,
+            packages_enabled=not engine_packages_disabled(),
+        )
+
+    async def _change_engine_package(
+        self,
+        engine_id: str,
+        node_id: str,
+        lane: EnginePackageLane,
+        action: EnginePackageAction,
+        build: str | None,
+    ) -> EngineChangeResponse:
+        """Ask one node to change an engine package it holds and wait for its answer.
+
+        Args:
+            engine_id: The publisher.engine identity.
+            node_id: The node whose package is changed.
+            lane: The accelerator class of the package.
+            action: What the node is asked to do.
+            build: The build to activate or remove, when one is named.
+
+        Returns:
+            The lane as the node reported it straight after the change.
+
+        Raises:
+            HTTPException: 404 when the node reports no such package, the
+                status ``engine_change_refusal`` gives for a refusal, 503 when
+                the node does not answer in time.
+        """
+        target = NodeId(node_id)
+        held = held_engine_package(
+            self._telemetry_view.node_resources.get(target), engine_id, lane
+        )
+        if held is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Node {node_id} reports no installed {engine_id} package "
+                    f"for {lane}. Read /v1/engines to see what each node holds."
+                ),
+            )
+        try:
+            command = ChangeEnginePackage(
+                target_node=target,
+                owner_node=self.node_id,
+                engine_id=engine_id,
+                lane=lane,
+                action=action,
+                build=build,
+            )
+        except ValidationError:
+            raise HTTPException(
+                status_code=404, detail=f"{engine_id} is not an engine package name."
+            ) from None
+        waiter = anyio.Event()
+        self._engine_change_events[command.command_id] = waiter
+        try:
+            await self._send(command)
+            with anyio.move_on_after(_ENGINE_CHANGE_CONFIRM_SECONDS):
+                await waiter.wait()
+            result = self._engine_change_results.pop(command.command_id, None)
+        finally:
+            self._engine_change_events.pop(command.command_id, None)
+            self._engine_change_results.pop(command.command_id, None)
+        if result is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The change was sent but the node has not answered yet. "
+                    "Read /v1/engines to see what it holds before trying again."
+                ),
+            )
+        if not result.success:
+            status_code, detail = engine_change_refusal(result.code)
+            raise HTTPException(status_code=status_code, detail=detail)
+        return EngineChangeResponse(
+            node_id=node_id,
+            engine_id=engine_id,
+            lane=lane,
+            action=action,
+            package=reported_engine_package(result.resources, engine_id, lane),
+        )
+
+    async def activate_engine_build(
+        self, engine_id: str, payload: EngineActivateRequest
+    ) -> EngineChangeResponse:
+        """Make an installed build the one new launches on a node use.
+
+        Args:
+            engine_id: The publisher.engine identity.
+            payload: The node, the accelerator class and the build.
+
+        Returns:
+            The lane as the node reported it after the change.
+        """
+        return await self._change_engine_package(
+            engine_id, payload.node_id, payload.lane, "activate", payload.build
+        )
+
+    async def rollback_engine_build(
+        self, engine_id: str, payload: EngineRollbackRequest
+    ) -> EngineChangeResponse:
+        """Return a node's engine package to the build that was active before.
+
+        Args:
+            engine_id: The publisher.engine identity.
+            payload: The node and the accelerator class.
+
+        Returns:
+            The lane as the node reported it after the change.
+        """
+        held = held_engine_package(
+            self._telemetry_view.node_resources.get(NodeId(payload.node_id)),
+            engine_id,
+            payload.lane,
+        )
+        if held is not None and held.rollback_build is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Node {payload.node_id} keeps no earlier {engine_id} build "
+                    f"for {payload.lane} to return to."
+                ),
+            )
+        # Naming the build makes the request safe to read twice: a second
+        # reading finds that build already active and swaps nothing back.
+        return await self._change_engine_package(
+            engine_id,
+            payload.node_id,
+            payload.lane,
+            "rollback",
+            None if held is None else held.rollback_build,
+        )
+
+    async def remove_engine_build(
+        self, engine_id: str, payload: EngineRemoveRequest
+    ) -> EngineChangeResponse:
+        """Delete one build, or the whole package, from a node's disk.
+
+        Args:
+            engine_id: The publisher.engine identity.
+            payload: The node, the accelerator class and optionally one build.
+
+        Returns:
+            The lane as the node reported it after the change, or with a null
+            package when the node no longer holds or is offered it.
+        """
+        return await self._change_engine_package(
+            engine_id, payload.node_id, payload.lane, "remove", payload.build
+        )
+
+    async def list_model_engine_orders(self) -> ModelEngineOrdersResponse:
+        """Return every person-set engine order the cluster holds.
+
+        Returns:
+            One entry per model with an order of its own, sorted by model name.
+        """
+        return ModelEngineOrdersResponse(
+            orders=[
+                self._model_engine_order_view(model_id)
+                for model_id in sorted(self.state.model_engine_orders)
+            ]
+        )
+
+    async def _change_model_engine_order(
+        self, model_id: ModelId, order: tuple[str, ...] | None
+    ) -> ModelEngineOrder:
+        """Send one engine order change and wait for the cluster to hold it.
+
+        Args:
+            model_id: Name of the model.
+            order: The new order, or ``None`` to clear it.
+
+        Returns:
+            The model's order as replicated State now holds it.
+
+        Raises:
+            HTTPException: 503 when the change is not confirmed in time.
+        """
+        await self._send(
+            SetModelEngineOrder(
+                model_id=model_id,
+                engine_order=list(order) if order is not None else None,
+            )
+        )
+        deadline = time.monotonic() + _ENGINE_ORDER_CONFIRM_SECONDS
+        while self.state.model_engine_orders.get(model_id) != order:
+            if time.monotonic() >= deadline:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "The engine order change was sent but the cluster has "
+                        "not confirmed it yet. Read /models/engine-orders to see "
+                        "what is in force before trying again."
+                    ),
+                )
+            await anyio.sleep(0.05)
+        return self._model_engine_order_view(model_id)
+
+    async def set_model_engine_order(
+        self, payload: SetModelEngineOrderRequest
+    ) -> ModelEngineOrder:
+        """Set a person's engine order for one catalog model.
+
+        Args:
+            payload: The model and its order, most preferred first.
+
+        Returns:
+            The order now in force for the model.
+
+        Raises:
+            HTTPException: 404 for a model the catalog does not hold, 422 for
+                a malformed order, 409 when no further model may hold an
+                order, 503 when the change is not confirmed in time.
+        """
+        model_id = ModelId(payload.model_id)
+        await self._load_authorized_model_card(model_id)
+        if (problem := engine_order_problem(payload.engine_order)) is not None:
+            raise HTTPException(status_code=422, detail=problem)
+        if (
+            model_id not in self.state.model_engine_orders
+            and len(self.state.model_engine_orders) >= MAX_MODEL_ENGINE_ORDERS
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"The cluster already holds an engine order for "
+                    f"{MAX_MODEL_ENGINE_ORDERS} models. Clear one first."
+                ),
+            )
+        return await self._change_model_engine_order(
+            model_id, tuple(payload.engine_order)
+        )
+
+    async def clear_model_engine_order(
+        self,
+        model_id: Annotated[str, Query(min_length=1, max_length=512)],
+    ) -> ModelEngineOrder:
+        """Clear the person-set engine order for one model.
+
+        The model need not be in the catalog, so an order left behind by a
+        model that was removed can still be cleared.
+
+        Args:
+            model_id: Name of the model.
+
+        Returns:
+            The model's order, now unset.
+
+        Raises:
+            HTTPException: 503 when the change is not confirmed in time.
+        """
+        return await self._change_model_engine_order(ModelId(model_id), None)
 
     async def get_tracing_state(self) -> TracingStateResponse:
         return TracingStateResponse(enabled=self.state.tracing_enabled)

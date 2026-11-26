@@ -434,3 +434,146 @@ async def test_comfy_overlay_waiters_never_share_different_builds(tmp_path: Path
     await worker._start_engine_install(InstallEngine(instance_id=InstanceId("other-build"), engine="comfy", resolved_backend="comfy-cuda", expected_build="overlay-b"))
     await worker._start_engine_install(InstallEngine(instance_id=InstanceId("base"), engine="comfy"))
     assert len(recorder.started) == 3
+
+
+_PACKAGE_TAG = "tensorfold-rocm"
+_PACKAGE_BUILD = "d" * 64
+
+
+def test_an_install_task_names_a_built_in_engine_or_a_package() -> None:
+    assert InstallEngine(instance_id=_FIRST, engine="vllm").engine == "vllm"
+    assert InstallEngine(instance_id=_FIRST, engine="tensorfold").engine == "tensorfold"
+    for bad in ("Tensor Fold", "tensorfold-rocm", "", "x" * 65):
+        with pytest.raises(ValueError):
+            InstallEngine(instance_id=_FIRST, engine=bad)
+
+
+def test_a_shard_waits_for_a_package_its_node_has_yet_to_install() -> None:
+    from skulk.worker.plan import awaited_engine, awaited_engine_package
+
+    shard = get_pipeline_shard_metadata(
+        model_id=_MODEL, device_rank=0, world_size=1
+    ).model_copy(update={"resolved_backend": _PACKAGE_TAG})
+    built_in = shard.model_copy(update={"resolved_backend": "vllm-cuda"})
+    offered = frozenset({_PACKAGE_TAG, "vllm", "vllm-cuda"})
+
+    assert awaited_engine_package(shard, offered) == "tensorfold"
+    assert awaited_engine_package(shard, frozenset()) is None
+    # Built-in engines keep their own path, and a package never takes it.
+    assert awaited_engine_package(built_in, offered) is None
+    assert awaited_engine(shard, offered) is None
+    assert awaited_engine(built_in, offered) == "vllm"
+
+
+async def test_package_waiters_are_bound_to_the_exact_build(tmp_path: Path) -> None:
+    worker, _, _ = _worker(tmp_path)
+    recorder = _record_starts(worker)
+
+    def task(instance: InstanceId, build: str) -> InstallEngine:
+        return InstallEngine(
+            instance_id=instance,
+            engine="tensorfold",
+            resolved_backend=_PACKAGE_TAG,
+            expected_build=build,
+        )
+
+    await worker._start_engine_install(task(_FIRST, _PACKAGE_BUILD))
+    await worker._start_engine_install(task(_SECOND, _PACKAGE_BUILD))
+    await worker._start_engine_install(task(InstanceId("other-build"), "e" * 64))
+
+    assert len(recorder.started) == 2
+
+
+@pytest.mark.usefixtures("node_facts")
+@pytest.mark.parametrize(
+    ("held_build", "installs", "succeeds"),
+    [
+        (_PACKAGE_BUILD, True, True),
+        ("e" * 64, True, False),
+        (_PACKAGE_BUILD, False, False),
+    ],
+)
+async def test_a_package_install_releases_or_fails_every_waiter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    held_build: str,
+    installs: bool,
+    succeeds: bool,
+) -> None:
+    """Success needs the node to hold exactly the build the placement named."""
+    import skulk.engines.on_demand as on_demand_module
+
+    worker, events, commands = _worker(tmp_path)
+    worker._on_demand_backends = frozenset({_PACKAGE_TAG})
+    asked: list[tuple[str, str]] = []
+
+    def install(backend: str, build: str, _facts: object, **_kwargs: object) -> None:
+        asked.append((backend, build))
+        if not installs:
+            raise on_demand_module.EnginePackageInstallError(
+                "the package download", "private installer diagnostics"
+            )
+
+    monkeypatch.setattr(on_demand_module, "install_engine_package_on_demand", install)
+    monkeypatch.setattr(
+        facts_module,
+        "refresh_node_facts",
+        lambda: make_facts(gpus=(NVIDIA_A40,)).model_copy(
+            update={"engine_package_builds": {_PACKAGE_TAG: held_build}}
+        ),
+    )
+    monkeypatch.setattr(
+        facts_module,
+        "current_backend_derivation",
+        lambda: BackendDerivation(backends=frozenset({_PACKAGE_TAG})),
+    )
+    first, second = TaskId("task-first"), TaskId("task-second")
+    job = _EngineInstallJob(
+        engine="tensorfold",
+        resolved_backend=_PACKAGE_TAG,
+        expected_build=_PACKAGE_BUILD,
+        waiters={_FIRST: first, _SECOND: second},
+    )
+
+    await worker._run_engine_install(job)
+
+    assert asked == [(_PACKAGE_TAG, _PACKAGE_BUILD)]
+    status = TaskStatus.Complete if succeeds else TaskStatus.Failed
+    assert job.finished and job.succeeded == succeeds
+    assert _statuses(events) == [(first, status), (second, status)]
+    assert worker._on_demand_backends == (
+        frozenset() if succeeds else frozenset({_PACKAGE_TAG})
+    )
+    failures = [
+        forwarded.command
+        for forwarded in commands.collect()
+        if isinstance(forwarded.command, FailInstance)
+    ]
+    assert len(failures) == (0 if succeeds else 2)
+    for failure in failures:
+        assert failure.error_code == "engine_install_failed"
+        assert "tensorfold engine package" in failure.error_message
+        assert "private installer diagnostics" not in failure.error_message
+
+
+@pytest.mark.usefixtures("node_facts")
+async def test_a_package_placement_without_its_build_fails_before_any_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import skulk.engines.on_demand as on_demand_module
+
+    worker, events, _ = _worker(tmp_path)
+
+    def install(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("nothing may be fetched")
+
+    monkeypatch.setattr(on_demand_module, "install_engine_package_on_demand", install)
+    first = TaskId("task-first")
+    job = _EngineInstallJob(
+        engine="tensorfold", resolved_backend=_PACKAGE_TAG, waiters={_FIRST: first}
+    )
+
+    await worker._run_engine_install(job)
+
+    assert job.finished and not job.succeeded
+    assert _statuses(events) == [(first, TaskStatus.Failed)]

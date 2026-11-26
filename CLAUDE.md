@@ -1188,6 +1188,73 @@ A model card's `placement.compatible_backends` selects which engine serves it
   end on a node without a GPU. `SKULK_TEST_VIDEO_STEP_SECONDS` sets the
   simulated per-step wall time. Never enable it on a production node.
 
+### Engine packages (add-on engines)
+
+An engine Skulk does not name in its own code reaches a node as a signed
+**engine package**: one engine build for one platform and one accelerator class
+(the lane: metal, cuda, rocm, vulkan or cpu) plus an adapter program. Core holds
+no engine name; never add one. The manifest contract, signature check and host
+fit are in `provisioning/engine_packages.py`; engine publisher trust
+(`v1/engine-trust.json`, a second signed target of the capability store, its own
+client and retained copy, consulted at install only) in `engine_trust.py`; the
+signed list of published builds in `engine_index.py` (it decides offers only and
+never authorizes an install); install, activate, roll back and remove in
+`engine_install.py`. A build's identity is the SHA-256 of its signed claims: the
+generation directory's name under `SKULK_ENGINES_DIR/packages/`, the value in
+`NodeResources.engine_builds`, and the build stamped on a shard. An optional new
+manifest claim must leave the identity of every earlier manifest unchanged.
+
+`src/skulk/engines/` holds the node side: `inventory.py` (what a node holds,
+quick-checked, never hashed), `on_demand.py` (what it could install from its
+kept index), `launch.py` (the adapter's environment is built from nothing; the
+generation is never written), `protocol.py` and `adapter.py` (strict framed
+control protocol version 1; a channel failure ends the session and its process
+group; calls are never replayed), `estimate.py`, `actions.py`,
+`load_results.py`, `order_record.py` and `cli.py` (`skulk engines`). One generic
+runner, `worker/runner/engine_package/`, serves every package: lifecycle on the
+control channel, tokens on the loopback port a load returns.
+
+Which engine runs a model is decided by the first of three levels with an answer
+for a node: a person's order for the model (`State.model_engine_orders`, set
+only by `SetModelEngineOrder`, saved on each node), the card's
+`placement.backend_preference`, then the built-in fallback with packages after
+built-in engines. An order only ranks and never makes a launch impossible.
+Admission counts weights plus the build's declared overhead; the worker asks the
+adapter what the exact load needs before dispatch and the master reserves the
+larger figure (`EnginePackageNeedStated`, `State.engine_package_needs`). An
+engine reports need only, never what is free.
+
+A load an engine package refuses falls back to the next engine. The worker
+sends `RefuseInstancePlacement` with `engine_refusal_code`; the master
+(`_replace_engine_refused_instance`) places the model again at the same width
+with the refusing build off offer (`without_engine_builds`), on the same nodes
+first, and keeps every build that refused in the chain off offer
+(`_engine_refusal_lineage`) so the chain ends. It is a call inside the existing
+`RefuseInstancePlacement` case, not a branch: one more branch in that match
+makes basedpyright give up on the whole function. Only `unsupported_model` is
+remembered: the node reports it per build and model
+(`NodeEnginePackage.unsupported_models`, in memory, cleared by a restart) and
+`place_instance` takes that build off offer for that model on every node
+(`engine_builds_unsupporting`). Never widen the remembered set to other
+refusal codes: they can depend on settings or on memory at the time. A shard
+that names its engine explicitly keeps it.
+
+Changing a package is a command to the node that holds it (`ChangeEnginePackage`
+-> `EnginePackageChangeRequested` -> `EnginePackageChangeCompleted`), reachable
+from `/v1/engines`, `skulk engines` and the dashboard (Settings, Add-on engines).
+A model that is running keeps its build, and nothing a model runs on is removed.
+`skulk doctor` reports an unusable package and `--fix` only switches new launches
+to another intact build; it deletes nothing, and its check must stay hash-free
+because the same checks run inside node diagnostics.
+
+`engines.packages_enabled` and `engines.package_channel` in `skulk.yaml` are the
+controls (a packaged Skulk has no launch environment);
+`SKULK_ENGINE_PACKAGES_DISABLE=1` turns packages off on one node at launch. Never
+write the `engines` section for an untouched default. A node with no package and
+none offered must stay byte-for-byte unchanged, telemetry included
+(`NodeResources.engine_packages` is left off the wire when empty); keep the
+tests that hold that.
+
 ### Intelligent fabric (steward)
 Read-only workload assessment uses `GET /models/assessment` and Steward's
 `assess_inference` tool. Shared contracts in `shared/models/inference_assessment.py`
@@ -1637,10 +1704,18 @@ SID, because task names are one namespace for the whole machine and two
 accounts need two. It runs as that account, in its
 signed-in session, with ordinary rights, and only while the account is signed
 in. Only that scope exists there (`registrable_scopes()`); a machine-wide
-service is refused. The task is started every minute and never twice at once:
+service is refused. The task is started every minute:
 Task Scheduler restarts a task only after a failure, and the manager also ends
 cleanly when it wants to be started again, so a restart on Windows takes up to
-a minute where launchd and systemd take ten seconds. It runs the base
+a minute where launchd and systemd take ten seconds. A start is allowed beside
+a running one (`Parallel`): the startup file's own lock decides which is the
+service, and a start that finds it held ends at once with success. Do not let
+Task Scheduler refuse or queue that start instead. Refused (`IgnoreNew`, how
+the task was first written), Task Scheduler shows the refusal, `0x800710E0`,
+as the task's last result beside a healthy service for as long as it runs;
+queued, it keeps one more start every minute without limit; and a second start
+that ends with a failure shows that failure the same way. Setup still takes a
+task written the first way for its own, and replaces it. It runs the base
 `pythonw.exe`, which opens no console window; `current_base()` answers the
 `python.exe` beside it. The service root is `Skulk\plugins` in the account's
 local data folder, short because of the path limit.

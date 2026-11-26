@@ -1,7 +1,7 @@
 from typing import Literal, final
 from uuid import UUID
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 
 from skulk.api.types import (
     ImageEditsTaskParams,
@@ -21,6 +21,13 @@ from skulk.shared.types.audio_separation import AudioSeparationTaskParams
 from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
+from skulk.shared.types.engine_orders import engine_order_problem
+from skulk.shared.types.engine_packages import (
+    ENGINE_BUILD_PATTERN,
+    ENGINE_ID_PATTERN,
+    EnginePackageAction,
+    EnginePackageLane,
+)
 from skulk.shared.types.music import MusicGenerationTaskParams
 from skulk.shared.types.music_edits import MusicEditingTaskParams
 from skulk.shared.types.native_music import NativeMusicDevice
@@ -220,6 +227,64 @@ class SetModelTrustApproval(BaseCommand):
     )
 
 
+class ChangeEnginePackage(BaseCommand):
+    """Ask one node to activate, roll back or remove an engine package build.
+
+    The packages are on that node's disk, so only its worker can make the
+    change. The master orders the request and the worker answers it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    target_node: NodeId = Field(description="The node whose package is changed.")
+    owner_node: NodeId = Field(description="The API node waiting for the answer.")
+    engine_id: str = Field(
+        max_length=64,
+        pattern=ENGINE_ID_PATTERN,
+        description="The publisher.engine identity of the package.",
+    )
+    lane: EnginePackageLane = Field(
+        description="The accelerator class of the package."
+    )
+    action: EnginePackageAction = Field(description="What the node is asked to do.")
+    build: str | None = Field(
+        default=None,
+        pattern=ENGINE_BUILD_PATTERN,
+        description=(
+            "The build to activate or remove; remove without one removes "
+            "the whole package. For a roll back, the build expected to "
+            "become active, so the request is safe to read twice."
+        ),
+    )
+
+
+class SetModelEngineOrder(BaseCommand):
+    """Ask the master to set or clear a person's engine order for one model.
+
+    The order is the person's own ranking of the engines that can run the
+    model. It is explicit: launching a model on an engine never sets it. The
+    master orders the change, every node saves it, and placement consults it
+    ahead of the model card's default order.
+    """
+
+    model_id: ModelId = Field(description="Name of the model the order is for.")
+    engine_order: list[str] | None = Field(
+        default=None,
+        description=(
+            "Backend tags, most preferred first, such as "
+            "``llama_server-vulkan``. ``None`` clears the model's order."
+        ),
+    )
+
+    @field_validator("engine_order")
+    @classmethod
+    def _require_well_formed_order(cls, value: list[str] | None) -> list[str] | None:
+        """Refuse a malformed order where the command is built."""
+        if value is not None and (problem := engine_order_problem(value)) is not None:
+            raise ValueError(problem)
+        return value
+
+
 class PlaceInstance(BaseCommand):
     model_card: ModelCard
     sharding: Sharding
@@ -256,6 +321,25 @@ class PlaceInstance(BaseCommand):
             "take the fleet's served context default."
         ),
     )
+    engine_order: list[str] | None = Field(
+        default=None,
+        description=(
+            "An engine order for this launch only: backend tags, most "
+            "preferred first. It is consulted ahead of the person's order for "
+            "the model and the card's default, is stamped on the instance so "
+            "repairs keep it, and sets no standing order."
+        ),
+    )
+
+    @field_validator("engine_order")
+    @classmethod
+    def _require_well_formed_launch_order(
+        cls, value: list[str] | None
+    ) -> list[str] | None:
+        """Refuse a malformed order where the command is built."""
+        if value is not None and (problem := engine_order_problem(value)) is not None:
+            raise ValueError(problem)
+        return value
 
 
 class CreateInstance(BaseCommand):
@@ -324,6 +408,11 @@ class RefuseInstancePlacement(BaseCommand):
     as a re-placement signal (one node wider, which shrinks every node's share)
     lets the cluster self-correct to a split that fits instead of leaving the
     operator with a placement that vanished without explanation.
+
+    The same command reports a second kind of refusal: an engine package that
+    refused to load the model. ``engine_refusal_code`` is set for it, and the
+    master then places the model again at the same width without the build
+    that refused, so the next engine in the model's order serves it.
     """
 
     instance_id: InstanceId
@@ -331,6 +420,15 @@ class RefuseInstancePlacement(BaseCommand):
     node_id: NodeId
     # The worker's refusal message (footprint vs. usable memory).
     reason: str
+    engine_refusal_code: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[a-z_]+$",
+        description=(
+            "Set when an engine package refused to load the model: the "
+            "engine's typed refusal code. Absent for a memory refusal."
+        ),
+    )
 
 
 class TaskCancelled(BaseCommand):
@@ -460,12 +558,14 @@ Command = (
     | PrepareAudioCpp
     | PrepareDemucs
     | PrepareAceStep
+    | ChangeEnginePackage
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription
     | RealtimeAudioTranscription
     | SetTracingEnabled
     | SetModelTrustApproval
+    | SetModelEngineOrder
     | PlaceInstance
     | CreateInstance
     | DeleteInstance

@@ -115,6 +115,7 @@ def test_preparation_completion_makes_build_ready_on_master(
     monkeypatch.setattr(master, "_effective_downloads", empty_downloads)
     monkeypatch.setattr(master, "_served_context_default", no_context_default)
     master._model_trust_approvals = set()
+    master._model_engine_orders = {}
     seen: list[object] = []
 
     def capture_placement(*_args: object, **kwargs: object) -> dict[object, object]:

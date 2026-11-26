@@ -21,6 +21,7 @@ from skulk.shared.models.tests.test_native_music_admission import (
     GIB,
     NODE,
     instance,
+    ordinary_instance,
     resources,
 )
 from skulk.shared.models.tests.test_native_music_runtime import card_with_layouts
@@ -36,6 +37,7 @@ from skulk.shared.types.profiling import MemoryUsage, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.steward_actions import StewardActionProposalId
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from skulk.shared.types.worker.runners import RunnerId
 from skulk.shared.types.worker.shards import Sharding
 
 
@@ -133,6 +135,51 @@ def test_pending_native_owner_cannot_be_omitted_from_both_master_entry_points(
             )
         else:
             ordinary(observed, commitments)
+
+
+@pytest.mark.usefixtures("native_clock")
+@pytest.mark.parametrize("exact", [False, True])
+def test_engine_package_need_reaches_both_master_entry_points(exact: bool) -> None:
+    """A load an engine package priced above its card is charged at that price here too."""
+    observed = resources("rocm")
+    held = ordinary_instance("llama_cpp-vulkan")
+    commitments = {held.instance_id: held}
+
+    def place(needs: Mapping[RunnerId, int] | None) -> None:
+        if exact:
+            add_instance_to_placements(
+                CreateInstance(instance=instance(observed, "new")),
+                Topology(),
+                {},
+                {NODE: memory()[NODE]},
+                node_resources={NODE: observed},
+                native_music_commitments=commitments,
+                package_needs=needs,
+            )
+            return
+        topology = Topology()
+        topology.add_node(NODE)
+        place_instance(
+            PlaceInstance(
+                model_card=card_with_layouts(),
+                sharding=Sharding.Pipeline,
+                instance_meta=InstanceMeta.MlxRing,
+                min_nodes=1,
+            ),
+            topology,
+            {},
+            {NODE: memory()[NODE]},
+            {},
+            node_resources={NODE: observed},
+            node_vram={NODE: Memory.from_bytes(64 * GIB)},
+            native_music_commitments=commitments,
+            package_needs=needs,
+        )
+
+    place(None)
+    place({RunnerId("elsewhere"): 40 * GIB})
+    with pytest.raises(PlacementError, match="unified physical memory"):
+        place({RunnerId("ordinary-runner"): 40 * GIB})
 
 
 @pytest.mark.usefixtures("native_clock")

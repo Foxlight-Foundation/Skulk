@@ -98,6 +98,25 @@ smaller than the default included. The change applies to the next placement;
 running models keep the window they loaded with. MLX grows its cache per request
 and is not affected.
 
+## Add-on engines
+
+An add-on engine is an engine that is not part of Skulk. A machine installs one
+by itself the first time a model placed there needs it. Expand **Add-on
+engines** to change two settings, which apply to every machine:
+
+- **Use add-on engines** is on by default. When you turn it off, every machine
+  stops using its add-on engines within about a minute and installs no new
+  ones. The engines stay on disk, and a model already running on one keeps
+  running until you stop it.
+- **Install test builds** is off by default. When on, machines also install
+  engine builds that are still being tested. An engine a machine already has is
+  never replaced by this setting.
+
+**Engines on your machines** in the same section opens the list of add-on
+engines per machine, where you can switch a machine to another build it already
+has or remove one. [Add-on engines](add-on-engines) explains first use, how
+Skulk chooses an engine, and what happens when an engine refuses a model.
+
 ## HuggingFace
 
 Expand **HuggingFace**, enter **API Token**, and choose **Save changes**. A token

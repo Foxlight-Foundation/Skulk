@@ -14,6 +14,12 @@ from skulk.shared.types.common import (
     SessionId,
     SystemId,
 )
+from skulk.shared.types.engine_packages import (
+    ENGINE_BUILD_PATTERN,
+    ENGINE_ID_PATTERN,
+    EnginePackageAction,
+    EnginePackageLane,
+)
 from skulk.shared.types.native_music import NativeMusicDevice
 from skulk.shared.types.profiling import NodeResources
 from skulk.shared.types.restart_recovery import PlacementIntent
@@ -250,6 +256,83 @@ class RunnerStatusUpdated(BaseEvent):
     runner_status: RunnerStatus
 
 
+class EnginePackageNeedStated(BaseEvent):
+    """An engine package said what one placed load takes on its node.
+
+    The worker asks the package's adapter just before it dispatches the load
+    and sends this once its own live memory check has passed. The master
+    reserves the larger of this figure and its own estimate for that runner,
+    so a later placement on the node is not admitted against memory the
+    engine is about to take.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    runner_id: RunnerId = Field(
+        description="The runner of the placement the engine was asked about."
+    )
+    need_bytes: int = Field(
+        ge=0,
+        description=(
+            "Bytes the engine said this load takes, in the memory pool the "
+            "runner's backend is admitted against."
+        ),
+    )
+
+
+class EnginePackageChangeRequested(BaseEvent):
+    """Master-ordered request for one worker to change an engine package it holds."""
+
+    model_config = ConfigDict(frozen=True)
+
+    request_id: CommandId = Field(description="The command this request answers.")
+    target_node: NodeId = Field(description="The node whose package is changed.")
+    owner_node: NodeId = Field(description="The API node waiting for the answer.")
+    engine_id: str = Field(max_length=64, pattern=ENGINE_ID_PATTERN)
+    lane: EnginePackageLane
+    action: EnginePackageAction
+    build: str | None = Field(default=None, pattern=ENGINE_BUILD_PATTERN)
+    expires_at: float = Field(
+        description="Unix deadline after which a replayed request changes nothing."
+    )
+
+
+class EnginePackageChangeCompleted(BaseEvent):
+    """How a requested engine package change ended on its node.
+
+    A refusal carries only a short code. The node's own words can name local
+    paths and stay in its log.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    request_id: CommandId = Field(description="The command this answers.")
+    target_node: NodeId = Field(description="The node that was asked.")
+    owner_node: NodeId = Field(description="The API node waiting for the answer.")
+    success: bool = Field(description="Whether the change was made.")
+    code: str | None = Field(
+        default=None,
+        pattern=r"^[a-z_]{1,64}$",
+        description="Why the change was not made. Present only for a refusal.",
+    )
+    resources: NodeResources | None = Field(
+        default=None,
+        description=(
+            "What the node reports about itself after the change, so the next "
+            "launch is stamped with the build that is now active."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _require_matching_outcome(self) -> "EnginePackageChangeCompleted":
+        """A change made carries the node's facts; a refusal carries its code."""
+        if self.success and (self.resources is None or self.code is not None):
+            raise ValueError("A completed engine package change requires resources")
+        if not self.success and (self.code is None or self.resources is not None):
+            raise ValueError("A refused engine package change requires its code")
+        return self
+
+
 class NodeTimeoutEvidence(FrozenModel):
     """Signal ages captured when the master decides to prune a node."""
 
@@ -336,6 +419,22 @@ class CustomModelCardDeleted(BaseEvent):
     model_id: ModelId
     mutation_command_id: CommandId | None = None
     """Command acknowledged by this applied card mutation, when available."""
+
+
+class ModelEngineOrderChanged(BaseEvent):
+    """A person's engine order for one model was set or cleared."""
+
+    model_id: ModelId = Field(description="Name of the model the order is for.")
+    engine_order: list[str] | None = Field(
+        default=None,
+        description=(
+            "Backend tags, most preferred first. ``None`` means the model no "
+            "longer has an order of its own."
+        ),
+    )
+    mutation_command_id: CommandId | None = Field(
+        default=None, description="Command this change answers, when known."
+    )
 
 
 class StagedModelEvicted(BaseEvent):
@@ -471,6 +570,9 @@ Event = (
     | InstanceFailureRecorded
     | InstanceDeleted
     | RunnerStatusUpdated
+    | EnginePackageNeedStated
+    | EnginePackageChangeRequested
+    | EnginePackageChangeCompleted
     | NodeTimedOut
     | NodeGatheredInfo
     | NodeDownloadProgress
@@ -487,6 +589,7 @@ Event = (
     | RestartRecoveryCompleted
     | CustomModelCardAdded
     | CustomModelCardDeleted
+    | ModelEngineOrderChanged
     | StagedModelEvicted
     | StateSnapshotHydrated
 )
@@ -509,6 +612,9 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     InstanceFailureRecorded,
     InstanceDeleted,
     RunnerStatusUpdated,
+    EnginePackageNeedStated,
+    EnginePackageChangeRequested,
+    EnginePackageChangeCompleted,
     NodeTimedOut,
     TopologyEdgeCreated,
     TopologyEdgeDeleted,
@@ -519,6 +625,7 @@ _PERSISTED_CONTROL_EVENT_TYPES: tuple[type[BaseEvent], ...] = (
     RestartRecoveryCompleted,
     CustomModelCardAdded,
     CustomModelCardDeleted,
+    ModelEngineOrderChanged,
     StagedModelEvicted,
     StateSnapshotHydrated,
 )
