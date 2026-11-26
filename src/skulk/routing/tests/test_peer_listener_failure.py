@@ -1,17 +1,24 @@
 """A node that cannot take its peer port says which port and why.
 
-libp2p's own error for a port it could not take has no text, so a node used
-to end with a bare ``RuntimeError``. Seen on a Windows node whose first two
-starts failed that way with another program on the port.
+libp2p's own error for a port it could not take prints as nothing, so a node
+used to end with a bare ``RuntimeError``. Seen on a Windows node whose first
+two starts failed that way with another program on the port. The network
+layer now names the port and passes libp2p's reason on, and the router adds
+what the owner can do.
 """
 
 import socket
+import sys
 
 import pytest
 from skulk_pyo3_bindings import Keypair
 
 from skulk.routing import router as router_module
-from skulk.routing.router import Router, why_no_peer_listener
+from skulk.routing.router import (
+    PEER_LISTENER_REFUSED,
+    Router,
+    peer_listener_refused,
+)
 
 
 def _held() -> tuple[socket.socket, int]:
@@ -22,74 +29,67 @@ def _held() -> tuple[socket.socket, int]:
     return holder, holder.getsockname()[1]
 
 
-def test_a_held_port_is_named_with_what_the_system_says_about_it() -> None:
-    holder, port = _held()
-    try:
-        message = why_no_peer_listener(port)
-        with pytest.raises(OSError) as refused:
-            socket.socket(socket.AF_INET, socket.SOCK_STREAM).bind(("0.0.0.0", port))
-    finally:
-        holder.close()
-    assert f"TCP port {port}" in message
-    # The operating system's own words, in whatever language it speaks.
-    assert str(refused.value) in message
-    assert "Another program" in message
+def test_the_owner_is_told_the_reason_and_what_to_do() -> None:
+    said = (
+        PEER_LISTENER_REFUSED + "TCP port 52416: Address already in use (os error 48)"
+    )
+    message = peer_listener_refused(said, 52416)
+    assert message.startswith(f"Skulk {said}. ")
     assert "--libp2p-port" in message and "SKULK_LIBP2P_PORT" in message
 
 
-def test_a_port_that_is_free_again_is_said_to_be_free() -> None:
-    holder, port = _held()
-    holder.close()
-    message = why_no_peer_listener(port)
-    assert f"TCP port {port}" in message
-    assert "free now" in message and "gave no reason" in message
-    assert "--libp2p-port" in message
+def test_a_port_of_the_systems_choosing_is_not_one_to_change() -> None:
+    said = PEER_LISTENER_REFUSED + "a TCP port of the system's choosing: no buffers"
+    assert peer_listener_refused(said, 0) == f"Skulk {said}."
 
 
-def test_a_port_of_the_systems_choosing_has_no_number_to_name() -> None:
-    message = why_no_peer_listener(0)
-    assert "gave no reason" in message
-    assert "TCP port 0" not in message
-
-
-def test_the_router_gives_a_reason_where_the_network_layer_gave_none(
+def test_the_router_adds_what_to_do_to_the_network_layers_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    holder, port = _held()
+    said = PEER_LISTENER_REFUSED + "TCP port 52416: the reason libp2p gave"
 
-    def says_nothing(*_arguments: object) -> None:
-        # How the bindings report a port libp2p could not take.
-        raise RuntimeError
+    def refuses(*_arguments: object) -> None:
+        raise RuntimeError(said)
 
-    monkeypatch.setattr(router_module, "NetworkingHandle", says_nothing)
-    try:
-        with pytest.raises(RuntimeError, match=f"TCP port {port}") as caught:
-            Router.create(Keypair.generate(), listen_port=port)
-    finally:
-        holder.close()
-    assert "Another program" in str(caught.value)
-    # The original failure is kept, for whoever reads the traceback.
-    assert isinstance(caught.value.__cause__, RuntimeError)
-
-
-def test_an_error_that_says_something_is_passed_on_as_it_is(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def says_why(*_arguments: object) -> None:
-        raise RuntimeError("the key is of a kind libp2p does not accept")
-
-    monkeypatch.setattr(router_module, "NetworkingHandle", says_why)
-    with pytest.raises(RuntimeError, match="does not accept") as caught:
+    monkeypatch.setattr(router_module, "NetworkingHandle", refuses)
+    with pytest.raises(RuntimeError, match="the reason libp2p gave") as caught:
         Router.create(Keypair.generate(), listen_port=52416)
-    assert caught.value.__cause__ is None
+    assert str(caught.value) == peer_listener_refused(said, 52416)
+    # The original failure is kept, for whoever reads the traceback.
+    assert str(caught.value.__cause__) == said
+
+
+@pytest.mark.parametrize("said", ["the key is of a kind libp2p does not accept", ""])
+def test_any_other_error_is_passed_on_as_it_is(
+    monkeypatch: pytest.MonkeyPatch, said: str
+) -> None:
+    """Also one that says nothing: silence is not taken for a port in use."""
+    failure = RuntimeError(said)
+
+    def fails(*_arguments: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(router_module, "NetworkingHandle", fails)
+    with pytest.raises(RuntimeError) as caught:
+        Router.create(Keypair.generate(), listen_port=52416)
+    assert caught.value is failure
 
 
 def test_the_real_network_layer_cannot_take_a_held_port_and_the_node_says_so() -> None:
-    """With the real bindings: this is the failure the sentence exists for."""
+    """With the real bindings: the port, the system's own reason, and what to do."""
     holder, port = _held()
     try:
-        with pytest.raises(RuntimeError, match=f"TCP port {port}") as caught:
+        with pytest.raises(OSError) as refused:
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).bind(("0.0.0.0", port))
+        with pytest.raises(RuntimeError) as caught:
             Router.create(Keypair.generate(), listen_port=port)
     finally:
         holder.close()
-    assert str(caught.value.__cause__) == ""
+    message = str(caught.value)
+    assert message.startswith(f"Skulk {PEER_LISTENER_REFUSED}TCP port {port}: ")
+    # The operating system's own error number, whatever language it speaks.
+    number = refused.value.winerror if sys.platform == "win32" else refused.value.errno
+    assert f"(os error {number})" in message
+    assert "--libp2p-port" in message
+    # The network layer's own words, which the sentence was made from.
+    assert str(caught.value.__cause__).startswith(PEER_LISTENER_REFUSED)

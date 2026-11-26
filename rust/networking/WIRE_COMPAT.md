@@ -40,6 +40,17 @@ bindings while `versionStatus` reported "consistent".
 
 ## Entries (newest first)
 
+- **wire-neutral** (2026-11-26): `create_swarm` in `src/swarm.rs` no longer
+  passes libp2p's listen failure on as it is. That error
+  (`TransportError::Other`) prints as nothing, so a node whose peer port was
+  in use ended with an error that had no message; the error now names the
+  port and carries the reasons along its source chain. Only the text of a
+  local start-up error changes. Nothing is sent or accepted differently:
+  protocol ids, topics, framing, behaviour composition, transport upgrades
+  and key derivation are untouched, so `NETWORK_VERSION` stays v0.0.3.
+  Bindings advance to 0.2.12, because the Python side recognises the new
+  text and Windows nodes take the bindings as a published wheel.
+
 - **wire-neutral** (2026-11-20): the coordinated host combines the one-minute
   mDNS query interval with the subscription-reannouncement repair and bounded
   telemetry diagnostics below. Protocol ids, topics, frame shapes, authentication,
