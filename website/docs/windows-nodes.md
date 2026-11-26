@@ -43,7 +43,10 @@ checkout.
 - **[Git](https://git-scm.com/download/win)** and
   **[uv](https://docs.astral.sh/uv/getting-started/installation/)**. uv
   installs the right Python itself.
-- **[Node.js](https://nodejs.org/)**, to build the dashboard once.
+- **[Node.js](https://nodejs.org/)**, to build the dashboard once: version
+  20.19 or newer in the 20 line, or 22.12 or newer. The dashboard's build tool
+  refuses anything older. Skulk brings its own Node.js on macOS and Linux and
+  does not on Windows. The test machine had 26.13.
 - **No compiler.** The networking component comes as a prebuilt package.
 - **The same Skulk build as the rest of the cluster.** Every node in a cluster
   must run the same version of Skulk.
