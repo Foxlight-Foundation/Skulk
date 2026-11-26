@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import secrets
-import stat
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -44,6 +43,12 @@ from skulk.extensions.streams import (
     CapabilityStreamFrame,
     CapabilityStreamSession,
     InlineMediaAttachment,
+)
+from skulk.utils.runtime_files import (
+    open_private,
+    private_directory,
+    read_private,
+    sync_directory,
 )
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -151,16 +156,15 @@ class GatewaySigner:
         self.path = path
 
     def _key(self) -> Ed25519PrivateKey:
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_directory(self.path.parent)
         if not self.path.exists():
             # Publish a complete, durable key without replacing a concurrent
             # winner. Readers must never observe a first writer's empty file.
             temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
             try:
-                descriptor = os.open(
+                descriptor = open_private(
                     temporary,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                    0o600,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                 )
                 with os.fdopen(descriptor, "wb") as target:
                     target.write(Ed25519PrivateKey.generate().private_bytes_raw())
@@ -171,23 +175,10 @@ class GatewaySigner:
                 except FileExistsError:
                     pass
                 else:
-                    parent = os.open(self.path.parent, os.O_RDONLY)
-                    try:
-                        os.fsync(parent)
-                    finally:
-                        os.close(parent)
+                    sync_directory(self.path.parent)
             finally:
                 temporary.unlink(missing_ok=True)
-        descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(descriptor, "rb") as source:
-            metadata = os.fstat(source.fileno())
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_mode & 0o077
-                or metadata.st_uid != os.getuid()
-            ):
-                raise ValueError("gateway signing key is not owner protected")
-            raw = source.read(33)
+        raw = read_private(self.path, 32)
         if len(raw) != 32:
             raise ValueError("invalid gateway key")
         return Ed25519PrivateKey.from_private_bytes(raw)

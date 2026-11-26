@@ -4,6 +4,13 @@ import faulthandler
 import signal
 import sys
 
+STACK_DUMP_SIGNAL: int | None = signal.SIGUSR1 if sys.platform != "win32" else None
+"""Signal that makes a Skulk process write its threads' Python stacks to stderr.
+
+``None`` on Windows, which has neither the signal nor
+``faulthandler.register``.
+"""
+
 
 def install_stack_dump_signal() -> None:
     """Write every thread's Python stack to stderr when the process gets SIGUSR1.
@@ -15,7 +22,6 @@ def install_stack_dump_signal() -> None:
     ``kill -USR1 <pid>`` on a stuck node or runner puts its stacks in the
     node's log. The process keeps running afterwards. Does nothing on Windows.
     """
-    if sys.platform == "win32":
-        # Windows has neither the signal nor ``faulthandler.register``.
+    if STACK_DUMP_SIGNAL is None:
         return
-    faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
+    faulthandler.register(STACK_DUMP_SIGNAL, file=sys.stderr, all_threads=True)
