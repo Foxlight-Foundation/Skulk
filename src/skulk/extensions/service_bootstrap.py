@@ -31,6 +31,26 @@ _MAXIMUM_CONFIGURATION = 8192
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _GENERATION = re.compile(r"^[a-f0-9]{32}$")
 
+LIFETIME_LOCK = "bootstrap.lock"
+"""The lock this file's process holds on Windows for as long as it runs.
+
+launchd and systemd know whether the service they started is still there.
+Task Scheduler's answer comes as text in the system's language, so on Windows
+local setup asks this lock: while it is held, a service is starting, serving
+or stopping. Setup creates the file; this file only ever opens it.
+"""
+
+STOP_REQUEST = "service-stop"
+"""The file whose presence in the service root asks a Windows service to stop.
+
+Windows has no signal one process can send another to say "stop": the nearest
+thing, Ctrl-Break, reaches only programs on the sender's own console. Setup
+creates this file, and the process this file runs passes the request on to
+the manager as Ctrl-Break and waits for it. The file then stays until the
+service is installed again, and while it is there nothing starts: a stop
+holds even where the task that starts the service could not be switched off.
+"""
+
 if sys.platform == "win32":
     import ctypes
     import ctypes.wintypes as wt
@@ -57,6 +77,21 @@ if sys.platform == "win32":
     _MAXIMUM_SID_BYTES = 68
     _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
     _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    _LOCKFILE_EXCLUSIVE_NOW = 0x00000002 | 0x00000001
+    _CTRL_BREAK_EVENT = 1
+    _CREATE_NEW_PROCESS_GROUP = 0x00000200
+    _CREATE_NO_WINDOW = 0x08000000
+
+    class _Region(ctypes.Structure):
+        """Where in a file a lock lies (the system's ``OVERLAPPED``)."""
+
+        _fields_ = (
+            ("Internal", ctypes.c_void_p),
+            ("InternalHigh", ctypes.c_void_p),
+            ("Offset", wt.DWORD),
+            ("OffsetHigh", wt.DWORD),
+            ("hEvent", wt.HANDLE),
+        )
 
     class _BasicLimits(ctypes.Structure):
         _fields_ = (
@@ -181,6 +216,24 @@ if sys.platform == "win32":
         ctypes.POINTER(wt.BOOL),
     )
     _advapi32.CheckTokenMembership.restype = wt.BOOL
+    _kernel32.LockFileEx.argtypes = (
+        wt.HANDLE,
+        wt.DWORD,
+        wt.DWORD,
+        wt.DWORD,
+        wt.DWORD,
+        ctypes.POINTER(_Region),
+    )
+    _kernel32.LockFileEx.restype = wt.BOOL
+    _kernel32.GetConsoleCP.argtypes = ()
+    _kernel32.GetConsoleCP.restype = wt.UINT
+    _kernel32.AttachConsole.argtypes = (wt.DWORD,)
+    _kernel32.AttachConsole.restype = wt.BOOL
+    _kernel32.GenerateConsoleCtrlEvent.argtypes = (wt.DWORD, wt.DWORD)
+    _kernel32.GenerateConsoleCtrlEvent.restype = wt.BOOL
+    _ControlHandler = ctypes.WINFUNCTYPE(wt.BOOL, wt.DWORD)
+    _kernel32.SetConsoleCtrlHandler.argtypes = (_ControlHandler, wt.BOOL)
+    _kernel32.SetConsoleCtrlHandler.restype = wt.BOOL
     _userenv = ctypes.WinDLL("userenv", use_last_error=True)
     _userenv.GetUserProfileDirectoryW.argtypes = (
         wt.HANDLE,
@@ -224,6 +277,11 @@ if sys.platform == "win32":
     _get_profile_directory: Callable[[object, object, object], int] = (
         _userenv.GetUserProfileDirectoryW
     )
+    _lock_file: Callable[[int, int, int, int, int, object], int] = _kernel32.LockFileEx
+    _console_code_page: Callable[[], int] = _kernel32.GetConsoleCP
+    _attach_console: Callable[[int], int] = _kernel32.AttachConsole
+    _send_console_event: Callable[[int, int], int] = _kernel32.GenerateConsoleCtrlEvent
+    _set_control_handler: Callable[[object, int], int] = _kernel32.SetConsoleCtrlHandler
     _INVALID_HANDLE = wt.HANDLE(-1).value
 
     def _failure() -> OSError:
@@ -513,12 +571,17 @@ def current_base() -> Path:
     A Windows process started from an environment has that environment's
     launcher as its executable, which is a copy and not a link to anything,
     so the base is taken from where Python itself records it. Run directly on
-    the base, as the OS service runs this file, the two are the same.
+    the base, as the OS service runs this file, the two are the same, with
+    one difference: the service runs ``pythonw.exe``, the same interpreter
+    without a console window, and the base is the ``python.exe`` beside it.
     """
     if sys.platform == "win32":
-        return Path(getattr(sys, "_base_executable", sys.executable)).resolve(
+        base = Path(getattr(sys, "_base_executable", sys.executable)).resolve(
             strict=True
         )
+        if base.name.lower() == "pythonw.exe":
+            base = base.with_name("python.exe").resolve(strict=True)
+        return base
     return Path(sys.executable).resolve(strict=True)
 
 
@@ -768,6 +831,43 @@ def selected_base_matches(root: Path, base: Path) -> bool:
         return False
 
 
+def started_from(root: Path) -> tuple[str, str] | None:
+    """The service copy this process runs from: its generation and manifest digest.
+
+    Worked out from where this interpreter's own environment lies, and from
+    that generation's own manifest. The selection (``core-runtime.json``) is
+    never read: a manager that has just selected its successor still runs
+    from the copy it was started on, and has to go on saying so, or whoever
+    asks would take the old manager for the new one.
+
+    Args:
+        root: The service root the caller serves.
+
+    Returns:
+        ``(generation, manifest_sha256)`` when this interpreter's environment
+        is ``<root>/core-runtimes/<generation>/runtime`` and the generation's
+        manifest can be read; None for any other process, such as one started
+        by hand from a development environment.
+    """
+    try:
+        environment = Path(sys.prefix).resolve(strict=True)
+        generations = (root / "core-runtimes").resolve(strict=True)
+    except OSError:
+        return None
+    generation = environment.parent
+    if (
+        environment.name != "runtime"
+        or generation.parent != generations
+        or not _GENERATION.fullmatch(generation.name)
+    ):
+        return None
+    try:
+        raw = private_read(generation / "snapshot.json", _MAXIMUM_MANIFEST)
+    except (OSError, ValueError):
+        return None
+    return generation.name, hashlib.sha256(raw).hexdigest()
+
+
 def manager_command(root: Path, runtime: Path) -> list[str]:
     """The one command this file ever starts: the manager, from ``runtime``."""
     return [
@@ -820,6 +920,65 @@ if sys.platform == "win32":
             return subprocess.DEVNULL
         return descriptor
 
+    def _hold_lifetime(root: Path) -> int:
+        """Take this process's lifetime lock; it is released when the process ends.
+
+        The descriptor is returned so that it stays open, and is never closed.
+
+        Raises:
+            OSError: The lock file is missing, or another process holds the
+                lock: a service is already running from this root.
+            ValueError: The lock file is not protected.
+        """
+        descriptor = _open_entry(root / LIFETIME_LOCK)
+        try:
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or _is_reparse_point(info)
+                or not _owner_only(descriptor)
+            ):
+                raise ValueError("service lock is not protected")
+            # The byte every Skulk lock on Windows is: the last one a file
+            # can have, far from anything a file holds.
+            region = _Region(Offset=0xFFFFFFFF, OffsetHigh=0x7FFFFFFF)
+            if not _lock_file(
+                msvcrt.get_osfhandle(descriptor),
+                _LOCKFILE_EXCLUSIVE_NOW,
+                0,
+                1,
+                0,
+                ctypes.byref(region),
+            ):
+                raise _failure()
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    @_ControlHandler
+    def _stay(kind: int) -> bool:
+        """Tell the system this process handled a console event, so it lives."""
+        return True
+
+    def _ask_to_stop(manager: int, shares_console: bool) -> None:
+        """Send Ctrl-Break to the manager's process group, and to nothing else.
+
+        The event can only be sent to programs on the sender's own console.
+        Started by Task Scheduler this process has none, so it joins the
+        manager's first. Joining a console resets a process's handlers to the
+        system's, which end the process, so one that does nothing is
+        registered straight after: the event is addressed to the manager's
+        group, and this guards against it reaching this process anyway.
+        """
+        if not shares_console:
+            if not _attach_console(manager):
+                raise _failure()
+            if not _set_control_handler(_stay, 1):
+                raise _failure()
+        if not _send_console_event(_CTRL_BREAK_EVENT, manager):
+            raise _failure()
+
     def _run_manager(root: Path, runtime: Path) -> int:
         """Run the manager as a child of this process; return its exit code.
 
@@ -828,9 +987,13 @@ if sys.platform == "win32":
         first joins a job that ends its processes when this process's handle
         closes: however this process ends, the manager and everything the
         manager started end with it, and nothing is left serving that the
-        service does not know about. Ctrl-C and Ctrl-Break reach every program
-        on a console; they are the manager's to act on (it shuts down in an
-        orderly way), so this process ignores them and waits.
+        service does not know about.
+
+        The manager is asked to stop in one way, Ctrl-Break to its own process
+        group, whoever asks: Ctrl-C or Ctrl-Break at this process's console,
+        or local setup through :data:`STOP_REQUEST`. This process then waits
+        for the manager, which shuts down in an orderly way, and never ends it
+        itself.
         """
         import signal
         import subprocess
@@ -852,8 +1015,15 @@ if sys.platform == "win32":
             ctypes.sizeof(limits),
         ) or not _assign_to_job(job, _current_process()):
             raise _failure()
+        signalled: list[int] = []
         for number in (signal.SIGINT, signal.SIGBREAK):
-            signal.signal(number, signal.SIG_IGN)
+            signal.signal(number, lambda received, _frame: signalled.append(received))
+        request = root / STOP_REQUEST
+        if os.path.lexists(request):
+            return 0
+        # Without a console of its own (Task Scheduler starts this file with
+        # pythonw.exe) the manager gets one that has no window.
+        shares_console = bool(_console_code_page())
         manager = subprocess.Popen(
             manager_command(root, runtime),
             cwd=root,
@@ -861,8 +1031,24 @@ if sys.platform == "win32":
             stdin=subprocess.DEVNULL,
             stdout=_open_stream(1),
             stderr=_open_stream(2),
+            creationflags=_CREATE_NEW_PROCESS_GROUP
+            | (0 if shares_console else _CREATE_NO_WINDOW),
         )
-        return manager.wait()
+        asked = False
+        while True:
+            try:
+                return manager.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                pass
+            if not asked and (signalled or os.path.lexists(request)):
+                asked = True
+                try:
+                    _ask_to_stop(manager.pid, shares_console)
+                except OSError:
+                    # A manager that ended in this very moment has no console
+                    # left to ask through, and needs no asking.
+                    if manager.poll() is None:
+                        raise
 
 
 def main() -> None:
@@ -877,9 +1063,18 @@ def main() -> None:
     arguments = parser.parse_args()
     try:
         root = cast(Path, arguments.root).absolute()
+        if sys.platform == "win32":
+            private_directory(root)
+            # Held, never closed: the system releases it when this process ends.
+            lifetime = _hold_lifetime(root)
+            if os.path.lexists(root / STOP_REQUEST):
+                # Asked before the copy is verified, which takes time: a
+                # stopped service lets go of its lock at once.
+                raise SystemExit(0)
         runtime = verified_runtime(root)
         if sys.platform == "win32":
             code = _run_manager(root, runtime)
+            os.close(lifetime)
         else:
             command = manager_command(root, runtime)
             os.execve(command[0], command, manager_environment(root))

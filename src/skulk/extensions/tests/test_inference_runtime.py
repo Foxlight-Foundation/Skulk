@@ -106,7 +106,9 @@ def inference_fixture(
     return payload, key, trust, host
 
 
-@pytest.mark.parametrize("version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7"])
+@pytest.mark.parametrize(
+    "version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7", "0.7.0"]
+)
 def test_inference_closure_preserves_exact_domains_and_no_generation_ceiling(
     tmp_path: Path,
     version: str,
@@ -131,9 +133,11 @@ def test_inference_closure_preserves_exact_domains_and_no_generation_ceiling(
     assert runtime.configuration_schema is True
 
 
-@pytest.mark.parametrize("version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7"])
 @pytest.mark.parametrize(
-    "source_version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7"]
+    "version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7", "0.7.0"]
+)
+@pytest.mark.parametrize(
+    "source_version", ["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7", "0.7.0"]
 )
 def test_issued_inference_cohorts_bind_their_own_source(
     version: str, source_version: str
@@ -150,7 +154,13 @@ def test_issued_inference_cohorts_bind_their_own_source(
 
 @pytest.mark.parametrize(
     ("version", "count"),
-    [("0.7.0rc3", 13), ("0.7.0rc4", 13), ("0.7.0rc5", 13), ("0.7.0rc7", 14)],
+    [
+        ("0.7.0rc3", 13),
+        ("0.7.0rc4", 13),
+        ("0.7.0rc5", 13),
+        ("0.7.0rc7", 14),
+        ("0.7.0", 14),
+    ],
 )
 def test_installed_reader_inventory_selects_the_issued_version(
     version: str, count: int
@@ -190,7 +200,7 @@ def test_real_isolated_installer_probe_reports_every_selected_binary_profile(
     profiles = OBJECT.validate_python(observed["all_profiles"], strict=True)
     assert observed["version"] == version
     assert observed["manifest_digest"] == runtime.native_manifest.digest
-    assert len(profiles) == (14 if version == "0.7.0rc7" else 13)
+    assert len(profiles) == (14 if version in {"0.7.0rc7", "0.7.0"} else 13)
     entries = TypeAdapter(list[dict[str, JsonValue]]).validate_python(
         inference_cohort(version)["profiles"], strict=True
     )

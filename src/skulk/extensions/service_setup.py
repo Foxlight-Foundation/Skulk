@@ -4,9 +4,7 @@ import argparse
 import asyncio
 import getpass
 import json
-import os
 import sqlite3
-import stat
 import sys
 import time
 import warnings
@@ -39,8 +37,8 @@ from skulk.extensions.runtime_attachment import (
 from skulk.extensions.runtime_catalog import catalog_refusal, catalog_refusal_sentence
 from skulk.extensions.runtime_files import (
     RuntimeLock,
+    no_other_account_can_change,
     read_private,
-    writable_only_by,
     write_private,
 )
 from skulk.extensions.runtime_install import finish_runtime_work
@@ -55,9 +53,12 @@ from skulk.extensions.runtime_manager import (
     manager_request,
 )
 from skulk.extensions.service_registration import (
+    OwnerLayout,
     ServiceLayout,
     ServiceScope,
-    local_layout,
+    owner_layout,
+    registered_for,
+    registrable_scopes,
 )
 from skulk.extensions.service_snapshot import (
     ServiceSnapshot,
@@ -68,6 +69,12 @@ from skulk.extensions.service_snapshot import (
 )
 from skulk.extensions.terminal_install import TerminalInstaller
 from skulk.shared.constants import SKULK_CONFIG_HOME, offline_mode
+from skulk.utils.runtime_files import (
+    examine,
+    has_borrowed_identity,
+    has_root_authority,
+    is_private_directory,
+)
 
 # The service's bootstrap verifies the seal of its whole copied runtime (every
 # file's digest, gigabytes for a full Skulk environment) before the manager
@@ -212,7 +219,7 @@ async def _elevate(
     # running as the existing nonroot Skulk owner.
     process = await asyncio.create_subprocess_exec(
         "/usr/bin/sudo",
-        str(Path(sys.executable).resolve(strict=True)),
+        str(service_bootstrap.current_base()),
         "-I",
         "-S",
         "-B",
@@ -226,7 +233,7 @@ async def _elevate(
 
 
 async def _register(
-    layout: ServiceLayout, action: Literal["prepare", "stop", "install"]
+    layout: OwnerLayout, action: Literal["prepare", "stop", "install"]
 ) -> None:
     """Perform one registration action in this layout's scope.
 
@@ -234,7 +241,7 @@ async def _register(
     service registers as the owner, with no elevation, so the node itself can
     set it up.
     """
-    if layout.scope == "user":
+    if layout.scope == "user" or not isinstance(layout, ServiceLayout):
         await asyncio.to_thread(service_registration.register_user, layout, action)
         return
     await _elevate(layout, action)
@@ -245,7 +252,16 @@ def connected_scope() -> ServiceScope | None:
 
     Setup keeps the scope a host already uses, so rerunning it repairs that
     service instead of creating a second one beside it.
+
+    Raises:
+        ValueError: On a host where the plugin service cannot be registered,
+            whether or not it was ever set up: such a host is unsupported
+            from the start, not merely without a service yet.
     """
+    scopes = registrable_scopes()
+    # Asked before the connection is read, so the refusal does not depend on
+    # a connection existing.
+    roots = {scope: owner_layout(scope).root for scope in scopes}
     try:
         connection = ServiceConnection.model_validate_json(
             read_private(SKULK_CONFIG_HOME / "managed-service" / "connection.json")
@@ -253,21 +269,10 @@ def connected_scope() -> ServiceScope | None:
     except FileNotFoundError:
         return None
     root = Path(connection.manager_root)
-    scopes: tuple[ServiceScope, ...] = ("user", "system")
     for scope in scopes:
-        if local_layout(os.getuid(), scope).root == root:
+        if roots[scope] == root:
             return scope
     return None
-
-
-def _definition_owner_protected(layout: ServiceLayout, info: os.stat_result) -> bool:
-    """A system definition belongs to root; a user definition to its owner."""
-    owner = 0 if layout.scope == "system" else os.getuid()
-    return (
-        stat.S_ISREG(info.st_mode)
-        and info.st_uid == owner
-        and not info.st_mode & 0o022
-    )
 
 
 async def _selected_within(root: Path, generation: str, seconds: float) -> bool:
@@ -280,12 +285,38 @@ async def _selected_within(root: Path, generation: str, seconds: float) -> bool:
     return True
 
 
-async def _observe(root: Path) -> bool:
+async def _inventory(root: Path) -> dict[str, JsonValue] | None:
+    """What the manager serving ``root`` answers, or None when none answers."""
     try:
-        result = await manager_request(root, InventoryRequest())
-        return "result" in result and "error" not in result
+        reply = await manager_request(root, InventoryRequest())
     except (OSError, ValueError, TimeoutError):
-        return False
+        return None
+    result = reply.get("result")
+    if "error" in reply or not isinstance(result, dict):
+        return None
+    return result
+
+
+async def _observe(root: Path) -> bool:
+    """Whether any manager answers for ``root``, whichever copy it runs."""
+    return await _inventory(root) is not None
+
+
+async def _serves(root: Path, snapshot: ServiceSnapshot) -> bool:
+    """Whether the manager that answers was started from ``snapshot``.
+
+    An answer alone does not say which manager gave it. After a reload the
+    old manager goes on answering for a moment with its successor already
+    selected, and the successor may be a while in coming. Only a manager
+    that names the copy it was started from, and names this one, is the
+    service setup is waiting for. One that names another copy, or none, is
+    not, however healthy it is.
+    """
+    inventory = await _inventory(root)
+    return inventory is not None and inventory.get("runtime") == {
+        "generation": snapshot.generation,
+        "manifest_sha256": snapshot.manifest_sha256,
+    }
 
 
 def registered_unit_names_base(base: Path) -> bool:
@@ -299,21 +330,11 @@ def registered_unit_names_base(base: Path) -> bool:
     scope = connected_scope()
     if scope is None:
         return False
-    return _unit_names_base(local_layout(os.getuid(), scope), base)
-
-
-def _unit_names_base(layout: ServiceLayout, base: Path) -> bool:
-    """Whether the registered OS service still invokes this interpreter."""
-    try:
-        descriptor = os.open(layout.unit, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return False
-    with os.fdopen(descriptor, "rb") as source:
-        return source.read(65537) == layout.definition(base)
+    return registered_for(owner_layout(scope), base)
 
 
 def _ready_installation(
-    layout: ServiceLayout, snapshot: ServiceSnapshot, base: Path
+    layout: OwnerLayout, snapshot: ServiceSnapshot, base: Path
 ) -> bool:
     try:
         selected = service_bootstrap.document(
@@ -325,11 +346,8 @@ def _ready_installation(
         }:
             return False
         service_bootstrap.verified_runtime(layout.root)
-        descriptor = os.open(layout.unit, os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(descriptor, "rb") as source:
-            if not _definition_owner_protected(layout, os.fstat(source.fileno())):
-                return False
-            return source.read(65537) == layout.definition(base)
+        # A system definition belongs to root; a user definition to its owner.
+        return registered_for(layout, base, protected=True)
     except (OSError, ValueError):
         return False
 
@@ -360,10 +378,10 @@ async def setup_service(
     Returns:
         The completed setup operation.
     """
-    if os.geteuid() == 0 or os.geteuid() != os.getuid():
+    if has_root_authority() or has_borrowed_identity():
         raise ValueError("run setup as the existing Skulk owner, not under sudo")
-    layout = local_layout(os.getuid(), scope or connected_scope() or "user")
-    base = Path(sys.executable).resolve(strict=True)
+    layout = owner_layout(scope or connected_scope() or "user")
+    base = service_bootstrap.current_base()
     configuration = SKULK_CONFIG_HOME.resolve()
     _not_translocated(base)
     _outside_checkout(base)
@@ -374,17 +392,11 @@ async def setup_service(
     # state. Existing healthy registrations can be verified without another sudo
     # prompt; all repair paths still validate that parent through the fixed helper.
     try:
-        root_info = layout.root.lstat()
-    except FileNotFoundError:
-        prepared = True
-    else:
         # Interrupted initial preparation may leave an empty root-owned leaf.
         # The privileged helper must adopt or reject it before owner-side locking.
-        prepared = (
-            not stat.S_ISDIR(root_info.st_mode)
-            or root_info.st_uid != os.getuid()
-            or bool(root_info.st_mode & 0o077)
-        )
+        prepared = not is_private_directory(layout.root)
+    except FileNotFoundError:
+        prepared = True
     if prepared:
         await finish_runtime_work(asyncio.create_task(_register(layout, "prepare")))
     lock = RuntimeLock(layout.root, "setup.lock")
@@ -429,7 +441,7 @@ async def setup_service(
                     refresh = (
                         operation.phase in {"registered", "ready"}
                         and operation.snapshot is not None
-                        and await asyncio.to_thread(_unit_names_base, layout, base)
+                        and await asyncio.to_thread(registered_for, layout, base)
                         and await _observe(layout.root)
                     )
                     operation = None
@@ -438,11 +450,11 @@ async def setup_service(
                 manager_root=str(layout.root), profile_id=profile_id
             )
             configuration.mkdir(mode=0o700, parents=True, exist_ok=True)
-            info = configuration.lstat()
+            custody = examine(configuration)
             if (
-                not stat.S_ISDIR(info.st_mode)
-                or info.st_uid != os.getuid()
-                or not writable_only_by(info, os.getuid())
+                custody.kind != "directory"
+                or not custody.owned
+                or not no_other_account_can_change(configuration)
             ):
                 raise ValueError(
                     "Skulk configuration must be owned by this account and not writable by others"
@@ -477,13 +489,38 @@ async def setup_service(
                 and await asyncio.to_thread(
                     _ready_installation, layout, operation.snapshot, base
                 )
-                and await _observe(layout.root)
             ):
-                write_private(connection_path, connection.model_dump_json().encode())
-                if operation.phase == "registered":
-                    operation = operation.model_copy(update={"phase": "ready"})
-                    _save(layout.root, operation)
-                return operation
+                # The selection, its seal and the registration are this
+                # operation's. What is left to know is who answers.
+                registered = operation.snapshot
+                served = await _serves(layout.root, registered)
+                if not served and await _observe(layout.root):
+                    # A manager answers, but not from this copy: the one this
+                    # service replaces has not gone yet, or its successor has
+                    # not come. Nothing is wrong with the registration, so it
+                    # is left alone and the service is waited for. Registering
+                    # again would restart a service that is only on its way,
+                    # and for a system service ask for elevation to do it.
+                    report(_STARTING_MESSAGE)
+                    deadline = time.monotonic() + _READINESS_WAIT_SECONDS
+                    while not (
+                        await _serves(layout.root, registered)
+                        and await asyncio.to_thread(
+                            _ready_installation, layout, registered, base
+                        )
+                    ):
+                        if time.monotonic() >= deadline:
+                            raise ServiceReadinessPendingError(operation.operation_id)
+                        await asyncio.sleep(0.5)
+                    served = True
+                if served:
+                    write_private(
+                        connection_path, connection.model_dump_json().encode()
+                    )
+                    if operation.phase == "registered":
+                        operation = operation.model_copy(update={"phase": "ready"})
+                        _save(layout.root, operation)
+                    return operation
             reply: dict[str, JsonValue] | None = None
             if refresh and operation.snapshot is None:
                 # The OS service is registered and answering; only the Skulk
@@ -528,7 +565,7 @@ async def setup_service(
                 report(_STARTING_MESSAGE)
                 deadline = time.monotonic() + _READINESS_WAIT_SECONDS
                 while not (
-                    await _observe(layout.root)
+                    await _serves(layout.root, selected)
                     and await asyncio.to_thread(
                         _ready_installation, layout, selected, base
                     )
@@ -592,8 +629,10 @@ async def setup_service(
             operation = operation.model_copy(update={"phase": "registered"})
             _save(layout.root, operation)
             report(_STARTING_MESSAGE)
+            installed = operation.snapshot
+            assert installed is not None
             deadline = time.monotonic() + _READINESS_WAIT_SECONDS
-            while not await _observe(layout.root):
+            while not await _serves(layout.root, installed):
                 if time.monotonic() >= deadline:
                     raise ServiceReadinessPendingError(operation.operation_id)
                 await asyncio.sleep(0.5)
@@ -608,7 +647,7 @@ async def setup_service(
 
 async def service_status() -> dict[str, str | bool]:
     """Distinguish historical setup completion from current management and integrity."""
-    layout = local_layout(os.getuid(), connected_scope() or "user")
+    layout = owner_layout(connected_scope() or "user")
     operation = SetupOperation.model_validate_json(
         read_private(layout.root / "setup.json")
     )
@@ -616,7 +655,7 @@ async def service_status() -> dict[str, str | bool]:
         _ready_installation,
         layout,
         operation.snapshot,
-        Path(sys.executable).resolve(strict=True),
+        service_bootstrap.current_base(),
     )
     available = await _observe(layout.root)
     return {
@@ -718,8 +757,8 @@ def main() -> None:
         action = TypeAdapter[str](str).validate_python(arguments.action)
         if action == "install-plugin":
             if (
-                os.geteuid() == 0
-                or os.geteuid() != os.getuid()
+                has_root_authority()
+                or has_borrowed_identity()
                 or not sys.stdin.isatty()
             ):
                 raise ValueError(
@@ -770,7 +809,7 @@ def main() -> None:
         if action == "purge-plugin":
             # The explicit end of an uninstall: the installation leaves the
             # inventory with everything it retained. Refused for a live one.
-            if os.geteuid() == 0:
+            if has_root_authority():
                 raise ValueError("plugin management requires the nonroot service owner")
             if len(remaining) != 1:
                 raise ValueError("purge-plugin takes exactly one installed plugin ID")
@@ -814,7 +853,7 @@ def main() -> None:
                 )
             )
         elif action == "catalog":
-            if os.geteuid() == 0:
+            if has_root_authority():
                 raise ValueError("plugin management requires the nonroot service owner")
             connection = ServiceConnection.model_validate_json(
                 read_private(
@@ -880,7 +919,7 @@ def main() -> None:
                 )
             )
         elif action == "manage":
-            if os.geteuid() == 0:
+            if has_root_authority():
                 raise ValueError("plugin management requires the nonroot service owner")
             connection = ServiceConnection.model_validate_json(
                 read_private(

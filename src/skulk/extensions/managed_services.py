@@ -7,7 +7,6 @@ import os
 import re
 import shutil
 import signal
-import sys
 import time
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -17,6 +16,7 @@ from typing import Final, Literal, final
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
+from skulk.extensions import service_bootstrap
 from skulk.extensions.managed import ManagedConnection, ManagedOwner
 from skulk.extensions.managed_attachment import (
     ManagedAttachment,
@@ -488,6 +488,19 @@ class ManagedInstallation(BaseModel):
     )
 
 
+class ManagedRuntime(BaseModel):
+    """The service copy a manager was started from, as it reports it."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+    generation: str = Field(
+        pattern=r"^[a-f0-9]{32}$", description="The staged generation's name."
+    )
+    manifest_sha256: str = Field(
+        pattern=r"^[a-f0-9]{64}$",
+        description="SHA-256 of that generation's manifest.",
+    )
+
+
 class ManagedInventory(BaseModel):
     """Manager inventory available even when every plugin runtime is disabled or broken."""
 
@@ -498,6 +511,11 @@ class ManagedInventory(BaseModel):
     reload_runtime: bool = Field(
         default=False,
         description="Whether this manager can select a staged runtime and restart on request.",
+    )
+    runtime: ManagedRuntime | None = Field(
+        default=None,
+        description="The service copy this manager was started from; absent "
+        "when it was not started from one or predates reporting it.",
     )
     store_trust_retry: bool = Field(
         default=False,
@@ -755,7 +773,7 @@ class ManagedServices:
                 isinstance(inventory, dict) and inventory.get("reload_runtime") is True
             )
             if not reloads and not await asyncio.to_thread(
-                registered_unit_names_base, Path(sys.executable).resolve(strict=True)
+                registered_unit_names_base, service_bootstrap.current_base()
             ):
                 # The legacy path selects a generation sealed to this
                 # interpreter for the OS service to start; a service

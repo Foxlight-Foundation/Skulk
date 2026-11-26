@@ -23,16 +23,20 @@ from pydantic import (
     model_validator,
 )
 
-INFERENCE_KERNEL_VERSION = "0.7.0rc7"
-INFERENCE_KERNEL_SOURCE = "511a5c248b65845919089c2c86c37cdcef122d50"
+INFERENCE_KERNEL_VERSION = "0.7.0"
+INFERENCE_KERNEL_SOURCE = "89a86d1f361ab0dfc1ac9aa52af170e5c68c5f83"
 # Reader compatibility never rewrites an issued application's signed closure.
 INFERENCE_READER_VERSIONS = (
     "0.7.0rc3",
     "0.7.0rc4",
     "0.7.0rc5",
+    "0.7.0rc7",
     INFERENCE_KERNEL_VERSION,
 )
 INFERENCE_COHORT_SHA256 = (
+    "78edbcc881f26458328af87246379531a9e547f6719be0d328b3a1ce087d991d"
+)
+_ISSUED_DISCOVERY_COHORT_SHA256 = (
     "d0b616e5b73111904cbfbc071ce2ad7f0b111624ba02ed5e7649ce6a8ec02de3"
 )
 _ISSUED_AUTHOR_COHORT_SHA256 = (
@@ -355,9 +359,14 @@ def inference_cohort(version: str = INFERENCE_KERNEL_VERSION) -> dict[str, JsonV
             "native-author-cohort.json",
             _ISSUED_AUTHOR_COHORT_SHA256,
         )
-    elif version == INFERENCE_KERNEL_VERSION:
+    elif version == "0.7.0rc7":
         filename, digest = (
             "native-discovery-cohort.json",
+            _ISSUED_DISCOVERY_COHORT_SHA256,
+        )
+    elif version == INFERENCE_KERNEL_VERSION:
+        filename, digest = (
+            "native-stable-cohort.json",
             INFERENCE_COHORT_SHA256,
         )
     else:
@@ -380,7 +389,7 @@ def inference_profile_readers(
         raise ValueError("unqualified native inference reader version")
     return INFERENCE_PROFILE_READERS + (
         (("skulk.discovery/1", "discovery_profile_digest"),)
-        if version == "0.7.0rc7"
+        if version in {"0.7.0rc7", "0.7.0"}
         else ()
     )
 
@@ -476,7 +485,7 @@ class _Contract(BaseModel):
 class InferenceProfiles(_Contract):
     """Exact signed execution cohort, separately selected from issued runtimes."""
 
-    version: Literal["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7"] = Field(
+    version: Literal["0.7.0rc3", "0.7.0rc4", "0.7.0rc5", "0.7.0rc7", "0.7.0"] = Field(
         description="Published native ABI package version."
     )
     source_commit: Literal[
@@ -484,6 +493,7 @@ class InferenceProfiles(_Contract):
         "3431a3b220f854512d3bb10003e095e00585c443",
         "52a9349252d896c5b0d73af0aa45a746295a4f76",
         "511a5c248b65845919089c2c86c37cdcef122d50",
+        "89a86d1f361ab0dfc1ac9aa52af170e5c68c5f83",
     ] = Field(description="Immutable public source selected by the closure.")
     portable: Literal[
         "7996ed84e821ddacfb48e00b99a5886948fd20e43bc2c7993c5ed98217834033"

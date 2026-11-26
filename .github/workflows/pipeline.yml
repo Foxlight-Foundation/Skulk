@@ -220,6 +220,10 @@ jobs:
           src/skulk/extensions/tests/test_runtime_manager_platforms.py
           src/skulk/extensions/tests/test_runtime_catalog.py
           src/skulk/extensions/tests/test_capability_store.py
+          src/skulk/routing/tests/test_peer_listener_failure.py
+          src/skulk/recovery/tests/test_record.py
+          src/skulk/recovery/tests/test_recorder.py
+          src/skulk/api/tests/test_gateway_signer_platforms.py
 
       - name: Run the plugin installer tests as an ordinary user
         # scripts/run_as_ordinary_windows_user.py starts a command with this
@@ -230,9 +234,15 @@ jobs:
         #
         # The slow tests are included: one of them copies a standalone Python,
         # installs through it, moves it and starts the adopted environment,
-        # and another copies this Skulk into a service folder, seals the copy
-        # and starts the plugin manager from it. Nothing else in CI does
-        # either on Windows.
+        # and another measures this host, copies this Skulk into a service
+        # folder, seals the copy, asks the copy what it is and starts the
+        # plugin manager from it. Nothing else in CI does either on Windows.
+        #
+        # The service task tests register against a stand-in for Task
+        # Scheduler and start the real startup file without a console, as
+        # Task Scheduler starts it. One of them is local setup from nothing to
+        # a manager that answers, on a copy of this whole environment. A real
+        # scheduled task needs a signed-in session, which this runner has not.
         #
         # This runner has long paths switched on, which a Windows machine does
         # not by default, so the 259-character path limit is not checked here.
@@ -246,6 +256,7 @@ jobs:
             --basetemp="$RUNNER_TEMP/u" \
             src/skulk/utils/tests/test_runtime_files_platforms.py \
             src/skulk/utils/tests/test_owned_process.py \
+            src/skulk/api/tests/test_gateway_signer_platforms.py \
             src/skulk/extensions/tests/test_runtime_integrity.py \
             src/skulk/extensions/tests/test_runtime_install.py \
             src/skulk/extensions/tests/test_runtime_download.py \
@@ -253,7 +264,11 @@ jobs:
             src/skulk/extensions/tests/test_local_setup.py \
             src/skulk/extensions/tests/test_runtime_service.py \
             src/skulk/extensions/tests/test_runtime_manager_platforms.py \
-            src/skulk/extensions/tests/test_service_snapshot.py
+            src/skulk/extensions/tests/test_service_snapshot.py \
+            src/skulk/extensions/tests/test_service_setup.py \
+            src/skulk/extensions/tests/test_service_user_scope.py \
+            src/skulk/extensions/tests/test_service_task.py \
+            src/skulk/extensions/tests/test_runtime_platform.py
 
   test:
     name: Test

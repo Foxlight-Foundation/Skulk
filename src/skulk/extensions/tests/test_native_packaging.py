@@ -49,7 +49,11 @@ def test_native_frozen_resource_closure_preserves_reader_identity(
     discovery = TypeAdapter(dict[str, JsonValue]).validate_json(
         (tmp_path / "skulk/extensions/native-discovery-cohort.json").read_bytes()
     )
-    assert discovery == inference_cohort()
+    assert discovery == inference_cohort("0.7.0rc7")
+    stable = TypeAdapter(dict[str, JsonValue]).validate_json(
+        (tmp_path / "skulk/extensions/native-stable-cohort.json").read_bytes()
+    )
+    assert stable == inference_cohort()
     metadata = next(tmp_path.glob("*.dist-info"))
     package = importlib.metadata.Distribution.at(metadata)
     assert package.version == INFERENCE_KERNEL_VERSION
@@ -72,6 +76,7 @@ def test_native_frozen_resource_closure_preserves_reader_identity(
         "native-inference-stream-cohort.json",
         "native-author-cohort.json",
         "native-discovery-cohort.json",
+        "native-stable-cohort.json",
     ],
 )
 def test_native_build_refuses_either_missing_interpretation_receipt(
@@ -88,6 +93,7 @@ def test_native_build_refuses_either_missing_interpretation_receipt(
         "native-inference-stream-cohort.json",
         "native-author-cohort.json",
         "native-discovery-cohort.json",
+        "native-stable-cohort.json",
     ):
         if name != missing:
             (resources / name).write_text("{}")

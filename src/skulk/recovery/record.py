@@ -38,6 +38,7 @@ from skulk.shared.types.steward_actions import (
     StewardActionProposalId,
 )
 from skulk.utils.pydantic_ext import FrozenModel
+from skulk.utils.runtime_files import sync_directory
 
 RECORD_FORMAT_VERSION = 1
 
@@ -320,6 +321,10 @@ def write_record(path: Path, record: ClusterIntentRecord) -> None:
     disk, and then replaces the old record in one rename, after which the
     directory entry is flushed too. A crash at any point leaves either the old
     record or the new one.
+
+    On Windows a file's mode says nothing about who may read it: the record
+    is as private there as the folder that holds it, which is the account's
+    own Skulk home.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     staging = path.with_name(f".{path.name}.tmp")
@@ -332,11 +337,11 @@ def write_record(path: Path, record: ClusterIntentRecord) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(staging, path)
-    directory = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    # Through the file seam: Windows does not let a folder be opened the way
+    # a file is. Doing that here raised after the record was already written,
+    # so a Windows node rewrote its record on every pass, believed it had
+    # none, and told the other nodes so.
+    sync_directory(path.parent)
 
 
 def read_record(path: Path) -> ClusterIntentRecord | None:

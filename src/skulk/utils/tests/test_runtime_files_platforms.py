@@ -50,13 +50,18 @@ _DIRECT_FILE_CUSTODY = frozenset(
         "st_uid",
     }
 )
-# Plugin-hosting modules not yet moved onto the seam, so not yet able to run on
-# Windows. Remove a module from this list when it is ported; add none.
-_NOT_YET_PORTED = frozenset({"service_registration.py", "service_setup.py"})
-# Runs on nothing but the standard library, before anything of Skulk's may be
-# imported, so it cannot use the seam. It restates the seam's rules for both
-# platforms and is held to them by its own tests (``test_service_snapshot.py``).
-_STANDALONE = frozenset({"service_bootstrap.py"})
+# The two files that run on nothing but the standard library, so cannot use the
+# seam. Every other plugin-hosting module is on it; add none here.
+#
+# ``service_bootstrap.py`` runs before anything of Skulk's may be imported. It
+# restates the seam's rules for both platforms and is held to them by its own
+# tests (``test_service_snapshot.py``).
+#
+# ``service_registration.py`` is run by path as root, on POSIX only, to
+# register a machine-wide service, and does its own POSIX checks there.
+# Windows registers nothing as another user, so its half is in
+# ``_service_registration_windows.py``, which uses the seam.
+_STANDALONE = frozenset({"service_bootstrap.py", "service_registration.py"})
 
 
 @pytest.fixture
@@ -574,4 +579,4 @@ def test_only_the_seam_asks_who_owns_a_file_or_opens_one_link_safely() -> None:
         ):
             direct.add(source.name)
 
-    assert direct == _NOT_YET_PORTED | _STANDALONE
+    assert direct == _STANDALONE

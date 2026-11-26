@@ -2956,18 +2956,18 @@ an issued generation's pinned binary. Ordinary selection refuses changes between
 legacy, native transport and native calls interpretations, even when state/schema
 labels match. Such changes require explicit qualified state migration. Call-format
 startup alone does not advertise native invocation or delegation capacity.
-The PyInstaller native hook includes all six cohort receipts and the selected
+The PyInstaller native hook includes all seven cohort receipts and the selected
 reader metadata/licenses, refusing a missing receipt during the build.
 
 Runtime envelope 5 and release envelope 3 independently select the published
-0.7.0rc3, 0.7.0rc4, 0.7.0rc5 or 0.7.0rc7 inference cohort: portable2/managed2/handshake2/transport2/composition3/
+0.7.0rc3, 0.7.0rc4, 0.7.0rc5, 0.7.0rc7 or stable 0.7.0 inference cohort: portable2/managed2/handshake2/transport2/composition3/
 calls2. Their signature/digest domains are `skulk.runtime/5\0` and
 `skulk.release/3\0`. Staging validates the installed binary's thirteen baseline profiles plus
-`skulk.discovery/1` for native7, exact manifest identity and calls2 framing. Native inference
+`skulk.discovery/1` for native7 and stable0.7.0, exact manifest identity and calls2 framing. Native inference
 registration retains full descriptor identities; it does not imply readiness.
 Old issued runtime closures and signing bytes remain unchanged. Selection also
 fences transitions into this interpretation, regardless of equal state labels.
-The frozen reader carries all six cohort receipts, retaining all four issued inference closures.
+The frozen reader carries all seven cohort receipts, retaining all five published inference closures.
 
 `inference_callers.py` owns original client authentication and credential custody;
 `inference_enrollment.py` verifies exact signed, persisted destinations without
@@ -3093,9 +3093,15 @@ bootstrap replaces itself with the manager, so the process the OS service starte
 is the manager. Windows cannot replace a running process, so there the bootstrap
 stays: it joins a Job Object that ends its processes when the bootstrap's own
 handle closes, starts the manager as a child with the same fixed environment,
-and waits. A console request to stop (Ctrl-C or Ctrl-Break) reaches both; the
-bootstrap ignores it and the manager shuts down in order, after which the
-bootstrap exits with the manager's exit code. If the bootstrap is ended outright,
+and waits. The manager runs in its own process group, so a request to stop
+reaches it in one way whoever asks: Ctrl-C or Ctrl-Break at the bootstrap's
+console, or local setup creating `service-stop` in the service root, makes the
+bootstrap send Ctrl-Break to the manager's group. The manager shuts down in
+order, after which the bootstrap exits with the manager's exit code. Started by
+Task Scheduler the bootstrap has no console, so the manager gets one without a
+window and the bootstrap attaches to it to send the request. For as long as it
+runs, the bootstrap holds `bootstrap.lock`, which is how local setup knows a
+Windows service is still there. If the bootstrap is ended outright,
 the manager and everything the manager started end with it, so nothing is left
 serving that the OS service does not know about.
 The seal follows the platform too. A Windows environment contains no link to its
@@ -3106,11 +3112,29 @@ folder, and records the base's library beside its program. Staging there builds
 the environment in a child run on the base interpreter's real path, and refuses
 in advance a copy whose deepest file would not fit below the service root on a
 machine without long paths, saying how many characters too long it is.
-Two parts of this do not run on Windows yet. Staging a real copy starts by
-measuring the host, and Skulk names an artifact family for macOS and Linux only;
-naming one for Windows is a decision for the release schema and the plugin owner
-runtime. And nothing registers the service with Windows.
+Staging a copy starts by measuring the host, and a Windows host has a name for
+that: `windows-x86_64` or `windows-aarch64`, taken from what the Python
+interpreter was built for, because the usual question is answered from the
+environment on Windows and the plugin manager runs with a fixed one. The name
+describes the machine. It
+is what lets a Windows node keep its own plugin service, and it admits nothing
+else: a release says for itself which systems it may be installed on, the
+release schema names macOS and Linux only, and so every install on Windows is
+still refused. Only x86_64 has been run.
 Core-runtime activation requires a stopped manager and leaves plugin state intact.
+A manager knows which service copy it runs from. It works that out once, when it
+starts, from where its own interpreter's environment lies and from that
+generation's own manifest, and never from the selection, and its inventory reply
+carries the answer (`runtime`: the generation and the SHA-256 of its manifest)
+when it was started from a copy. Local setup counts the service as ready only
+when the manager that answers names exactly the copy setup expects. That matters
+after a refresh: the old manager goes on answering for a moment with its
+successor already selected, and the successor may be a while in coming (ten
+seconds on macOS and Linux, up to a minute on Windows). An answer from the old
+manager, from a manager that names another copy, or from one that names none
+leaves setup waiting within its usual bound, with the registration untouched.
+Running setup again while such a manager still answers waits again; it does not
+register the service a second time.
 Explicit local setup with a changed source can supersede an interrupted operation;
 its journal and logical profile remain retained while a new copy is staged before
 stopping any existing manager. Linux registration emits a literal working directory
@@ -3152,7 +3176,20 @@ unavailable inventory. `skulk-plugin-service setup --system`
 instead registers a system LaunchDaemon or systemd service, for hosts that run
 unattended, through the standalone standard-library-only `service_registration.py`
 helper; only that helper runs elevated, and the manager still runs as the existing
-nonroot account. Setup keeps whichever scope a configuration is already connected to. Retained setup phase is
+nonroot account. Setup keeps whichever scope a configuration is already connected to. On Windows the
+service is a Task Scheduler task that the account registers for itself with no elevation: Windows has no
+service manager for an ordinary account. Its name ends in the account's SID, because task names are shared by
+the whole machine. The task runs as that account, in its signed-in session and with its
+ordinary rights, so the service runs only while the account is signed in, and a service for the whole machine
+is not offered. Task Scheduler restarts a task only after a failure, and the manager also ends cleanly when it
+wants to be started again, so the task is started every minute and never twice at once; a restart there takes
+up to a minute where launchd and systemd take ten seconds. To stop the service, setup switches the task off,
+asks the bootstrap to stop through a file in the service root and waits up to 180 seconds before it ends the
+task. That file stays until the service is installed again, and while it is there a start ends at once.
+A Windows node that was never set up reads `absent`, like any other, and the Plugins page starts local setup
+there. A host on a system Skulk has no name for refuses by name, before setup reads or writes anything, and the
+status route answers `unsupported` with that sentence whether or not the node was ever set up, so the Plugins
+page starts no setup there. Retained setup phase is
 separate from current runtime integrity and manager availability. HTTP lifecycle and dynamic installation registration use this manager; setup progress, runtime integrity and live management availability remain separate observations.
 
 `terminal_install.py` composes the manager's existing operations for the interactive
@@ -4425,7 +4462,10 @@ cannot discard either version.
   adapts provider-neutral `chat.completions@0.1.0` and `@0.2.0` catalog/signature/stream
   contract into `/v1/models` and `/v1/chat/completions`. Direct owner authority
   precedes signing; capability-owned policy independently admits the request.
-  Gateway keys stay host-local. No account credentials or provider HTTP clients
+  Gateway keys stay host-local; `utils/runtime_files.py` supplies owner-only
+  POSIX/Windows custody and durable complete-before-publish key creation without
+  replacing a concurrent winner. Unsafe existing state is refused without key
+  rotation. No account credentials or provider HTTP clients
   enter Core. Capability models are separate from mounted instances; chat reuses
   Markdown, function-call handling and mounted TTS. Discovery is local-host only.
   Version 0.2 keeps a signed body digest/length in control messages and transfers

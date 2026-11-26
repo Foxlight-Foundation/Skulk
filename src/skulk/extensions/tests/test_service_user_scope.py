@@ -5,6 +5,7 @@ import os
 import plistlib
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Literal, cast
@@ -26,17 +27,25 @@ from skulk.extensions.managed_services import (
     RuntimeUpdate,
     RuntimeUpdateFailure,
 )
-from skulk.extensions.runtime_files import write_private
+from skulk.extensions.runtime_files import private_directory, write_private
 from skulk.extensions.service_autosetup import ServiceSetupRunner
 from skulk.extensions.service_registration import ServiceLayout, register_user
 from skulk.extensions.service_setup import ServiceConnection, SetupOperation
+
+posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="a launchd or systemd registration, which is POSIX by nature",
+)
+
+# A layout names its owner by number. Windows has no such numbers, and these
+# tests stand in for the registration there, so any nonroot pair serves.
+_OWNER = (1001, 1001) if sys.platform == "win32" else (os.getuid(), os.getgid())
 
 
 def _user_layout(tmp_path: Path, platform: str) -> ServiceLayout:
     return ServiceLayout(
         platform,
-        os.getuid(),
-        os.getgid(),
+        *_OWNER,
         "owner",
         "owners",
         "user",
@@ -68,6 +77,7 @@ def test_user_scope_requires_absolute_owner_directories() -> None:
         )
 
 
+@posix_only
 def test_user_agent_runs_as_its_owner_without_naming_one(tmp_path: Path) -> None:
     layout = _user_layout(tmp_path, "macos-arm64")
     python = Path("/opt/python/bin/python3.13")
@@ -82,6 +92,7 @@ def test_user_agent_runs_as_its_owner_without_naming_one(tmp_path: Path) -> None
     layout.verify_existing(layout.definition(python))
 
 
+@posix_only
 def test_user_unit_starts_with_the_user_manager(tmp_path: Path) -> None:
     layout = _user_layout(tmp_path, "linux-glibc-x86_64")
     unit = layout.definition(Path("/opt/python/bin/python3.13")).decode()
@@ -93,6 +104,7 @@ def test_user_unit_starts_with_the_user_manager(tmp_path: Path) -> None:
     layout.verify_existing(unit.encode())
 
 
+@posix_only
 @pytest.mark.parametrize("scope", ["user", "system"])
 @pytest.mark.parametrize(
     "alteration", ["none", "account", "directory", "scheduling", "environment"]
@@ -106,7 +118,7 @@ def test_macos_scheduling_upgrade_accepts_only_the_exact_previous_unit(
     layout = (
         _user_layout(tmp_path, "macos-arm64")
         if scope == "user"
-        else ServiceLayout("macos-arm64", os.getuid(), os.getgid(), "owner", "owners")
+        else ServiceLayout("macos-arm64", *_OWNER, "owner", "owners")
     )
     payload = cast(
         dict[str, object],
@@ -128,6 +140,7 @@ def test_macos_scheduling_upgrade_accepts_only_the_exact_previous_unit(
         layout.verify_existing(plistlib.dumps(payload, sort_keys=True))
 
 
+@posix_only
 def test_local_user_layout_honors_xdg_on_linux(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -148,6 +161,7 @@ def test_local_user_layout_honors_xdg_on_linux(
     assert fallback.root.parts[-4:] == (".local", "state", "skulk", "plugin-service")
 
 
+@posix_only
 def test_prepare_creates_a_private_root_and_refuses_a_shared_one(
     tmp_path: Path,
 ) -> None:
@@ -162,6 +176,7 @@ def test_prepare_creates_a_private_root_and_refuses_a_shared_one(
         register_user(layout, "prepare")
 
 
+@posix_only
 def test_user_registration_refuses_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -186,6 +201,7 @@ def _record_commands(
     return commands
 
 
+@posix_only
 @pytest.mark.parametrize("platform", ["macos-arm64", "linux-glibc-x86_64"])
 def test_install_and_stop_use_the_owners_service_manager(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform: str
@@ -219,6 +235,7 @@ def test_install_and_stop_use_the_owners_service_manager(
         assert commands[1][:3] == ("/usr/bin/systemctl", "--user", "show")
 
 
+@posix_only
 def test_stop_without_a_definition_does_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -227,6 +244,7 @@ def test_stop_without_a_definition_does_nothing(
     assert commands == []
 
 
+@posix_only
 def test_a_foreign_definition_under_the_reserved_name_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -238,6 +256,126 @@ def test_a_foreign_definition_under_the_reserved_name_is_refused(
     with pytest.raises(ValueError):
         register_user(layout, "install")
     assert commands == []
+
+
+@posix_only
+def test_the_registered_definition_is_read_as_itself(tmp_path: Path) -> None:
+    """Exactly the definition that starts this interpreter, and never a link to one."""
+    layout = _user_layout(tmp_path, "macos-arm64")
+    python = Path("/opt/python/bin/python3.13")
+    registered_for = service_registration.registered_for
+
+    assert not registered_for(layout, python)
+    layout.unit.parent.mkdir(parents=True)
+    layout.unit.write_bytes(layout.definition(python))
+    layout.unit.chmod(0o644)
+    assert registered_for(layout, python)
+    assert registered_for(layout, python, protected=True)
+    assert not registered_for(layout, Path("/opt/other/bin/python3.13"))
+
+    # Readable and exact, but another account may rewrite it.
+    layout.unit.chmod(0o664)
+    assert registered_for(layout, python)
+    assert not registered_for(layout, python, protected=True)
+
+    exact = tmp_path / "exact"
+    exact.write_bytes(layout.definition(python))
+    layout.unit.unlink()
+    layout.unit.symlink_to(exact)
+    assert not registered_for(layout, python)
+
+
+@posix_only
+def test_the_owners_layout_is_this_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service_registration, "service_platform", lambda: "macos-arm64")
+
+    assert service_registration.owner_layout("user") == (
+        service_registration.local_layout(os.getuid(), "user")
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows registration")
+async def test_a_windows_node_that_was_never_set_up_reads_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Windows host has a name, so its plugin service can be set up.
+
+    ``absent`` is what lets the Plugins page start local setup. Nothing is
+    started here, and nothing is asked of Task Scheduler: the status of a
+    node that was never connected needs neither.
+    """
+    assert sys.platform == "win32"
+    from skulk.extensions import _service_registration_windows as windows
+
+    monkeypatch.setattr(windows, "local_data_directory", lambda: str(tmp_path))
+    assert (
+        service_registration.owner_layout("user").root == tmp_path / "Skulk" / "plugins"
+    )
+    with pytest.raises(ValueError, match="whole machine"):
+        service_registration.owner_layout("system")
+    # A launchd or systemd definition is no service of this system's.
+    layout = _user_layout(tmp_path, "macos-arm64")
+    assert not service_registration.registered_for(layout, Path(sys.executable))
+
+    _connect(monkeypatch, tmp_path, None)
+    status = await ServiceSetupRunner().status()
+    assert status.state == "absent"
+    assert status.error is None
+    assert not (tmp_path / "Skulk").exists()
+
+
+@pytest.mark.parametrize("authority", ["root", "borrowed"])
+async def test_setup_refuses_an_account_that_is_not_the_plain_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, authority: str
+) -> None:
+    """Root, an administrator or SYSTEM, or a lent identity: before anything is read."""
+    _connect(monkeypatch, tmp_path, None)
+
+    def unreachable(_scope: str) -> ServiceLayout:
+        raise AssertionError("setup went on with an account it refuses")
+
+    monkeypatch.setattr(service_setup, "owner_layout", unreachable)
+    monkeypatch.setattr(
+        service_setup, "has_root_authority", lambda: authority == "root"
+    )
+    monkeypatch.setattr(
+        service_setup, "has_borrowed_identity", lambda: authority == "borrowed"
+    )
+
+    with pytest.raises(ValueError, match="existing Skulk owner"):
+        await service_setup.setup_service("user")
+
+
+@pytest.mark.parametrize("connected", [False, True])
+async def test_a_host_that_cannot_register_reads_as_unsupported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, connected: bool
+) -> None:
+    """In words, and from the start: not as a service that is merely absent.
+
+    A host that was never set up has no connection. Were it to read as
+    absent, the Plugins page would start a setup that can only fail and then
+    offer to retry it.
+    """
+    _connect(monkeypatch, tmp_path, tmp_path / "manager" if connected else None)
+
+    def refuse(_scope: str) -> ServiceLayout:
+        raise ValueError("plugin services are qualified on macOS and Linux only")
+
+    async def setup(_scope: str | None, _report: object) -> SetupOperation:
+        raise AssertionError("an unsupported host sets up nothing")
+
+    monkeypatch.setattr(service_setup, "owner_layout", refuse)
+    monkeypatch.setattr(service_autosetup, "setup_service", setup)
+    runner = ServiceSetupRunner()
+
+    before = await runner.status()
+    runner.start()
+    await asyncio.sleep(0)
+    after = await runner.status()
+
+    for status in (before, after):
+        assert status.state == "unsupported"
+        assert status.error == "plugin services are qualified on macOS and Linux only"
 
 
 def _connect(
@@ -260,19 +398,19 @@ def _layouts(
 ) -> dict[str, ServiceLayout]:
     layouts = {
         "user": _user_layout(tmp_path, "macos-arm64"),
-        "system": ServiceLayout("macos-arm64", os.getuid(), os.getgid(), "o", "g"),
+        "system": ServiceLayout("macos-arm64", *_OWNER, "o", "g"),
     }
 
-    def local_layout(
-        _user_id: int, scope: Literal["system", "user"] = "system"
-    ) -> ServiceLayout:
+    def owner_layout(scope: Literal["system", "user"]) -> ServiceLayout:
         return layouts[scope]
 
-    monkeypatch.setattr(service_setup, "local_layout", local_layout)
+    monkeypatch.setattr(service_setup, "owner_layout", owner_layout)
     return layouts
 
 
-@pytest.mark.parametrize("connected", [None, "user", "system"])
+@pytest.mark.parametrize(
+    "connected", [None, "user", pytest.param("system", marks=posix_only)]
+)
 def test_connected_scope_names_the_service_this_configuration_uses(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -383,6 +521,7 @@ async def test_runner_reports_why_setup_failed(
     assert failed.error is not None and "outside Git checkouts" in failed.error
 
 
+@posix_only
 async def test_runner_leaves_a_system_service_to_the_terminal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -589,17 +728,24 @@ def test_selected_base_matches_tracks_the_interpreters_bytes(tmp_path: Path) -> 
     from skulk.extensions import service_bootstrap
 
     root = tmp_path / "service"
-    (root / "core-runtimes" / ("a" * 32)).mkdir(mode=0o700, parents=True)
-    for directory in (root, root / "core-runtimes"):
-        directory.chmod(0o700)
+    for directory in (
+        root,
+        root / "core-runtimes",
+        root / "core-runtimes" / ("a" * 32),
+    ):
+        private_directory(directory)
     base = tmp_path / "python3.13"
     base.write_bytes(b"interpreter v1")
+    library = base.with_name(
+        f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+    )
+    if sys.platform == "win32":
+        # The interpreter there is a small program that loads this library
+        # from its own folder; the seal records both.
+        library.write_bytes(b"library v1")
     generation = "a" * 32
     manifest = json.dumps(
-        {
-            "base_python": str(base),
-            "base_sha256": service_bootstrap.digest_file(base),
-        },
+        service_bootstrap.base_identity(base),
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
@@ -615,6 +761,11 @@ def test_selected_base_matches_tracks_the_interpreters_bytes(tmp_path: Path) -> 
     )
 
     assert service_bootstrap.selected_base_matches(root, base)
+    if sys.platform == "win32":
+        library.write_bytes(b"library v2")
+        assert not service_bootstrap.selected_base_matches(root, base)
+        library.write_bytes(b"library v1")
+        assert service_bootstrap.selected_base_matches(root, base)
     base.write_bytes(b"interpreter v2, re-signed by an app update")
     assert not service_bootstrap.selected_base_matches(root, base)
     assert not service_bootstrap.selected_base_matches(tmp_path / "missing", base)
@@ -624,6 +775,7 @@ def _stat(mode: int, uid: int, gid: int) -> os.stat_result:
     return os.stat_result((mode, 0, 0, 1, uid, gid, 0, 0, 0, 0))
 
 
+@posix_only
 def test_group_write_in_the_owners_private_group_is_still_private(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -661,6 +813,7 @@ def test_group_write_in_the_owners_private_group_is_still_private(
         runtime_files._private_group.cache_clear()  # pyright: ignore[reportPrivateUsage]
 
 
+@posix_only
 def test_a_staged_runtime_is_made_private_whatever_the_umask(tmp_path: Path) -> None:
     """A 0002 umask leaves venv's skeleton group-writable; staging removes it."""
     from skulk.extensions import service_snapshot
@@ -712,6 +865,7 @@ def _bundled_python(tmp_path: Path, identifier: object) -> Path:
     return python
 
 
+@posix_only
 def test_an_agent_from_the_mac_app_names_the_app(tmp_path: Path) -> None:
     """Login Items shows Skulk, not the interpreter, for the packaged app's agent."""
     layout = _user_layout(tmp_path, "macos-arm64")
@@ -726,6 +880,7 @@ def test_an_agent_from_the_mac_app_names_the_app(tmp_path: Path) -> None:
     assert b"AssociatedBundleIdentifiers" not in plain
 
 
+@posix_only
 def test_an_agent_whose_app_moved_is_still_recognized(tmp_path: Path) -> None:
     """Repair after an app move must not refuse the agent the app wrote."""
     layout = _user_layout(tmp_path, "macos-arm64")
@@ -889,7 +1044,7 @@ async def test_a_skulk_update_reads_as_setting_up_until_the_manager_attaches(
         ("other_interpreter", "user", "Try again"),
         ("not_restarted", "user", "Try again"),
         ("staging_failed", "user", "Free some disk space"),
-        ("refused", "system", "setup --system"),
+        pytest.param("refused", "system", "setup --system", marks=posix_only),
     ],
 )
 async def test_a_failed_update_names_its_next_step_until_a_setup_supersedes_it(

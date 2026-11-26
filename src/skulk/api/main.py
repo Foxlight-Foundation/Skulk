@@ -3024,7 +3024,8 @@ class API:
                 "Return the public signing key for experimental capability chat. "
                 "This grants no authority. A capability owner must explicitly delegate "
                 "models and policy to this key before it can submit inference. "
-                "Private key material remains on this API host."
+                "Private key material remains on this API host. Unsafe, malformed or "
+                "unavailable key storage returns HTTP 503 without rotating identity."
             ),
         )(self.inference_gateway_identity)
         self.app.post(

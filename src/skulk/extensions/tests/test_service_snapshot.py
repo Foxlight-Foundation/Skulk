@@ -1,6 +1,7 @@
 """Pre-site bootstrap integrity, stopped activation and incomplete service copying."""
 
 import asyncio
+import contextlib
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -38,27 +39,6 @@ from skulk.utils.runtime_files import has_root_authority
 windows_only = pytest.mark.skipif(
     sys.platform != "win32", reason="examines a Windows access list or process"
 )
-# Host measurement names an artifact family, and Skulk names none for Windows:
-# no plugin runtime is published for it. Until one is, nothing can measure a
-# Windows host, so a real service copy cannot be staged there.
-names_this_platform = pytest.mark.skipif(
-    sys.platform == "win32", reason="host measurement names no Windows platform"
-)
-
-
-@pytest.fixture
-def measured_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give staging a host to copy from on a platform Skulk does not name.
-
-    The tests that use this exercise staging's own steps, which run on
-    Windows; only the measurement in front of them does not.
-    """
-    if sys.platform == "win32":
-        host = QualifiedHost("macos-arm64", "3.13.13", "1.5.2", "a" * 64)
-        monkeypatch.setattr(
-            "skulk.extensions.service_snapshot.measure_host", lambda: host
-        )
-
 
 _MANAGER = "print('verified-manager')\n"
 # A manager that never stops by itself: it adds a byte to ``beats`` in the
@@ -82,6 +62,20 @@ _STOPS_WHEN_ASKED = (
     "print('ready', flush=True)\n"
     "while True:\n"
     "    time.sleep(0.05)\n"
+)
+
+
+# A manager that says which copy it runs, asking the startup file that started
+# it (the copy of it in the service root), and ends.
+_SAYS_WHAT_IT_RUNS = (
+    "import importlib.util, json, os, sys\n"
+    "from pathlib import Path\n"
+    "root = sys.argv[-1]\n"
+    "spec = importlib.util.spec_from_file_location(\n"
+    "    'startup', os.path.join(root, 'service-bootstrap.py'))\n"
+    "startup = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(startup)\n"
+    "print(json.dumps(startup.started_from(Path(root))), flush=True)\n"
 )
 
 
@@ -117,11 +111,28 @@ def _environment(runtime: Path) -> None:
         venv.EnvBuilder(symlinks=True, with_pip=False).create(runtime)
 
 
-def staged(root: Path, manager: str = _MANAGER) -> ServiceSnapshot:
+def _lifetime_lock(root: Path) -> None:
+    """Leave the lock a Windows service holds while it runs, as local setup does.
+
+    The startup file only ever opens it: without it nothing starts there.
+    """
+    if sys.platform == "win32":
+        # Already there, and held, when a service is running from this root.
+        with contextlib.suppress(BlockingIOError):
+            RuntimeLock(root, service_bootstrap.LIFETIME_LOCK).close()
+
+
+def staged(
+    root: Path,
+    manager: str = _MANAGER,
+    name: str = "a" * 32,
+    build: str = "b" * 64,
+) -> ServiceSnapshot:
     """Build a minimal actual venv with a fixed manager fixture and complete seal."""
     private_directory(root)
+    _lifetime_lock(root)
     private_directory(root / "core-runtimes")
-    generation = root / "core-runtimes" / ("a" * 32)
+    generation = root / "core-runtimes" / name
     private_directory(generation)
     runtime = generation / "runtime"
     private_directory(runtime)
@@ -137,7 +148,7 @@ def staged(root: Path, manager: str = _MANAGER) -> ServiceSnapshot:
     base = service_bootstrap.current_base()
     metadata = {
         "protocol": 1,
-        "generation": "a" * 32,
+        "generation": name,
         **service_bootstrap.base_identity(base),
         "bootstrap_sha256": hashlib.sha256(bootstrap).hexdigest(),
         "entries": service_bootstrap.runtime_tree(runtime, base),
@@ -145,9 +156,9 @@ def staged(root: Path, manager: str = _MANAGER) -> ServiceSnapshot:
     payload = json.dumps(metadata, sort_keys=True).encode()
     write_private(generation / "snapshot.json", payload)
     result = ServiceSnapshot(
-        generation="a" * 32,
+        generation=name,
         manifest_sha256=hashlib.sha256(payload).hexdigest(),
-        skulk_build_sha256="b" * 64,
+        skulk_build_sha256=build,
         copied_files=3,
         copied_bytes=32,
     )
@@ -325,7 +336,6 @@ def test_bootstrap_refuses_tampering_before_site_startup(
     assert not marker.exists()
 
 
-@pytest.mark.usefixtures("measured_host")
 async def test_interrupted_copy_does_not_publish_over_existing_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -349,7 +359,6 @@ async def test_interrupted_copy_does_not_publish_over_existing_selection(
     RuntimeLock(tmp_path).close()
 
 
-@pytest.mark.usefixtures("measured_host")
 async def test_staging_refuses_a_copy_the_volume_has_no_room_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -404,7 +413,6 @@ async def test_staging_refuses_a_copy_whose_paths_would_not_fit(
     RuntimeLock(tmp_path).close()
 
 
-@pytest.mark.usefixtures("measured_host")
 async def test_source_editable_dependency_is_not_silently_borrowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -444,7 +452,6 @@ def test_the_runtime_check_ignores_what_finder_leaves_behind(tmp_path: Path) -> 
     assert service_bootstrap.runtime_tree(runtime, base) != sealed
 
 
-@names_this_platform
 def test_a_browsed_core_build_measures_as_the_same_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -585,6 +592,60 @@ def test_a_console_request_to_stop_is_the_managers_to_act_on(tmp_path: Path) -> 
     finally:
         bootstrap.kill()
         bootstrap.wait()
+
+
+def test_a_manager_the_startup_file_started_knows_which_copy_it_runs(
+    tmp_path: Path,
+) -> None:
+    """The copy the startup file verified is the copy the manager names.
+
+    Started by the real startup file, on its own interpreter, the manager
+    asks where its environment lies and gets the selected generation and the
+    digest of the manifest the startup file checked every file against.
+    """
+    snapshot = staged(tmp_path, _SAYS_WHAT_IT_RUNS)
+    activate_service_runtime(tmp_path, snapshot)
+    result = _run_bootstrap(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [snapshot.generation, snapshot.manifest_sha256]
+
+
+def test_a_process_names_the_copy_it_runs_from_and_not_the_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where the interpreter's environment lies decides, never the pointer."""
+    running = staged(tmp_path)
+    successor = staged(tmp_path, name="b" * 32)
+    activate_service_runtime(tmp_path, successor)
+    generations = tmp_path / "core-runtimes"
+    # This test process runs from no service copy at all.
+    assert service_bootstrap.started_from(tmp_path) is None
+    monkeypatch.setattr(
+        sys, "prefix", str(generations / running.generation / "runtime")
+    )
+    assert service_bootstrap.started_from(tmp_path) == (
+        running.generation,
+        running.manifest_sha256,
+    )
+    monkeypatch.setattr(
+        sys, "prefix", str(generations / successor.generation / "runtime")
+    )
+    assert service_bootstrap.started_from(tmp_path) == (
+        successor.generation,
+        successor.manifest_sha256,
+    )
+    # A copy under another root is not this service's copy.
+    elsewhere = tmp_path / "elsewhere"
+    private_directory(elsewhere)
+    assert service_bootstrap.started_from(elsewhere) is None
+    # Nor is a folder inside a copy, nor a copy whose manifest is gone.
+    monkeypatch.setattr(sys, "prefix", str(generations / running.generation))
+    assert service_bootstrap.started_from(tmp_path) is None
+    monkeypatch.setattr(
+        sys, "prefix", str(generations / running.generation / "runtime")
+    )
+    (generations / running.generation / "snapshot.json").unlink()
+    assert service_bootstrap.started_from(tmp_path) is None
 
 
 def test_what_staging_copies_is_what_the_seal_accepts(tmp_path: Path) -> None:
@@ -729,6 +790,14 @@ async def _serves(root: Path, snapshot: ServiceSnapshot) -> None:
                 await asyncio.sleep(0.2)
                 continue
             assert "result" in reply
+            # The real manager, started by the real startup file, names the
+            # copy that was selected for it.
+            result = reply["result"]
+            assert isinstance(result, dict)
+            assert result.get("runtime") == {
+                "generation": snapshot.generation,
+                "manifest_sha256": snapshot.manifest_sha256,
+            }
             break
         if request_to_stop is not None:
             os.kill(bootstrap.pid, request_to_stop)
@@ -746,6 +815,7 @@ def _service_root(tmp_path: Path) -> Path:
     """A provisioned, owner-only service root, as local setup leaves it."""
     root = tmp_path / "s"
     private_directory(root)
+    _lifetime_lock(root)
     write_private(
         root / "host.json",
         HostSettings(transport_node_id="node-a", profile_id="a" * 32)
@@ -759,34 +829,16 @@ def _service_root(tmp_path: Path) -> Path:
 @pytest.mark.slow
 @pytest.mark.skipif(has_root_authority(), reason="staging refuses root authority")
 async def test_a_copy_of_this_skulk_is_sealed_and_starts_its_manager_on_windows(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    """Everything real but the measurement, which names no Windows host yet.
+    """Nothing stands in: the host is measured and the copy answers for itself.
 
     The environment the tests run in is copied file by file into a service
-    root and sealed; the bootstrap verifies the copy on the base interpreter
-    and starts the manager from it; the manager answers. What stands in is
-    the host measurement and the copy's own answer to it, because Skulk has
-    no name for a Windows artifact family: until it has, a node cannot stage
-    this copy for itself.
+    root and sealed. The copy's own interpreter is then asked what it is, and
+    its answer has to be this host's measurement. The bootstrap verifies the
+    copy on the base interpreter and starts the manager from it, and the
+    manager answers and names the copy it runs.
     """
-    from skulk.extensions import service_snapshot
-
-    host = QualifiedHost("macos-arm64", "3.13.13", "1.5.2", "a" * 64)
-    monkeypatch.setattr(service_snapshot, "measure_host", lambda: host)
-
-    async def measured_alike(_runtime: Path, _lock: RuntimeLock) -> bytes:
-        return json.dumps(
-            {
-                "platform": host.platform,
-                "python_version": host.python_version,
-                "skulk_version": host.skulk_version,
-                "skulk_build_sha256": host.skulk_build_sha256,
-                "inventory": service_snapshot._distributions(),  # pyright: ignore[reportPrivateUsage]
-            }
-        ).encode()
-
-    monkeypatch.setattr(service_snapshot, "_qualify", measured_alike)
     root = _service_root(tmp_path)
     snapshot = await stage_service_runtime(root)
     assert snapshot.copied_files > 1000

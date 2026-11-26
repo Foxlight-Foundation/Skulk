@@ -93,6 +93,7 @@ from skulk.extensions.runtime_integrity import (
     path_refusal_payload,
 )
 from skulk.extensions.runtime_service import RuntimeServiceStatus
+from skulk.extensions.service_bootstrap import started_from
 from skulk.extensions.service_snapshot import ServiceSnapshot, activate_staged_runtime
 from skulk.utils.local_transport import (
     LocalServer,
@@ -819,6 +820,11 @@ class RuntimeManager:
         self.settings = HostSettings.model_validate_json(
             read_private(self.root / "host.json")
         )
+        # Which service copy this process was started from, asked once, now.
+        # A reload selects a successor and this manager goes on answering for
+        # a moment; what it reports must stay the copy it runs, not the one
+        # it selected.
+        self.runtime_identity = started_from(self.root)
         # The address the installations last received, kept in its own file
         # so a manager built before it still reads host.json after a downgrade.
         self.serve_host = read_serve_host(self.root / "serve.json")
@@ -1230,6 +1236,13 @@ class RuntimeManager:
             }
             if self.store_trust_retry:
                 inventory["store_trust_retry"] = True
+            if self.runtime_identity is not None:
+                # Present only when known, so a caller can tell the manager
+                # it is waiting for from another one that merely answers.
+                inventory["runtime"] = {
+                    "generation": self.runtime_identity[0],
+                    "manifest_sha256": self.runtime_identity[1],
+                }
             # Registration is optional display data. Never let its schema or
             # text growth break the existing bounded management inventory.
             rows = inventory["installations"]

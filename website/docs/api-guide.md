@@ -7431,6 +7431,11 @@ no private signing key or provider credential. The key grants no permission;
 a separately installed capability must hold an explicit owner delegation.
 First use atomically publishes a complete, owner-protected key; concurrent
 requests retain the same identity, and interrupted creation can be retried.
+Key storage uses the shared protected-file implementation on POSIX and Windows:
+owner-only directory/file custody, refusal of links, bounded reads and durable
+publication without replacing a concurrent winner. Unsafe or malformed existing
+keys return HTTP 503 without rotating the identity. Windows uses protected
+owner/SYSTEM access lists; this does not enable Windows capability hosting.
 
 **GET** `/models` and **GET** `/v1/models` additionally list fresh, owner-enabled
 capability models with namespaced IDs `capability/<callable-id>/<model-slug>`

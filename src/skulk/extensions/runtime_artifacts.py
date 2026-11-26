@@ -8,6 +8,7 @@ import json
 import platform
 import stat
 import sys
+import sysconfig
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -103,6 +104,10 @@ def platform_matches(declared: str, host: str) -> bool:
     return left[1] == right[1] or "unknown" in (left[1], right[1])
 
 
+WINDOWS_MACHINES: dict[str, str] = {"win-amd64": "x86_64", "win-arm64": "aarch64"}
+"""What ``sysconfig.get_platform()`` calls the Windows builds Skulk names."""
+
+
 def current_platform() -> str:
     """Name this host's artifact family; only the operating system is closed."""
     machine = platform.machine().lower().replace("-", "_")
@@ -112,9 +117,26 @@ def current_platform() -> str:
     if sys.platform == "linux":
         library, _ = platform.libc_ver()
         return f"linux-{library or 'unknown'}-{architecture}"
+    if sys.platform == "win32":
+        # A name for the machine, and nothing more. A Windows node keeps its
+        # own plugin service, so the host has to be measurable; but no release
+        # lists a Windows family, so every install is still refused there, by
+        # the release's own list of platforms.
+        #
+        # The machine is asked of the interpreter, not of platform.machine().
+        # On Windows that reads an environment variable, or asks a system
+        # service an ordinary account's process may not reach, and answers
+        # nothing in a process started with a fixed environment, which is how
+        # the plugin manager and a copy being qualified are started. What the
+        # interpreter was built for is known whatever the environment holds,
+        # and it is what the interpreter's wheels have to be built for too.
+        built_for = WINDOWS_MACHINES.get(sysconfig.get_platform())
+        if built_for is None:
+            raise ValueError("Skulk on Windows needs a 64-bit Python (x86-64 or ARM64)")
+        return f"windows-{built_for}"
     # Architecture and C library are open; the operating system is not. Skulk
-    # itself runs on macOS and Linux, the release schema admits only those, and
-    # naming a third one here would claim a host the runtime cannot serve.
+    # runs on macOS, Linux and Windows, and naming a fourth system here would
+    # claim a host nothing serves.
     raise ValueError("managed runtimes are qualified on macOS and Linux only")
 
 
@@ -720,7 +742,9 @@ def verify_runtime(
         or sum(wheel.size for wheel in claims.wheels) > 536870912
     ):
         raise ValueError("ambiguous or oversized runtime inventory")
-    if isinstance(claims, _RuntimeClaims) and not set(claims.application_roots) <= set(inventory):
+    if isinstance(claims, _RuntimeClaims) and not set(claims.application_roots) <= set(
+        inventory
+    ):
         raise ValueError("runtime omits an application dependency root")
     if (
         hashlib.sha256(canonical_json(dict(inventory))).hexdigest()
