@@ -2,6 +2,7 @@
 
 import asyncio
 import itertools
+import subprocess
 import sys
 import tempfile
 from collections.abc import AsyncIterator
@@ -45,6 +46,46 @@ if sys.platform == "win32":
         private = tmp_path_factory.getbasetemp() / f"w{next(_short_names)}"
         private_directory(private)
         return private
+
+
+if sys.platform == "win32":
+    from skulk.extensions import _service_registration_windows as _registration
+
+    _ask_task_scheduler = _registration._run  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.fixture(autouse=True)
+    def no_real_plugin_service(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep every test away from this account's own plugin service.
+
+        A Windows host has a name, so setup run on one sets up a real
+        service: it copies Skulk into the account's data folder and
+        registers a scheduled task for the account. A test that reached
+        either by accident would do that to the machine it runs on, whether
+        a developer's or a runner's. So here both are closed: asking where
+        the account's data folder is, and asking Task Scheduler anything. A
+        test that needs a service folder names its own, and one that means
+        to use the real Task Scheduler asks for ``real_task_scheduler``.
+        """
+
+        def no_folder() -> str:
+            raise AssertionError(
+                "a test asked for this account's real data folder; "
+                "give the service a folder of the test's own"
+            )
+
+        def no_scheduler(arguments: list[str]) -> "subprocess.CompletedProcess[bytes]":
+            raise AssertionError(
+                "a test reached the real Task Scheduler without asking to: "
+                + " ".join(arguments[:3])
+            )
+
+        monkeypatch.setattr(_registration, "local_data_directory", no_folder)
+        monkeypatch.setattr(_registration, "_run", no_scheduler)
+
+    @pytest.fixture
+    def real_task_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Let this test register with the real Task Scheduler, on purpose."""
+        monkeypatch.setattr(_registration, "_run", _ask_task_scheduler)
 
 
 @pytest.fixture(autouse=True)

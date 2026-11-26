@@ -294,25 +294,34 @@ def test_the_owners_layout_is_this_accounts(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="the Windows refusal")
-async def test_windows_registers_nothing_while_its_host_has_no_name(
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows registration")
+async def test_a_windows_node_that_was_never_set_up_reads_absent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Unsupported from the start: no release names a Windows host to install for.
+    """A Windows host has a name, so its plugin service can be set up.
 
-    The registration itself is built (``test_service_task.py``); what refuses
-    here is the runtime installer's own naming of the host, asked first.
+    ``absent`` is what lets the Plugins page start local setup. Nothing is
+    started here, and nothing is asked of Task Scheduler: the status of a
+    node that was never connected needs neither.
     """
-    with pytest.raises(ValueError, match="macOS and Linux only"):
-        service_registration.owner_layout("user")
+    assert sys.platform == "win32"
+    from skulk.extensions import _service_registration_windows as windows
+
+    monkeypatch.setattr(windows, "local_data_directory", lambda: str(tmp_path))
+    assert (
+        service_registration.owner_layout("user").root == tmp_path / "Skulk" / "plugins"
+    )
+    with pytest.raises(ValueError, match="whole machine"):
+        service_registration.owner_layout("system")
+    # A launchd or systemd definition is no service of this system's.
     layout = _user_layout(tmp_path, "macos-arm64")
     assert not service_registration.registered_for(layout, Path(sys.executable))
 
-    # A node that was never set up, with the real registration underneath.
     _connect(monkeypatch, tmp_path, None)
     status = await ServiceSetupRunner().status()
-    assert status.state == "unsupported"
-    assert status.error is not None and "macOS and Linux only" in status.error
+    assert status.state == "absent"
+    assert status.error is None
+    assert not (tmp_path / "Skulk").exists()
 
 
 @pytest.mark.parametrize("authority", ["root", "borrowed"])

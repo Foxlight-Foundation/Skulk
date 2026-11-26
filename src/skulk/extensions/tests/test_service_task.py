@@ -9,7 +9,6 @@ Scheduler under a name of their own, and delete what they register.
 """
 
 import asyncio
-import json
 import os
 import re
 import subprocess
@@ -23,7 +22,7 @@ import pytest
 from pydantic import TypeAdapter
 
 from skulk.extensions import service_bootstrap, service_registration
-from skulk.extensions.runtime_artifacts import QualifiedHost
+from skulk.extensions.runtime_artifacts import QualifiedHost, measure_host
 from skulk.extensions.runtime_files import RuntimeLock
 from skulk.extensions.service_registration import (
     WindowsServiceLayout,
@@ -599,11 +598,9 @@ def test_windows_offers_the_accounts_own_service_and_no_other(
     assert registrable_scopes() == ("user",)
     with pytest.raises(ValueError, match="whole machine"):
         service_registration.owner_layout("system")
-    # No release names a Windows host yet, and a service that could never be
-    # given a runtime is not registered either.
-    with pytest.raises(ValueError, match="qualified on macOS and Linux only"):
-        service_registration.owner_layout("user")
-    monkeypatch.setattr(windows, "current_platform", lambda: "a-named-host")
+    # Asked where the account's own service lies, and no more than asked: the
+    # folder is worked out, not created or opened.
+    monkeypatch.setattr(windows, "local_data_directory", local_data_directory)
     layout = service_registration.owner_layout("user")
     assert isinstance(layout, WindowsServiceLayout)
     assert layout.account == this_account()
@@ -679,10 +676,9 @@ async def test_a_refresh_waits_out_the_minute_and_registers_nothing_again(
     monkeypatch.setattr(
         service_setup,
         "measure_host",
-        lambda: QualifiedHost("a-named-host", "3.13.13", "1.5.2", build),
+        lambda: QualifiedHost("windows-x86_64", "3.13.13", "1.5.2", build),
     )
     monkeypatch.setattr(service_setup, "service_source_identity", lambda: build)
-    monkeypatch.setattr(windows, "current_platform", lambda: "a-named-host")
     monkeypatch.setattr(windows, "local_data_directory", lambda: str(tmp_path))
     configuration = tmp_path / "c"
     configuration.mkdir()
@@ -791,34 +787,17 @@ async def test_a_refresh_waits_out_the_minute_and_registers_nothing_again(
 async def _sets_itself_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Local setup from nothing to a manager that answers, and the same again.
 
-    Everything is real but three things: where the account's data folder is
-    (the test's own), the name of the host, which no release gives a Windows
-    machine yet, and the copy's own answer to that name. The copy is this
-    environment's, every file of it; the startup file verifies it and starts
-    the real manager from it.
+    One thing stands in: where the account's data folder is, which is the
+    test's own, so that the account's real service is not touched. The host
+    is measured, the copy is this environment's, every file of it, and is
+    asked for itself what it is; the startup file verifies it and starts the
+    real manager from it.
     """
     assert sys.platform == "win32"
     from skulk.extensions import _service_registration_windows as windows
-    from skulk.extensions import service_setup, service_snapshot
+    from skulk.extensions import service_setup
     from skulk.utils.runtime_files import RuntimeLock as Lock
 
-    host = QualifiedHost("macos-arm64", "3.13.13", "1.5.2", "a" * 64)
-    monkeypatch.setattr(service_snapshot, "measure_host", lambda: host)
-    monkeypatch.setattr(service_setup, "measure_host", lambda: host)
-
-    async def measured_alike(_runtime: Path, _lock: Lock) -> bytes:
-        return json.dumps(
-            {
-                "platform": host.platform,
-                "python_version": host.python_version,
-                "skulk_version": host.skulk_version,
-                "skulk_build_sha256": host.skulk_build_sha256,
-                "inventory": service_snapshot._distributions(),  # pyright: ignore[reportPrivateUsage]
-            }
-        ).encode()
-
-    monkeypatch.setattr(service_snapshot, "_qualify", measured_alike)
-    monkeypatch.setattr(windows, "current_platform", lambda: host.platform)
     monkeypatch.setattr(windows, "local_data_directory", lambda: str(tmp_path))
     configuration = tmp_path / "c"
     configuration.mkdir()
@@ -828,6 +807,10 @@ async def _sets_itself_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     try:
         completed = await service_setup.setup_service("user", lambda _message: None)
         assert completed.phase == "ready"
+        # Staged for this host as it was measured, under the name it has.
+        assert completed.snapshot is not None
+        assert measure_host().platform.startswith("windows-")
+        assert completed.snapshot.skulk_build_sha256 == completed.skulk_build_sha256
         assert service_setup.connected_scope() == "user"
         status = await service_setup.service_status()
         assert status["registered_runtime_verified"] is True
@@ -854,7 +837,7 @@ async def test_local_setup_brings_the_service_up_on_windows(
 @live
 @pytest.mark.slow
 async def test_local_setup_brings_the_service_up_under_the_real_task_scheduler(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_task_scheduler: None
 ) -> None:
     monkeypatch.setattr(WindowsServiceLayout, "label", property(_live_name))
     _delete_live_task()
@@ -879,7 +862,7 @@ def _delete_live_task() -> None:
 
 @live
 def test_the_real_task_scheduler_runs_and_stops_the_service(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_task_scheduler: None
 ) -> None:
     """Registered, started in the signed-in session, read back and stopped, for real.
 
@@ -921,7 +904,7 @@ def test_the_real_task_scheduler_runs_and_stops_the_service(
 
 @live
 def test_the_real_task_scheduler_ends_a_service_that_will_not_stop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_task_scheduler: None
 ) -> None:
     assert sys.platform == "win32"
     from skulk.extensions import _service_registration_windows as windows

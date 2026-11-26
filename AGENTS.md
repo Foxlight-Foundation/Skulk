@@ -233,9 +233,10 @@ bindings are a path source and not a uv workspace member (uv refuses an index
 source for a member). The pin must equal the bindings version
 (`tests/test_windows_bindings_wheel.py`), so a bindings version bump moves the
 pin and needs the Windows wheel published from that branch before `uv lock`. Capability
-hosting and signed installs on Windows are not built yet. The plugin service can
-register itself there (see below), but no release names a Windows host, so a
-Windows node still reports the plugin service as unsupported.
+hosting and signed installs on Windows are not built yet. A Windows node keeps
+its own plugin service (see below): local setup stages the service's copy and
+registers it there. Nothing can be installed into it yet, because no release
+lists a Windows family and the release schema admits macOS and Linux only.
 Local streams between the node, the plugin manager and plugin owners go through
 `utils/local_transport.py` (endpoint directory, privacy check, `connect`,
 `serve`, `discard`); it is the only module that opens or binds a local socket
@@ -401,12 +402,26 @@ service root on a machine without long paths (`copied_path_excess()` in
 `extensions/runtime_integrity.py`): the copy's files begin 56 characters
 after the root's path, so the 144-character file a development environment
 holds needs a root of 59 characters or fewer.
-Staging a real copy still cannot run on Windows. It starts by measuring the
-host (`measure_host()`), and `current_platform()` names macOS and Linux only.
-Naming a Windows artifact family is a decision for the release schema and the
-owner runtime, not a porting step. Until it is made, the tests give staging a
-stand-in host and a stand-in answer from the copy; everything else in them is
-real, including a copy of the whole installed environment that is sealed,
+Staging starts by measuring the host (`measure_host()`), and a Windows host
+has a name: `current_platform()` answers `windows-x86_64` or
+`windows-aarch64`, and `service_platform()` in the standalone registration
+file mirrors it. On Windows the machine is taken from what the interpreter
+was built for (`sysconfig.get_platform()`: `win-amd64`, `win-arm64`), never
+from `platform.machine()`: that reads an environment variable there, and for
+an ordinary account it answers nothing in a process started with a fixed
+environment, which is how the plugin manager runs and how a service copy is
+asked what it is. The first real copy on Windows named itself `windows-` and
+every setup failed on it. The name describes the machine
+and admits nothing: what a release may be installed on is decided by the
+release, and `_ReleaseFields.platforms`, the release and catalog schemas, the
+claim profiles and the published native targets name macOS and Linux only. Do
+not widen any of them to make a Windows install pass; that is a coordinated
+change with the owner runtime and the native kernel, and until it is made
+every install on Windows is refused by the release's own platform list
+(`test_no_published_release_installs_on_a_windows_host`). Only x86_64 has
+been run; `windows-aarch64` is a name and nothing is claimed for it.
+On Windows the tests therefore use no stand-in host: a copy of the whole
+installed environment is measured, sealed, asked for itself what it is,
 verified by the bootstrap and serves as the manager.
 Service setup (`extensions/service_setup.py`, and the node's own
 `service_autosetup.py`) no longer asks the operating system who it runs as
@@ -475,12 +490,17 @@ manager's, and attaching resets a process's control handlers, so it registers
 one again straight after; without that the request ended the startup file
 itself. After 180 seconds setup ends the task, which ends only the startup
 file; the job the startup file holds ends the manager with it.
-`owner_layout()` on Windows asks `runtime_artifacts.current_platform()` first,
-so while no release names a Windows host the status stays `unsupported` and
-nothing is registered. `extensions/tests/test_service_task.py` holds the
-tests. Those that register a real task run only where
-`SKULK_LIVE_TASK_SCHEDULER` is set, use a task name of their own and delete
-it; the account must be signed in at the machine.
+A Windows node that was never set up therefore reads `absent`, and the
+Plugins page starts local setup there as it does on macOS and Linux.
+`extensions/tests/test_service_task.py` holds the tests. Because setup on
+Windows now sets up a real service, `extensions/tests/conftest.py` closes two
+things to every test there: asking where the account's data folder is, and
+asking Task Scheduler anything. A test gives the service a folder of its own
+(patch `local_data_directory` in `_service_registration_windows`), and one
+that means to register a real task asks for the `real_task_scheduler`
+fixture. Those tests run only where `SKULK_LIVE_TASK_SCHEDULER` is set, use a
+task name of their own and delete it; the account must be signed in at the
+machine.
 Windows limits how long a path may be unless the machine has long paths
 switched on (off by default): a directory's path may be 247 characters and a
 file's 259. A generation folder on Windows is therefore named by the first 32

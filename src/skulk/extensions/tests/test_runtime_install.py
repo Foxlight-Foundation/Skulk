@@ -224,6 +224,26 @@ def test_generic_runtime_refuses_untrusted_or_incompatible(
         verify_runtime(metadata, trust, host, now=now)
 
 
+@pytest.mark.parametrize(
+    "published", ["macos-arm64", "linux-glibc-x86_64", "ubuntu-24.04-x86_64"]
+)
+@pytest.mark.parametrize("windows", ["windows-x86_64", "windows-aarch64"])
+def test_no_published_release_installs_on_a_windows_host(
+    tmp_path: Path, published: str, windows: str
+) -> None:
+    """Naming a Windows host admits nothing: no release lists that system.
+
+    A Windows node can be measured, so that it can keep its own plugin
+    service. What a release may be installed on is still decided by the
+    release, and the release schema names macOS and Linux only.
+    """
+    metadata, trust, host = artifacts(tmp_path, platform=published)
+    now = int(time.time())
+    assert verify_runtime(metadata, trust, host, now=now).digest
+    with pytest.raises(ValueError, match="compatibility"):
+        verify_runtime(metadata, trust, replace(host, platform=windows), now=now)
+
+
 def test_a_skulk_update_keeps_an_installed_release_running(tmp_path: Path) -> None:
     """A release declares Skulk versions, not one build: an update stays inside it."""
     metadata, trust, host = artifacts(
