@@ -15,9 +15,12 @@ checkout.
 ## What a Windows node does
 
 - **Joins the cluster.** It finds the other nodes on the same network by
-  itself, syncs the cluster's state and connects the data transport.
+  itself, syncs the cluster's state and connects the data transport. If it
+  does not, you can give it another node's address by hand; see
+  [Troubleshooting](#troubleshooting).
 - **Serves the dashboard and the API** on port 52415, for this machine and for
-  others on the network.
+  others on the network. A model placed through its API runs on another node,
+  and a chat request sent to it is answered by that model.
 - **Takes part in choosing the master, as a last resort.** A management node
   becomes master only when no ordinary node is there to do it. A new master's
   `skulk.yaml` replaces every other node's, so a machine that runs no models
@@ -235,22 +238,65 @@ machines are on the same network; that every node uses the same
 `SKULK_LIBP2P_NAMESPACE`, or none; and that every node runs the same Skulk
 build.
 
+If all of that holds and the nodes still do not list each other, give this
+node another node's address before you start it, in the same PowerShell
+window:
+
+```powershell
+$env:SKULK_BOOTSTRAP_PEERS = "/ip4/192.168.1.20/tcp/52416"
+$env:SKULK_ZENOH_CONNECT = "tls/192.168.1.20:7447"
+uv run skulk
+```
+
+Put the other node's address in place of `192.168.1.20`. The first line is for
+the connection the nodes coordinate over: `52416` is the other node's
+`--libp2p-port`, which is 52416 unless it was changed. The second is for the
+link that carries a model's answers: the other node's log names that address
+and port in the line that says `Zenoh DATA plane ENABLED on`, and the port is
+7447 unless it was changed. Set both. Each takes several addresses separated
+by commas, and with `SKULK_ZENOH_CONNECT` set this node no longer searches for
+that link by itself. Only a cluster of two nodes has been run this way.
+
+On the test machine the two nodes found each other by themselves in all eleven
+runs on two days, and on a third day they did not within five minutes. The
+cause was not established. With both lines set they connected.
+
+**A chat request through this node gets no answer.** The nodes list each
+other, a model loads on the other node, and a request sent to this node waits
+without an answer and without an error. This is what happens when the nodes
+are connected for coordination and the link that carries answers is missing.
+Both nodes say so in their logs a minute or two after the start, in a line
+that says `Zenoh data plane ISOLATED`, and `/state` lists a `zenoh_isolated`
+health error. Set `SKULK_ZENOH_CONNECT` as shown above and start the node
+again. On the test machine this happened when the node was given
+`SKULK_BOOTSTRAP_PEERS` alone.
+
 **"SKULK_NODE_PARTICIPATION=full is not available on Windows".** Unset the
 variable. A Windows node always runs with management participation.
 
-**Windows blocks `uv run`.** On the test machine, with Smart App Control
-switched on, Windows blocked the small launcher uv creates three times within
-a few seconds and later allowed it. The cause was not established. Try again
-before changing any setting.
+**Windows blocks `uv run`.** The message is "An Application Control policy
+has blocked this file". On the test machine, with Smart App Control switched
+on, Windows blocked the small launcher uv creates
+(`.venv\Scripts\python.exe`) on two days. On the first it was blocked three
+times within a few seconds and ran again hours later. On the second it was
+blocked in all seven tries over 19 minutes and was still blocked when the test
+ended, though it had run on that machine before. The cause was not
+established, and Skulk has no setting that avoids it. Try again before
+changing any setting, and expect that a later try may be refused too.
 
 ## What has been tested
 
 All on one Windows 11 machine (x86-64), from a clean checkout:
 
 - Installing without a compiler, and starting as an ordinary user.
-- Joining a Linux node by discovery alone, syncing state, connecting the data
+- Joining a Mac node by discovery alone, syncing state, connecting the data
   transport, staying up while the other node left and came back, and leaving
-  cleanly.
+  cleanly. On one later day the two nodes did not find each other by
+  themselves; see [Troubleshooting](#troubleshooting).
+- A chat request through the Windows node to a model on a Mac node: the model
+  was placed through the Windows node's API, and one whole answer and one
+  streamed answer came back from it. In this run the Windows node was given
+  the Mac's addresses by hand.
 - The dashboard and the API, from the machine itself and from another machine
   on the network.
 - Setting up the plugin service from nothing to ready, reconnecting to it
@@ -265,5 +311,9 @@ All on one Windows 11 machine (x86-64), from a clean checkout:
 - The plugin service coming back after signing out and in again.
 - Removing the plugin service by hand with a plugin installed. No plugin can
   be installed on Windows yet.
-- A chat request sent through a Windows node to a model on another node.
+- A Linux node in a cluster with a Windows node. Every run so far joined a
+  Mac.
+- A chat request with the nodes left to find each other by themselves.
+- Chat from the dashboard's chat page, a long answer, tools, images,
+  cancelling a request, or several requests at once through a Windows node.
 - A cluster of more than two nodes with a Windows node in it.
