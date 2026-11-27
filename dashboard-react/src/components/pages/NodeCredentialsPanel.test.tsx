@@ -76,6 +76,7 @@ it('observes an unconfirmed replacement and requires refresh before another acti
   expect(posts).toHaveLength(1);
   await click('Refresh credential status');
   await contains('Credential status refreshed');
+  await enabled('Replace credential');
   await click('Replace credential');
   await contains('Enter a credential before replacing it');
   expect(posts).toHaveLength(1);
