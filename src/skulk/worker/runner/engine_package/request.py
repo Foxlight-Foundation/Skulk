@@ -23,7 +23,7 @@ DEFAULT_CACHE_PRECISION: Final = "default"
 
 
 def package_load_request(
-    shard: ShardMetadata, context_token_limit: int | None
+    shard: ShardMetadata, context_token_limit: int | None, drafting: bool
 ) -> tuple[ModelIdentity, LoadSettings]:
     """Return the model and the admitted settings for a placement's load.
 
@@ -31,6 +31,11 @@ def package_load_request(
         shard: The placement's shard on this node; its card names the model.
         context_token_limit: The instance's stamped serving window, or ``None``
             when placement stamped none.
+        drafting: Whether the installed build's signed manifest says it drafts.
+            Whether drafting helps depends on the engine build, so the build's
+            publisher states it and nothing else turns it on. With it on, the
+            engine drafts with what the model's own files bring (a draft head,
+            or copies from the prompt) and checks each drafted token.
 
     Returns:
         The model's identity with its directory on this node, and the
@@ -52,6 +57,6 @@ def package_load_request(
             context_tokens=serving_n_ctx(context_token_limit, logits_all=False),
             parallel_streams=PARALLEL_STREAMS,
             cache_precision=DEFAULT_CACHE_PRECISION,
-            drafting=False,
+            drafting=drafting,
         ),
     )

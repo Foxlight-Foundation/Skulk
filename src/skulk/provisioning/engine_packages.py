@@ -412,6 +412,15 @@ class EnginePackageClaims(_Contract):
             "node has answered with the adapter's own estimate."
         ),
     )
+    drafting: bool = Field(
+        default=False,
+        description=(
+            "Whether a load on this build is stated with drafting on, which "
+            "lets the engine draft with what the model's own files bring. A "
+            "publisher sets it for a build on which drafting was measured to "
+            "help. A manifest that leaves it out states drafting off."
+        ),
+    )
     provenance: EngineProvenance = Field(description="Origin of the engine build.")
     issued_at: int = Field(gt=0, description="UTC Unix time of signing.")
     expires_at: int = Field(

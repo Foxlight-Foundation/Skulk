@@ -452,7 +452,7 @@ class Runner(ServedConcurrentDispatch):
         self.acknowledge_task(task)
         installed, state_directory = self._package()
         model, settings = package_load_request(
-            self.shard_metadata, self.context_token_limit
+            self.shard_metadata, self.context_token_limit, installed.claims.drafting
         )
         try:
             with runner_phase(
