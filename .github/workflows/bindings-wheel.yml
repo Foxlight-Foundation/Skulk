@@ -38,8 +38,10 @@
 # publish_unsigned=true, with `publish_run_id` naming the build run.
 #
 # The candidate of a sign or publish dispatch must come from a manual dispatch
-# or a push (a pull-request run builds a merge commit, not the branch), and its
-# Rust sources must be identical to the ref the dispatch runs on:
+# or a push (a pull-request run builds a merge commit, not the branch). Its
+# Rust sources, this workflow and the scripts it runs must be identical to the
+# ref the dispatch runs on: a run of a changed workflow could otherwise upload
+# a wheel under the signed artifact's name without having passed these checks.
 #
 #   gh workflow run bindings-wheel.yml --ref <branch>
 #   gh workflow run bindings-wheel.yml --ref <branch> -f sign=true \
@@ -256,7 +258,7 @@ jobs:
   candidate:
     # A sign or publish dispatch names the run whose wheel it takes. That run
     # must have succeeded, belong to this workflow, have built a branch, and
-    # have compiled the Rust sources this ref carries.
+    # have run this ref's workflow and scripts on this ref's Rust sources.
     if: github.event_name == 'workflow_dispatch' && (inputs.sign || inputs.publish)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -272,7 +274,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Validate the candidate run and its Rust sources
+      - name: Validate the candidate run, its Rust sources and its checks
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.sign && inputs.sign_run_id || inputs.publish_run_id }}
@@ -288,9 +290,13 @@ jobs:
           [[ "$event" == workflow_dispatch || "$event" == push ]]
           source_sha="$(gh api "$run" --jq '.head_sha')"
           git fetch --no-tags origin "$source_sha"
-          # The wheel is compiled from these paths only. They must be the same
-          # at the candidate's commit and at the ref this dispatch runs on.
-          for path in rust Cargo.toml Cargo.lock; do
+          # The wheel is compiled from the first three paths only. The rest are
+          # what built, tested, signed and judged it. All must be the same at
+          # the candidate's commit and at the ref this dispatch runs on, so
+          # that the run's success means these checks passed.
+          for path in rust Cargo.toml Cargo.lock \
+            .github/workflows/bindings-wheel.yml \
+            scripts/sign_bindings_wheel.py scripts/smoke_bindings_wheel.py; do
             if [ "$(git rev-parse "$source_sha:$path")" != "$(git rev-parse "HEAD:$path")" ]; then
               echo "$path differs between candidate $source_sha and $GITHUB_SHA" >&2
               exit 1

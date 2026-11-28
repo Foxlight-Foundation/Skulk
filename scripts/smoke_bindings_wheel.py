@@ -12,6 +12,10 @@ import skulk_pyo3_bindings as bindings
 
 
 async def main() -> None:
+    """Start a swarm on a free port, subscribe to one topic, and print its addresses.
+
+    Raises when the bindings cannot be used or do not answer within 30 seconds.
+    """
     handle = bindings.NetworkingHandle(bindings.Keypair.generate(), listen_port=0)
 
     async def read_events() -> None:

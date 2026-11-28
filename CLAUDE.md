@@ -559,8 +559,10 @@ new SHA-256. Publication never builds or signs: a manual dispatch with
 `publish=true`, `publish_run_id` and `publish_sha256` promotes the wheel of an
 earlier successful signing run (or, with `publish_unsigned=true`, the unsigned
 wheel of a build run). For both dispatches the named run must be a successful
-dispatch or push run whose `rust/`, `Cargo.toml` and `Cargo.lock` are identical
-to the dispatched ref's, and the wheel must have the given SHA-256 (each run
+dispatch or push run whose `rust/`, `Cargo.toml`, `Cargo.lock`, workflow file
+and two scripts (`sign_bindings_wheel.py`, `smoke_bindings_wheel.py`) are
+identical to the dispatched ref's, so a run of a changed workflow cannot
+supply a wheel; and the wheel must have the given SHA-256 (each run
 prints it in its summary). The command line runs all three
 steps against any branch that carries the workflow file
 (`gh workflow run bindings-wheel.yml --ref <branch>` to build a candidate, then

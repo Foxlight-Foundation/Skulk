@@ -83,10 +83,15 @@ class Entry:
 
 
 def sha256_hex(data: bytes) -> str:
+    """Return the SHA-256 of ``data`` as lowercase hexadecimal."""
     return hashlib.sha256(data).hexdigest()
 
 
 def file_sha256(path: Path) -> str:
+    """Return the SHA-256 of the file at ``path`` as lowercase hexadecimal.
+
+    The file is read in blocks, so a large wheel is never held in memory whole.
+    """
     value = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1 << 20), b""):
@@ -95,6 +100,11 @@ def file_sha256(path: Path) -> str:
 
 
 def record_hash(data: bytes) -> str:
+    """Return the digest of ``data`` as a wheel ``RECORD`` writes it.
+
+    That is ``sha256=`` followed by the URL-safe base64 of the SHA-256 without
+    padding.
+    """
     encoded = base64.urlsafe_b64encode(hashlib.sha256(data).digest())
     return "sha256=" + encoded.rstrip(b"=").decode("ascii")
 
@@ -155,6 +165,10 @@ def pe_layout(data: bytes) -> PeLayout | None:
 
 
 def is_pe(data: bytes) -> bool:
+    """Return whether ``data`` is a Windows PE file, judged by its headers.
+
+    Raises ``RefusedError`` for a file that starts like one and cannot be read.
+    """
     return pe_layout(data) is not None
 
 
@@ -300,6 +314,11 @@ def rewritten_record(original: bytes, changed: dict[str, bytes]) -> bytes:
 
 
 def write_wheel(path: Path, entries: list[Entry]) -> None:
+    """Write ``entries`` to a new archive at ``path``, in the order given.
+
+    Each member keeps the name, date, attributes and compression its entry
+    records. Raises ``FileExistsError`` when ``path`` exists.
+    """
     with zipfile.ZipFile(path, "x") as archive:
         for entry in entries:
             info = zipfile.ZipInfo(entry.name, date_time=entry.date_time)
@@ -310,6 +329,10 @@ def write_wheel(path: Path, entries: list[Entry]) -> None:
 
 
 def expected_wheel_name(version: str) -> str:
+    """Return the only file name a Windows bindings wheel of ``version`` may have.
+
+    Raises ``RefusedError`` when ``version`` is not a dotted number.
+    """
     if not re.fullmatch(r"[0-9]+(\.[0-9]+)*", version):
         raise RefusedError(f"not a bindings version: {version!r}")
     return f"skulk_pyo3_bindings-{version}-cp313-cp313-win_amd64.whl"
@@ -329,6 +352,12 @@ def _destination(root: Path, name: str) -> Path:
 
 
 def config() -> None:
+    """Require the five Artifact Signing settings in the environment.
+
+    Prints a confirmation when each is present and has the shape of its kind.
+    Raises ``RefusedError`` naming what is missing or malformed. Reads the
+    environment and nothing else.
+    """
     missing = [name for name in SETTINGS if not os.environ.get(name, "").strip()]
     if missing:
         raise RefusedError(
@@ -342,7 +371,15 @@ def config() -> None:
 
 
 def unpack(wheel: Path, sha256: str, version: str, target: Path) -> list[str]:
-    """Extract the tested wheel and write the catalog of files to sign."""
+    """Extract the tested wheel and write the catalog of files to sign.
+
+    ``wheel`` must be named for ``version`` and have the digest ``sha256``.
+    Creates ``target`` (which must not exist) with the wheel's files under
+    ``wheel/`` and ``signing-catalog.txt`` beside them. Returns the archive
+    names of the files to sign. Raises ``RefusedError`` for a wheel that is
+    not the one named, is inconsistent, has no native library, or is already
+    signed; nothing is created in that case.
+    """
     if wheel.name != expected_wheel_name(version):
         raise RefusedError(f"expected {expected_wheel_name(version)}, got {wheel.name}")
     if (
@@ -382,7 +419,13 @@ def _catalog_paths(unpacked: Path) -> list[Path]:
 
 
 def read_signatures(paths: list[Path]) -> dict[str, dict[str, object]]:
-    """What Windows says about each file's signature, keyed by path."""
+    """Return what Windows says about each file's signature, keyed by path.
+
+    Each value holds ``status`` (Windows' own word, such as ``Valid`` or
+    ``NotSigned``), ``subject`` (the signer's certificate subject, or empty)
+    and ``timestamped``. Runs Windows PowerShell, so it works on Windows only.
+    Raises ``RefusedError`` when the answer does not cover exactly ``paths``.
+    """
     with tempfile.TemporaryDirectory() as scratch:
         script = Path(scratch) / "signatures.ps1"
         listing = Path(scratch) / "paths.txt"
@@ -418,6 +461,11 @@ def read_signatures(paths: list[Path]) -> dict[str, dict[str, object]]:
 
 
 def common_name(subject: object) -> str:
+    """Return the common name (``CN``) from a certificate subject line.
+
+    ``subject`` is the text Windows gives; a quoted name is returned without
+    its quotes. Returns an empty string when the subject has no common name.
+    """
     match = re.search(r"(?:^|,\s*)CN=(\"[^\"]*\"|[^,]*)", str(subject))
     return match.group(1).strip().strip('"') if match else ""
 
@@ -425,6 +473,14 @@ def common_name(subject: object) -> str:
 def signature_problems(
     paths: list[Path], current: dict[str, dict[str, object]]
 ) -> list[str]:
+    """Return why each file's signature is not acceptable, one line per file.
+
+    ``paths`` are the files that must be signed and ``current`` is what
+    ``read_signatures`` returned for them. A file passes only when Windows
+    calls its signature valid, the signature carries a timestamp, and the
+    signer's common name is the publisher's. An empty list means every file
+    passed.
+    """
     problems: list[str] = []
     for path in paths:
         item = current.get(str(path))
@@ -442,6 +498,12 @@ def signature_problems(
 
 
 def verify(unpacked: Path) -> None:
+    """Require every file in the catalog of ``unpacked`` to be validly signed.
+
+    ``unpacked`` is the folder ``unpack`` made. Asks Windows about each listed
+    file and prints a confirmation. Raises ``RefusedError`` with every problem
+    found, or when run anywhere but Windows. Changes nothing.
+    """
     if sys.platform != "win32":
         raise RefusedError("only Windows can judge an Authenticode signature")
     paths = _catalog_paths(unpacked)
@@ -454,7 +516,16 @@ def verify(unpacked: Path) -> None:
 
 
 def pack(original: Path, unpacked: Path, output: Path) -> str:
-    """Rebuild the wheel from the signed files and write its signing record."""
+    """Rebuild the wheel from the signed files and write its signing record.
+
+    ``original`` is the tested wheel and ``unpacked`` the folder ``unpack``
+    made from it, with its native libraries signed in place. Creates
+    ``output`` (which must not exist) holding the rebuilt wheel under the
+    original's name and ``signing-record.json``. Prints and returns the
+    rebuilt wheel's SHA-256. Raises ``RefusedError``, creating nothing, unless
+    each native library is the tested one plus a signature and every other
+    file is unchanged.
+    """
     entries, record_name = read_wheel(original)
     root = unpacked / WHEEL_DIRECTORY
     on_disk = {
@@ -524,6 +595,13 @@ def pack(original: Path, unpacked: Path, output: Path) -> str:
 
 
 def check(wheel: Path, unsigned: bool) -> None:
+    """Require ``wheel`` to be consistent with its ``RECORD`` and signed as asked.
+
+    With ``unsigned`` false, every native library must carry a signature; with
+    ``unsigned`` true, none may. Prints what it found and raises
+    ``RefusedError`` otherwise. This reads the files on any platform and does
+    not judge whether a signature is valid; only ``verify`` does that.
+    """
     entries, _ = read_wheel(wheel)
     native = [entry for entry in entries if is_pe(entry.data)]
     if not native:
@@ -546,6 +624,11 @@ def check(wheel: Path, unsigned: bool) -> None:
 
 
 def main(arguments: list[str] | None = None) -> None:
+    """Run the command named on the command line.
+
+    ``arguments`` replaces ``sys.argv[1:]`` when given. A refusal is printed to
+    standard error and ends the process with exit code 2.
+    """
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
