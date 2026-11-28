@@ -14,7 +14,7 @@ import skulk.shared.models.model_cards as cards_module
 from skulk.master.placement import PlacementError, place_instance
 from skulk.master.tests.conftest import create_node_memory, create_node_network
 from skulk.master.tests.test_placement import place_instance_command
-from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.models.model_cards import ModelCard, ModelTask, VisionCardConfig
 from skulk.shared.models.registry import (
     RegistryCapabilityClaim,
     RegistryEngineSupportClaim,
@@ -158,6 +158,64 @@ def test_an_entry_places_the_card_on_the_package_with_its_exact_build(
 
     assert shard.resolved_backend == ROCM_TAG
     assert shard.resolved_engine_build == BUILD
+
+
+def _signed_vision_card() -> ModelCard:
+    """The shape most signed chat cards have: text generation plus a vision section."""
+    card = _signed_card()
+    return card.model_copy(
+        update={
+            "vision": VisionCardConfig(image_token_id=7, model_type="qwen3_5"),
+            "registry_capability_claims": (
+                *card.registry_capability_claims,
+                RegistryCapabilityClaim(
+                    capability_id="vision.understand",
+                    scope="model",
+                    status="claimed",
+                    source="upstream_structured",
+                    confidence=1.0,
+                ),
+            ),
+        }
+    )
+
+
+def test_an_entry_places_a_card_that_also_has_a_vision_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A text entry is enough for a chat card that also understands images.
+
+    Every card entered in the registry for an add-on engine had a vision
+    section, and a guard that treated vision as a non-text operation made all
+    of those entries do nothing on a real node.
+    """
+    _publish(monkeypatch, _entry())
+
+    shard = _place(_signed_vision_card(), _holds())
+
+    assert shard.resolved_backend == ROCM_TAG
+    assert shard.resolved_engine_build == BUILD
+
+
+def test_a_vision_card_without_an_entry_is_still_refused_on_a_package_only_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vision alone admits nothing: the card names MLX only until an entry exists."""
+    _publish(monkeypatch)
+
+    with pytest.raises(PlacementError):
+        _place(_signed_vision_card(), _holds())
+
+
+def test_a_vision_card_keeps_its_built_in_engine_when_the_node_has_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry does not move a vision card off MLX on a node that has both."""
+    _publish(monkeypatch, _entry())
+
+    shard = _place(_signed_vision_card(), _holds(METAL_TAG, "mlx", "mlx-metal"))
+
+    assert shard.resolved_backend == "mlx-metal"
 
 
 def test_an_entry_covers_a_package_the_node_will_install(

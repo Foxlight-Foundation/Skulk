@@ -1222,7 +1222,12 @@ quantization and a claimed capability). A signed card without a curated
 architecture carries `unknown:<card id>`, so an entry for it covers that card
 only. A placement with a `system_role` is never put on a package
 (`without_engine_packages` in `place_instance`): the steward runs with tools and
-the package chat dialect has none. Keep that guard.
+the package chat dialect has none. Keep that guard. A text card with a `vision`
+section stays eligible: the package serves its text and the runner refuses an
+image request (`unsupported_request_reason`). Only a card for another operation
+(music, image, video, speech, embeddings, separation) is kept off packages in
+`_card_platform_backends`; never add `card.vision` to that list, because most
+signed chat cards have a vision section.
 
 Which engine runs a model is decided by the first of three levels with an answer
 for a node: a person's order for the model (`State.model_engine_orders`, set

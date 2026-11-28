@@ -1017,8 +1017,7 @@ def _card_platform_backends(
     )
     if node_resources is not None:
         if (
-            card.vision is not None
-            or card.music is not None
+            card.music is not None
             or card.separation is not None
             or card.image is not None
             or card.video is not None
@@ -1031,6 +1030,12 @@ def _card_platform_backends(
             # engine this build has no name for, so without this a non-text
             # card would be placed on a node's package only for its runner
             # to refuse the load.
+            #
+            # A text card that also has a vision section is not in this list.
+            # The package runner loads it and serves its text, and refuses a
+            # request that carries an image, one request at a time. Most
+            # signed chat cards have a vision section, so keeping them off a
+            # package made every registry engine-support entry for one inert.
             filtered = frozenset(
                 tag
                 for tag in filtered
