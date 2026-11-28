@@ -148,17 +148,22 @@ async def test_pinned_host_resolver_and_session_disable_proxy_and_rebinding() ->
     with pytest.raises(OSError, match="Unexpected host"):
         await resolver.resolve("127.0.0.1", 443, socket.AF_INET)
 
-    # Internationalized (Unicode) URL hosts must match aiohttp's IDNA-encoded raw_host.
-    idn_resolver = adapter._PinnedHostResolver(
-        "bücher.example",
-        ((int(socket.AF_INET), 0, "93.184.216.34", 443),),
-    )
-    idn_resolved = await idn_resolver.resolve("xn--bcher-kva.example", 443, socket.AF_INET)
-    assert len(idn_resolved) == 1
-    assert idn_resolved[0]["host"] == "93.184.216.34"
-    assert idn_resolved[0]["hostname"] == "xn--bcher-kva.example"
-    with pytest.raises(OSError, match="Unexpected host"):
-        await idn_resolver.resolve("other.example", 443, socket.AF_INET)
+    # Internationalized (Unicode) URL hosts — including IDNA2008 sharp-s — must
+    # match aiohttp/yarl's IDNA2008-encoded raw_host consistently.
+    for unicode_host, ascii_host in (
+        ("bücher.example", "xn--bcher-kva.example"),
+        ("faß.example", "xn--fa-hia.example"),
+    ):
+        idn_resolver = adapter._PinnedHostResolver(
+            unicode_host,
+            ((int(socket.AF_INET), 0, "93.184.216.34", 443),),
+        )
+        idn_resolved = await idn_resolver.resolve(ascii_host, 443, socket.AF_INET)
+        assert len(idn_resolved) == 1
+        assert idn_resolved[0]["host"] == "93.184.216.34"
+        assert idn_resolved[0]["hostname"] == ascii_host
+        with pytest.raises(OSError, match="Unexpected host"):
+            await idn_resolver.resolve("other.example", 443, socket.AF_INET)
 
     session = adapter._create_pinned_image_session(
         "images.example",
@@ -170,3 +175,33 @@ async def test_pinned_host_resolver_and_session_disable_proxy_and_rebinding() ->
         assert session.connector._use_dns_cache is False
     finally:
         await session.close()
+
+
+async def test_resolve_public_http_target_uses_idna2008_for_dns_lookup(
+    monkeypatch: object,
+) -> None:
+    """Initial DNS lookup must use the same IDNA2008 hostname aiohttp sends."""
+    import socket
+
+    import pytest
+
+    from skulk.tools.web_search import resolve_public_http_target
+
+    mp = cast("pytest.MonkeyPatch", monkeypatch)
+    seen_hosts: list[str] = []
+
+    def _fake_getaddrinfo(
+        host: str,
+        port: int,
+        family: int = 0,
+        socktype: int = 0,
+    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        _ = (family, socktype)
+        seen_hosts.append(host)
+        return [(int(socket.AF_INET), int(socket.SOCK_STREAM), 6, "", ("93.184.216.34", port))]
+
+    mp.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    validated, endpoints = await resolve_public_http_target("https://faß.example/img.png")
+    assert validated == "https://faß.example/img.png"
+    assert seen_hosts == ["xn--fa-hia.example"]
+    assert endpoints == ((int(socket.AF_INET), 6, "93.184.216.34", 443),)

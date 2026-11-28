@@ -436,6 +436,69 @@ async def test_peer_import_disables_redirects_and_env_proxies(
 
 
 @pytest.mark.anyio
+async def test_peer_import_uses_idna2008_for_dns_and_pinned_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Peer import canonicalizes sharp-s IDN hosts identically for DNS and aiohttp."""
+    import socket
+
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    import skulk.store.model_store as model_store_module
+    from skulk.store.model_store import ModelStore
+
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
+    store = ModelStore(tmp_path / "store")
+    trusted_card = _registry_card()
+    source_artifact = tmp_path / "source"
+    source_artifact.mkdir(parents=True)
+    (source_artifact / "model.safetensors").write_bytes(b"weights")
+    (source_artifact / ".skulk-source-revision").write_text(
+        f"{trusted_card.source_revision}\n"
+    )
+    record = build_installed_card_record(source_artifact, trusted_card)
+
+    async def export_handler(_request: web.Request) -> web.StreamResponse:
+        return web.Response(body=b"weights")
+
+    app = web.Application()
+    app.router.add_get(
+        "/store/internal/exports/{capability_token}/{path:.*}",
+        export_handler,
+    )
+    server = TestServer(app, host="127.0.0.1")
+    await server.start_server()
+    try:
+        port = server.make_url("").port
+        assert port is not None
+        seen_hosts: list[str] = []
+
+        def _fake_getaddrinfo(
+            host: str,
+            req_port: int,
+            family: int = 0,
+            socktype: int = 0,
+        ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+            _ = (family, socktype)
+            seen_hosts.append(host)
+            return [(int(socket.AF_INET), int(socket.SOCK_STREAM), 6, "", ("127.0.0.1", req_port))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+        entry = await store.import_peer_artifact(
+            record,
+            source_base_url=f"http://faß.local:{port}",
+            capability_token="tok",
+            target_node_id="store-node",
+        )
+        assert seen_hosts == ["xn--fa-hia.local"]
+        assert entry.model_id == str(trusted_card.model_id)
+    finally:
+        await server.close()
+
+
+@pytest.mark.anyio
 async def test_peer_import_revalidates_registry_card_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -106,18 +106,26 @@ _MAX_IMAGE_REDIRECTS: Final[int] = 5
 
 
 def _normalize_pinned_hostname(host: str) -> str:
-    """Normalize a hostname or IP literal to lowercase ASCII IDNA for comparison.
+    """Normalize a hostname or IP literal using yarl's IDNA2008 encoding.
 
-    ``urllib.parse.urlsplit`` preserves Unicode hostnames while ``aiohttp``
-    passes IDNA-encoded ASCII hostnames (``URL.raw_host``) to
-    ``AbstractResolver.resolve``. Normalizing both sides to IDNA ensures
-    internationalized domains match while keeping exact host pinning intact.
+    ``urllib.parse.urlsplit`` preserves Unicode hostnames and Python's stdlib
+    ``idna`` codec uses IDNA2003 (mapping ``ß`` to ``ss``), whereas ``aiohttp``
+    uses ``yarl``'s IDNA2008 ``raw_host`` (mapping ``faß.example`` to
+    ``xn--fa-hia.example``). Using ``yarl`` keeps DNS validation and pinned
+    resolution byte-for-byte identical to ``aiohttp``.
     """
+    import yarl
+
     stripped = host.strip().rstrip(".")
+    if not stripped:
+        return ""
     try:
-        return stripped.encode("idna").decode("ascii").lower()
-    except UnicodeError:
-        return stripped.lower()
+        encoded = yarl.URL.build(scheme="http", host=stripped).raw_host
+        if encoded is not None:
+            return encoded.rstrip(".").lower()
+    except ValueError:
+        pass
+    return stripped.lower()
 
 
 class _PinnedHostResolver(AbstractResolver):
