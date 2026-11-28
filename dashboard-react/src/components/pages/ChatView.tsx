@@ -55,6 +55,7 @@ import {
 } from '../../audio/speechSynthesisRequest';
 import { speechModelOption } from '../../audio/speechModelOption';
 import { buildApiMessages, type ApiMessagePayload } from './chatApiPayload';
+import { safeExternalHttpUrl } from '../../utils/safeUrl';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -1840,11 +1841,17 @@ export function ChatView({
           target={modelCatalogById[selectedModelId ?? '']?.inference_capability?.continuation?.target}
           disabled={isLoading || conversationBusyElsewhere}
         />}
-        {modelCatalogById[selectedModelId ?? '']?.inference_capability && <p role="status">
-          {modelCatalogById[selectedModelId ?? ''].inference_capability?.usage_label}
-          {' · '}{modelCatalogById[selectedModelId ?? ''].inference_capability?.processing_domain} processing
-          {modelCatalogById[selectedModelId ?? ''].inference_capability?.usage_url && <>{' · '}<a href={modelCatalogById[selectedModelId ?? ''].inference_capability?.usage_url ?? undefined} target="_blank" rel="noopener noreferrer">Manage usage</a></>}
-        </p>}
+        {modelCatalogById[selectedModelId ?? '']?.inference_capability && (() => {
+          const capability = modelCatalogById[selectedModelId ?? ''].inference_capability;
+          const safeUsageUrl = safeExternalHttpUrl(capability?.usage_url);
+          return (
+            <p role="status">
+              {capability?.usage_label}
+              {' · '}{capability?.processing_domain} processing
+              {safeUsageUrl && <>{' · '}<a href={safeUsageUrl} target="_blank" rel="noopener noreferrer">Manage usage</a></>}
+            </p>
+          );
+        })()}
         {selectedImageProfile && <ImageParamsPanel params={imageParams} onChange={setImageParams} imageProfile={selectedImageProfile} streamingAvailable={false} />}
         <ChatForm
           acknowledgesSubmission

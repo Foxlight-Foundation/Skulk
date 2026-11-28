@@ -1204,7 +1204,7 @@ export function ChatForm({
           {(modelLabel || modelSelector) && (
             <ModelLine>
               <span>{t('chat.form.modelLabel', 'Model:')}</span>
-              {modelSelector ?? <ModelBtn onClick={onOpenModelPicker}>{modelLabel}</ModelBtn>}
+              {modelSelector ?? <ModelBtn type="button" onClick={onOpenModelPicker}>{modelLabel}</ModelBtn>}
             </ModelLine>
           )}
           {contextLength > 0 && (
@@ -1213,7 +1213,7 @@ export function ChatForm({
             </Stat>
           )}
           {showThinkingToggle && (
-            <ThinkingBtn $active={thinkingEnabled} onClick={onToggleThinking}>
+            <ThinkingBtn type="button" $active={thinkingEnabled} onClick={onToggleThinking}>
               {t('chat.form.thinking', 'Thinking')}
             </ThinkingBtn>
           )}

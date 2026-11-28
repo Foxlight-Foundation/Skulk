@@ -535,4 +535,40 @@ describe('ChatForm speech controls', () => {
     expect(container?.querySelector('[aria-label="Choose reference audio"]')).toBeNull();
     expect(container?.querySelector('[aria-label="Reference audio file"]')).toBeNull();
   });
+
+  it('does not submit the form when clicking model picker or thinking toggle buttons', async () => {
+    const onSend = vi.fn();
+    const onOpenModelPicker = vi.fn();
+    const onToggleThinking = vi.fn();
+
+    await renderChatForm({
+      onSend,
+      modelLabel: 'Qwen3-30B',
+      onOpenModelPicker,
+      showThinkingToggle: true,
+      thinkingEnabled: false,
+      onToggleThinking,
+    });
+
+    const textarea = container?.querySelector<HTMLTextAreaElement>('[aria-label="Chat message"]');
+    expect(textarea).not.toBeNull();
+    await act(async () => {
+      await userEvent.fill(textarea!, 'Draft that must not submit');
+    });
+
+    const buttons = [...(container?.querySelectorAll('button') ?? [])];
+    const modelButton = buttons.find((button) => button.textContent?.trim() === 'Qwen3-30B');
+    const thinkingButton = buttons.find((button) => button.textContent?.trim() === 'Thinking');
+    expect(modelButton?.type).toBe('button');
+    expect(thinkingButton?.type).toBe('button');
+
+    await act(async () => {
+      await userEvent.click(modelButton!);
+      await userEvent.click(thinkingButton!);
+    });
+
+    expect(onOpenModelPicker).toHaveBeenCalledTimes(1);
+    expect(onToggleThinking).toHaveBeenCalledTimes(1);
+    expect(onSend).not.toHaveBeenCalled();
+  });
 });
