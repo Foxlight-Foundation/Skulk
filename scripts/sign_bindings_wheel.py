@@ -38,7 +38,10 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-PUBLISHER = "FoxlightAI Inc."
+# The common name on the Artifact Signing certificate, as Azure shows it for
+# the certificate profile: without a full stop. In prose the company is
+# "FoxlightAI Inc."; the check compares the certificate.
+PUBLISHER = "FoxlightAI Inc"
 SETTINGS = {
     "WINDOWS_SIGNING_AZURE_TENANT_ID": r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     "WINDOWS_SIGNING_AZURE_CLIENT_ID": r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",

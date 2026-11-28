@@ -444,7 +444,7 @@ def test_the_command_line_exits_with_two_on_a_refusal(
 
 def _reading(
     status: str = "Valid",
-    subject: str = "CN=FoxlightAI Inc., O=FoxlightAI Inc., C=US",
+    subject: str = "CN=FoxlightAI Inc, O=FoxlightAI Inc, L=Frisco, S=Texas, C=US",
     stamped: bool = True,
 ):
     return {"status": status, "subject": subject, "timestamped": stamped}
@@ -460,9 +460,12 @@ def test_only_a_valid_timestamped_signature_of_the_publisher_passes() -> None:
 
     assert problems(_reading()) == []
     assert (
-        problems(_reading(subject='O=FoxlightAI Inc., CN="FoxlightAI Inc.", C=US'))
-        == []
+        problems(_reading(subject='O=FoxlightAI Inc, CN="FoxlightAI Inc", C=US')) == []
     )
+    # The certificate's name has no full stop; a near miss is refused.
+    assert problems(_reading(subject="CN=FoxlightAI Inc., O=FoxlightAI Inc.")) == [
+        "library.pyd: signed by 'FoxlightAI Inc.', not 'FoxlightAI Inc'"
+    ]
     assert problems(None) == ["library.pyd: Windows reported nothing"]
     assert problems(_reading(status="NotSigned")) == [
         "library.pyd: signature status NotSigned"
@@ -473,8 +476,8 @@ def test_only_a_valid_timestamped_signature_of_the_publisher_passes() -> None:
     assert problems(_reading(stamped=False)) == [
         "library.pyd: the signature has no timestamp"
     ]
-    assert problems(_reading(subject="CN=Someone Else, O=FoxlightAI Inc.")) == [
-        "library.pyd: signed by 'Someone Else', not 'FoxlightAI Inc.'"
+    assert problems(_reading(subject="CN=Someone Else, O=FoxlightAI Inc")) == [
+        "library.pyd: signed by 'Someone Else', not 'FoxlightAI Inc'"
     ]
 
 
