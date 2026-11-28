@@ -64,6 +64,9 @@ This project records release notes here and mirrors public-facing notes in
   is replaced.
 - The publisher of an add-on engine build can say that the build drafts. Skulk then loads
   models on it with drafting on, so a model that ships with a draft head uses it.
+- A request an add-on engine cannot carry (tools, an image, or per-token log probabilities)
+  is refused with a 400 and a message that says what to leave out. Add-on engines serve
+  text only.
 - **Settings** has a new **Add-on engines** section: **Use add-on engines** (on by default),
   **Install test builds** (off by default), and **Engines on your machines**, where you can
   switch a machine to another build it already has or remove one. `skulk engines` does the

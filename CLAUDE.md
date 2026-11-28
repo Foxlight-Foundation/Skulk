@@ -1241,8 +1241,12 @@ architecture carries `unknown:<card id>`, so an entry for it covers that card
 only. A placement with a `system_role` is never put on a package
 (`without_engine_packages` in `place_instance`): the steward runs with tools and
 the package chat dialect has none. Keep that guard. A text card with a `vision`
-section stays eligible: the package serves its text and the runner refuses an
-image request (`unsupported_request_reason`). Only a card for another operation
+section stays eligible: the package serves its text and an image request is
+refused (`unsupported_request_reason` in `engines/dialect.py`). The API's
+shared text dispatch point refuses a tool, image or logprobs request with a
+400 before dispatch when nothing but engine packages serves the model
+(`engine_package_refusal`), because a runner-side refusal arrives after the
+200 is committed; the runner keeps the same check as the final guard. Only a card for another operation
 (music, image, video, speech, embeddings, separation) is kept off packages in
 `_card_platform_backends`; never add `card.vision` to that list, because most
 signed chat cards have a vision section.

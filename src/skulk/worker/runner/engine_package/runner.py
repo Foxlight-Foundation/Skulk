@@ -27,7 +27,9 @@ The data endpoint speaks one pinned chat dialect, version 1:
 
 The dialect carries no tools, images or per-token log probabilities, so a
 request asking for one is answered with a clear error instead of a degraded
-reply. An engine that speaks differently is translated by its own adapter.
+reply. The API refuses such a request with a 400 before dispatch when only
+engine packages serve the model (``skulk.engines.dialect``); the check here is
+the final guard for a request that arrives another way. An engine that speaks differently is translated by its own adapter.
 
 A load the engine refuses, or one that took settings other than the admitted
 ones, fails with ``ENGINE_LOAD_REFUSED_FAILURE_MARKER`` so the worker does not
@@ -52,6 +54,7 @@ from skulk.engines.adapter import (
     AdapterRefusedError,
     AdapterSession,
 )
+from skulk.engines.dialect import unsupported_request_reason
 from skulk.engines.launch import (
     ENGINE_STATE_DIR,
     adapter_session,
@@ -101,10 +104,7 @@ from skulk.worker.runner.engine_package.request import (
     package_load_request,
 )
 from skulk.worker.runner.generation_stats import StreamStatsClock
-from skulk.worker.runner.llama_cpp.runner import (
-    messages_for_llama,
-    wants_logprobs,
-)
+from skulk.worker.runner.llama_cpp.runner import messages_for_llama
 from skulk.worker.runner.llm_inference.scaffolding_scrub import (
     StreamingScaffoldingScrub,
 )
@@ -145,26 +145,6 @@ def chat_request_body(
     if params.enable_thinking is not None:
         body["chat_template_kwargs"] = {"enable_thinking": params.enable_thinking}
     return body
-
-
-def unsupported_request_reason(params: TextGenerationTaskParams) -> str | None:
-    """Say why a request is outside the pinned dialect, or return ``None``."""
-    if params.tools:
-        return (
-            "This model is served by an engine package, whose chat dialect "
-            "carries no tool calls. Retry without tools."
-        )
-    if params.images or params.image_count:
-        return (
-            "This model is served by an engine package, whose chat dialect "
-            "carries no images. Retry with text only."
-        )
-    if wants_logprobs(params.logprobs, params.top_logprobs):
-        return (
-            "Per-token logprobs are not supported by an engine package: its "
-            "chat dialect does not carry them. Retry without logprobs."
-        )
-    return None
 
 
 def response_id(line: str) -> str | None:

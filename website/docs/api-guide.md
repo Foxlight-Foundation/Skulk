@@ -840,6 +840,14 @@ Ollama, and Responses wire formats too, which share the same dispatch path.)
 The mounted model must also declare `TextGeneration`; speech-only cards return
 **400 Bad Request** without affecting their speech runner.
 
+A model running on an add-on engine (an engine package) takes text only. A
+request with `tools`, an image, `logprobs` or `top_logprobs` returns
+**400 Bad Request** with a message naming what to leave out, on every wire
+format, when every running instance of the model is on an add-on engine. If
+the model also runs on a built-in engine, the request is dispatched as usual;
+one that then lands on the add-on engine's instance is answered with an error
+object in the response body.
+
 ### Chat on an exact instance
 
 **POST** `/v1/instances/{instance_id}/chat/completions` accepts the same chat

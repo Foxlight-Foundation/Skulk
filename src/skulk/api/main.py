@@ -370,6 +370,7 @@ from skulk.api.video_jobs import (
 from skulk.api.video_store import VideoArtifactPurpose, VideoStore
 from skulk.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
+from skulk.engines.dialect import engine_package_refusal
 from skulk.extensions import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
     MAX_CALL_PAYLOAD_BYTES,
@@ -7172,6 +7173,24 @@ class API:
         """Public card lookup preferring the card carried on a live instance."""
         return await self._get_running_model_card(model_id)
 
+    def _text_generation_candidates(
+        self, model_id: ModelId, target_instance_id: InstanceId | None
+    ) -> list[Instance]:
+        """Return the instances a text request for ``model_id`` could be sent to.
+
+        The one named instance when the request targets one, otherwise every
+        instance of the model. Empty when nothing matches, in which case
+        dispatch decides what happens.
+        """
+        if target_instance_id is not None:
+            target = self.state.instances.get(target_instance_id)
+            return [] if target is None else [target]
+        return [
+            instance
+            for instance in self.state.instances.values()
+            if instance.shard_assignments.model_id == model_id
+        ]
+
     async def _send_text_generation_with_images(
         self,
         task_params: TextGenerationTaskParams,
@@ -7183,6 +7202,18 @@ class API:
         # IndexError that crashes the runner (#233; empty messages reached
         # apply_chat_template([]) -> list index out of range).
         validate_renderable_text_generation(task_params)
+        # An engine package's chat dialect carries no tools, images or
+        # logprobs. Refuse here, while a 400 is still possible: the runner's
+        # own refusal arrives after the 200 is committed, and a client that
+        # checks only the status takes it for an answer. Only a model that
+        # nothing but engine packages serve is refused; with a built-in
+        # engine among its instances the request is dispatched as before.
+        package_refusal = engine_package_refusal(
+            self._text_generation_candidates(task_params.model, target_instance_id),
+            task_params,
+        )
+        if package_refusal is not None:
+            raise HTTPException(status_code=400, detail=package_refusal)
         # Context admission pre-flight (#145): the API has no tokenizer, so
         # only the prompt-independent certainty is checked here — an explicit
         # max_tokens that cannot fit even before counting a single prompt
