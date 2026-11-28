@@ -258,8 +258,12 @@ by commas, and with `SKULK_ZENOH_CONNECT` set this node no longer searches for
 that link by itself. Only a cluster of two nodes has been run this way.
 
 On the test machine the two nodes found each other by themselves in all eleven
-runs on two days, and on a third day they did not within five minutes. The
-cause was not established. With both lines set they connected.
+runs on two days. On a third day they did not within five minutes. That was a
+fault in the test and not in the Windows node: the Mac node had been started
+in a way that left it unable to send multicast packets, so no node could find
+it. Its log said so every minute, in a line that says
+`error sending packet on iface address`. With both lines set the nodes
+connected.
 
 **A chat request through this node gets no answer.** The nodes list each
 other, a model loads on the other node, and a request sent to this node waits
@@ -279,10 +283,19 @@ has blocked this file". On the test machine, with Smart App Control switched
 on, Windows blocked the small launcher uv creates
 (`.venv\Scripts\python.exe`) on two days. On the first it was blocked three
 times within a few seconds and ran again hours later. On the second it was
-blocked in all seven tries over 19 minutes and was still blocked when the test
-ended, though it had run on that machine before. The cause was not
-established, and Skulk has no setting that avoids it. Try again before
-changing any setting, and expect that a later try may be refused too.
+blocked in all seven tries over 19 minutes, though it had run on that machine
+before, and it was still blocked about 19 hours later.
+
+At that later time Windows also refused to load Skulk's networking library
+(`skulk_pyo3_bindings`, which is not signed) in all six tries over six
+minutes. The same file had loaded about 19 hours earlier. A start that gets as
+far as that library ends with
+`ImportError: DLL load failed while importing skulk_pyo3_bindings` and the
+same message, and the node does not run.
+
+The cause was not established, and Skulk has no setting that avoids it. Try
+again before changing any setting, and expect that a later try may be refused
+too.
 
 ## What has been tested
 
@@ -291,8 +304,7 @@ All on one Windows 11 machine (x86-64), from a clean checkout:
 - Installing without a compiler, and starting as an ordinary user.
 - Joining a Mac node by discovery alone, syncing state, connecting the data
   transport, staying up while the other node left and came back, and leaving
-  cleanly. On one later day the two nodes did not find each other by
-  themselves; see [Troubleshooting](#troubleshooting).
+  cleanly.
 - A chat request through the Windows node to a model on a Mac node: the model
   was placed through the Windows node's API, and one whole answer and one
   streamed answer came back from it. In this run the Windows node was given
