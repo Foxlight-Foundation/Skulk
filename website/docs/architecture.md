@@ -2254,7 +2254,10 @@ steward, is never put on a package whichever way the package became eligible:
 the steward runs every turn with tools, and the chat dialect of a package
 carries none. A chat model that also understands images stays eligible: the
 package serves its text, and a request that carries an image is refused when
-it arrives. A card for another operation (music, image, video, speech,
+it arrives. A request with tools, an image or per-token log probabilities for
+a model that nothing but engine packages serves is refused by the API with a
+400 before it is dispatched; the package runner makes the same check as the
+final guard. A card for another operation (music, image, video, speech,
 embeddings, source separation) is never offered a package.
 
 **A launch on a package.** Admission counts the model's weights plus the memory
