@@ -148,6 +148,18 @@ async def test_pinned_host_resolver_and_session_disable_proxy_and_rebinding() ->
     with pytest.raises(OSError, match="Unexpected host"):
         await resolver.resolve("127.0.0.1", 443, socket.AF_INET)
 
+    # Internationalized (Unicode) URL hosts must match aiohttp's IDNA-encoded raw_host.
+    idn_resolver = adapter._PinnedHostResolver(
+        "bücher.example",
+        ((int(socket.AF_INET), 0, "93.184.216.34", 443),),
+    )
+    idn_resolved = await idn_resolver.resolve("xn--bcher-kva.example", 443, socket.AF_INET)
+    assert len(idn_resolved) == 1
+    assert idn_resolved[0]["host"] == "93.184.216.34"
+    assert idn_resolved[0]["hostname"] == "xn--bcher-kva.example"
+    with pytest.raises(OSError, match="Unexpected host"):
+        await idn_resolver.resolve("other.example", 443, socket.AF_INET)
+
     session = adapter._create_pinned_image_session(
         "images.example",
         ((int(socket.AF_INET), 0, "93.184.216.34", 443),),

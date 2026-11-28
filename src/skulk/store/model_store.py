@@ -1997,7 +1997,14 @@ class ModelStore:
                 "source_base_url must target a loopback or trusted-fabric peer"
             )
 
-        expected_host = host
+        def _normalize_pinned_peer_host(value: str) -> str:
+            stripped = value.strip().rstrip(".")
+            try:
+                return stripped.encode("idna").decode("ascii").lower()
+            except UnicodeError:
+                return stripped.lower()
+
+        expected_host = _normalize_pinned_peer_host(host)
 
         class _PinnedPeerResolver(AbstractResolver):
             async def resolve(
@@ -2006,7 +2013,7 @@ class ModelStore:
                 port: int = 0,
                 family: socket.AddressFamily = socket.AF_INET,
             ) -> list[ResolveResult]:
-                if host.rstrip(".").lower() != expected_host:
+                if _normalize_pinned_peer_host(host) != expected_host:
                     raise OSError(f"Unexpected peer export host: {host}")
                 results: list[ResolveResult] = []
                 for ep_family, proto, ip_str, ep_port in pinned_endpoints:

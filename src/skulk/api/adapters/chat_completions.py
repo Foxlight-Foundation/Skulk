@@ -105,6 +105,21 @@ _MAX_REMOTE_IMAGE_BYTES: Final[int] = 20 * 1024 * 1024
 _MAX_IMAGE_REDIRECTS: Final[int] = 5
 
 
+def _normalize_pinned_hostname(host: str) -> str:
+    """Normalize a hostname or IP literal to lowercase ASCII IDNA for comparison.
+
+    ``urllib.parse.urlsplit`` preserves Unicode hostnames while ``aiohttp``
+    passes IDNA-encoded ASCII hostnames (``URL.raw_host``) to
+    ``AbstractResolver.resolve``. Normalizing both sides to IDNA ensures
+    internationalized domains match while keeping exact host pinning intact.
+    """
+    stripped = host.strip().rstrip(".")
+    try:
+        return stripped.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return stripped.lower()
+
+
 class _PinnedHostResolver(AbstractResolver):
     """Resolver pinned to pre-validated endpoints for a single HTTP hop."""
 
@@ -113,7 +128,7 @@ class _PinnedHostResolver(AbstractResolver):
         expected_host: str,
         endpoints: tuple[tuple[int, int, str, int], ...],
     ) -> None:
-        self._expected_host = expected_host.rstrip(".").lower()
+        self._expected_host = _normalize_pinned_hostname(expected_host)
         self._endpoints = endpoints
 
     async def resolve(
@@ -122,7 +137,7 @@ class _PinnedHostResolver(AbstractResolver):
         port: int = 0,
         family: socket.AddressFamily = socket.AF_INET,
     ) -> list[ResolveResult]:
-        normalized = host.rstrip(".").lower()
+        normalized = _normalize_pinned_hostname(host)
         if normalized != self._expected_host:
             raise OSError(f"Unexpected host during pinned fetch: {host}")
         results: list[ResolveResult] = []
