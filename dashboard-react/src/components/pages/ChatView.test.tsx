@@ -680,3 +680,72 @@ it('keeps provider choices when switching to Skulk with no native chat models', 
   await openChooser();
   expect(catalogRequests).toBe(1);
 });
+
+it('omits non-HTTP(S) capability usage URLs while keeping valid HTTPS links', async () => {
+  const unsafeModelId = 'capability/fixture.chat/unsafe-url';
+  const safeModelId = 'capability/fixture.chat/safe-url';
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input) === '/models') {
+      return new Response(JSON.stringify({
+        data: [
+          {
+            id: unsafeModelId,
+            name: 'Unsafe Link Model',
+            tasks: ['TextGeneration'],
+            inference_capability: {
+              contract: 'chat.completions@0.1.0',
+              processing_domain: 'external',
+              usage: 'unknown',
+              usage_label: 'Unsafe usage link',
+              usage_url: 'javascript:alert(1)',
+              expires_at: Date.now() / 1000 + 60,
+            },
+          },
+          {
+            id: safeModelId,
+            name: 'Safe Link Model',
+            tasks: ['TextGeneration'],
+            inference_capability: {
+              contract: 'chat.completions@0.1.0',
+              processing_domain: 'external',
+              usage: 'unknown',
+              usage_label: 'Safe usage link',
+              usage_url: 'https://chatgpt.com/settings/usage',
+              expires_at: Date.now() / 1000 + 60,
+            },
+          },
+        ],
+      }));
+    }
+    return new Response(JSON.stringify({ enabled: false }));
+  }));
+
+  store.dispatch(chatActions.selectModel(unsafeModelId));
+  container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root?.render(
+      <Provider store={store}>
+        <ThemeProvider theme={darkTheme}>
+          <ChatView readyInstances={[]} />
+        </ThemeProvider>
+      </Provider>,
+    );
+  });
+  await waitForReact(
+    () => container?.textContent?.includes('Unsafe usage link') ?? false,
+    'unsafe capability metadata did not render',
+  );
+  expect(container.querySelector('a')).toBeNull();
+
+  await act(async () => {
+    store.dispatch(chatActions.selectModel(safeModelId));
+  });
+  await waitForReact(
+    () => container?.textContent?.includes('Safe usage link') ?? false,
+    'safe capability metadata did not render',
+  );
+  const usageLink = container.querySelector<HTMLAnchorElement>('a');
+  expect(usageLink?.getAttribute('href')).toBe('https://chatgpt.com/settings/usage');
+});

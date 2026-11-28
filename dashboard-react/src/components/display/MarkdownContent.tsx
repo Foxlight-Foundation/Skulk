@@ -1,10 +1,50 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { copyToClipboard } from '../../utils/clipboard';
+import DOMPurify from 'dompurify';
 import { Marked } from 'marked';
 import hljs from 'highlight.js';
 import katex from 'katex';
 import styled from 'styled-components';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
+
+/**
+ * Restrict rendered href/src URIs to http(s), mailto, or relative paths so
+ * untrusted markdown cannot emit javascript:, data:, or vbscript: links.
+ */
+const SAFE_MARKDOWN_URI_REGEXP =
+  /^(?:(?:https?|mailto):|[^a-z]|[a-z+.-]+(?:[^a-z+.:-]|$))/i;
+
+const MARKDOWN_SANITIZE_CONFIG = {
+  USE_PROFILES: { html: true, mathMl: true, svg: true },
+  ADD_TAGS: ['button'],
+  ADD_ATTR: ['data-code', 'tabindex', 'aria-hidden'],
+  FORBID_TAGS: [
+    'style',
+    'iframe',
+    'object',
+    'embed',
+    'form',
+    'input',
+    'textarea',
+    'select',
+    'meta',
+    'link',
+    'base',
+    'foreignObject',
+  ],
+  FORBID_ATTR: ['srcdoc'],
+  ALLOWED_URI_REGEXP: SAFE_MARKDOWN_URI_REGEXP,
+};
+
+/**
+ * Strip inline `style` attributes from untrusted Markdown HTML before KaTeX
+ * renders so assistant output cannot inject overlay positioning (`position:fixed`),
+ * while the post-KaTeX pass preserves KaTeX's own layout styles.
+ */
+const INITIAL_MARKDOWN_SANITIZE_CONFIG = {
+  ...MARKDOWN_SANITIZE_CONFIG,
+  FORBID_ATTR: [...MARKDOWN_SANITIZE_CONFIG.FORBID_ATTR, 'style'],
+};
 
 export interface MarkdownContentProps {
   content: string;
@@ -102,15 +142,22 @@ function processMarkdown(content: string, t: SkulkTranslate): ProcessedMarkdown 
 
   // Process
   const preprocessed = preprocessLaTeX(content);
-  let html = marked.parse(preprocessed) as string;
+  let html = DOMPurify.sanitize(
+    marked.parse(preprocessed) as string,
+    INITIAL_MARKDOWN_SANITIZE_CONFIG,
+  );
 
   // Render math expressions
   for (const [key, { content: mathContent, displayMode }] of mathExpressions) {
     let rendered: string;
     try {
-      rendered = katex.renderToString(mathContent, { displayMode, throwOnError: false });
+      rendered = katex.renderToString(mathContent, {
+        displayMode,
+        throwOnError: false,
+        trust: false,
+      });
     } catch {
-      rendered = `<span class="mc-math-error">${displayMode ? '$$' : '$'}${mathContent}${displayMode ? '$$' : '$'}</span>`;
+      rendered = `<span class="mc-math-error">${displayMode ? '$$' : '$'}${escapeHtml(mathContent)}${displayMode ? '$$' : '$'}</span>`;
     }
 
     if (displayMode) {
@@ -118,10 +165,10 @@ function processMarkdown(content: string, t: SkulkTranslate): ProcessedMarkdown 
     } else {
       rendered = `<span class="mc-math-inline">${rendered}</span>`;
     }
-    html = html.replace(key, rendered);
+    html = html.replace(key, () => rendered);
   }
 
-  return { html };
+  return { html: DOMPurify.sanitize(html, MARKDOWN_SANITIZE_CONFIG) };
 }
 
 /* ================================================================
