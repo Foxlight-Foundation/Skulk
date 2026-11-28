@@ -542,18 +542,36 @@ the fork's whole history, about 177 MB for mflux). The Rust bindings
 `.github/workflows/bindings-wheel.yml`: it builds the `win_amd64` CPython 3.13
 wheel on pull requests and `dev` pushes that touch `rust/**`, the workspace
 manifests or the workflow, checks the wheel's name, then installs it and starts
-the swarm on an isolated `SKULK_LIBP2P_NAMESPACE`. Publication never
-builds: a manual dispatch with `publish=true`, `publish_run_id` and
-`publish_sha256` promotes the wheel of an earlier successful dispatch or push
-run after checking that `rust/`, `Cargo.toml` and `Cargo.lock` are identical at
-that run's commit and at the dispatched ref, and that the wheel has that
-SHA-256 (each build prints it in its run summary). The command line runs both
+the swarm on an isolated `SKULK_LIBP2P_NAMESPACE`. The same run rehearses
+signing: a certificate made on the runner and trusted by nobody signs the
+library, the signature check must refuse it, and the wheel rebuilt around the
+signed library must install and start the swarm. Signing never builds:
+Windows can refuse to load an unsigned library (Smart App Control does), so a
+manual dispatch with `sign=true`, `sign_run_id` and `sign_sha256` signs the
+library of an earlier run's wheel as FoxlightAI Inc. with Azure Artifact
+Signing, in the `windows-signing` environment (reviewer required, release
+branches only, GitHub OIDC, no stored secret). `scripts/sign_bindings_wheel.py`
+holds the checks: Windows must call the signature valid and timestamped, the
+signed library must be the tested library plus a signature and nothing else,
+every other file must be unchanged, and only the library's `RECORD` row
+changes. The job installs the signed wheel, starts the swarm and prints the
+new SHA-256. Publication never builds or signs: a manual dispatch with
+`publish=true`, `publish_run_id` and `publish_sha256` promotes the wheel of an
+earlier successful signing run (or, with `publish_unsigned=true`, the unsigned
+wheel of a build run). For both dispatches the named run must be a successful
+dispatch or push run whose `rust/`, `Cargo.toml`, `Cargo.lock`, workflow file
+and two scripts (`sign_bindings_wheel.py`, `smoke_bindings_wheel.py`) are
+identical to the dispatched ref's, so a run of a changed workflow cannot
+supply a wheel; and the wheel must have the given SHA-256 (each run
+prints it in its summary). The command line runs all three
 steps against any branch that carries the workflow file
 (`gh workflow run bindings-wheel.yml --ref <branch>` to build a candidate, then
-the same with `-f publish=true -f publish_run_id=<run> -f publish_sha256=<sha256>`), provided
+the same with `-f sign=true -f sign_run_id=<run> -f sign_sha256=<sha256>`, then
+with `-f publish=true -f publish_run_id=<signing run> -f publish_sha256=<sha256>`), provided
 the workflow has already run once on some branch (its pull-request or push
 trigger registers it with GitHub); only the website's Run button needs the
-file on the default branch. The index is
+file on the default branch. No signed wheel has been published yet: 0.2.12 and
+earlier are unsigned. The index is
 append-only, so republishing needs a bindings version bump. A Windows install takes the bindings from
 that index (pyproject pins the version for `win32`); macOS and Linux still build
 them from `rust/`. Every Skulk build of `llama-server` (the engine wheels, the
