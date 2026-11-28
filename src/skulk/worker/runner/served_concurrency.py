@@ -147,6 +147,7 @@ class ServedConcurrentDispatch:
         thread_name_prefix: str,
         queue_admitted: bool = False,
         max_admitted_queue: int | None = None,
+        admission_limit_message: str = "Native image engine admission limit reached",
     ) -> None:
         """Set up the concurrency state. Call once from the runner's ``__init__``.
 
@@ -159,12 +160,24 @@ class ServedConcurrentDispatch:
         queue's depth is bounded upstream by the API's per-node job admission
         rather than here (a bound here would put the generation past it back
         on the blocking path, ahead of the queue and holding the loop). A
-        serial engine whose work is long (a video render) queues; the text
-        engines leave it off and backpressure the receiver past their permits.
+        serial engine whose work is long (a video render) queues; the built-in
+        text engines leave it off and backpressure the receiver past their
+        permits.
+
+        Without ``queue_admitted`` the loop reads one generation past its
+        permits, acknowledges it, and then waits for a permit without reading
+        further. The worker's ``start_task`` for the generation after that
+        gets no acknowledgement until a permit frees, and the worker plans
+        nothing meanwhile, so a cancel for the waiting generation arrives too
+        late. An engine with one slot therefore queues.
+
+        ``max_admitted_queue`` bounds the queue; a generation past it fails at
+        once with ``admission_limit_message``.
         """
         self._max_concurrency = max_concurrency
         self._queue_admitted = queue_admitted
         self._max_admitted_queue = max_admitted_queue
+        self._admission_limit_message = admission_limit_message
         # Acknowledged generations waiting for a permit, oldest first; read and
         # written on the dispatch thread only.
         self._admitted: deque[GenerationTask] = deque()
@@ -345,7 +358,7 @@ class ServedConcurrentDispatch:
                                                 command_id=task.command_id,
                                                 chunk=ErrorChunk(
                                                     model=self.shard_metadata.model_card.model_id,
-                                                    error_message="Native image engine admission limit reached",
+                                                    error_message=self._admission_limit_message,
                                                 ),
                                             )
                                         )

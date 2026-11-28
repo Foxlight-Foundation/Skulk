@@ -18,6 +18,17 @@ PARALLEL_STREAMS: Final = 1
 """Streams a packaged engine is loaded for. One until a placement carries the
 admitted stream count; the engine is told this number and may not exceed it."""
 
+MAX_WAITING_REQUESTS: Final = 256
+"""Requests a runner holds for one packaged engine beyond those it is serving.
+The same figure as the supervisor's task channel, which held the excess before
+the runner queued it itself. A request past it fails at once."""
+
+WAITING_LIMIT_MESSAGE: Final = (
+    "This model's engine package already has "
+    f"{MAX_WAITING_REQUESTS} requests waiting. Retry shortly."
+)
+"""What a request past ``MAX_WAITING_REQUESTS`` is told."""
+
 DEFAULT_CACHE_PRECISION: Final = "default"
 """Prompt-cache precision stated at load until a card carries one."""
 

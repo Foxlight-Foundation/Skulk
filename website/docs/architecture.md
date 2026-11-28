@@ -2272,7 +2272,10 @@ admitted against memory the engine is about to take. An engine that does not
 know changes nothing.
 
 A load states its settings outright: the stamped window, one stream, the
-engine's default cache precision, and whether to draft. Drafting is on only
+engine's default cache precision, and whether to draft. Because the engine is
+loaded for one stream, further requests wait in the runner's own queue and are
+answered oldest first; a request whose caller cancels or disconnects while it
+waits is dropped before it reaches the engine, and at most 256 wait. Drafting is on only
 when the installed build's signed manifest carries `drafting: true`. Whether
 drafting helps is a property of an engine build (measured: a gain on one
 accelerator's build, a small loss on another's), so the build's publisher

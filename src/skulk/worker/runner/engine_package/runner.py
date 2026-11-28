@@ -100,7 +100,9 @@ from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 from skulk.worker.runner.engine_package.request import (
+    MAX_WAITING_REQUESTS,
     PARALLEL_STREAMS,
+    WAITING_LIMIT_MESSAGE,
     package_load_request,
 )
 from skulk.worker.runner.generation_stats import StreamStatsClock
@@ -270,7 +272,9 @@ class Runner(ServedConcurrentDispatch):
     """Serve one text placement on an installed engine package.
 
     Shares the served engines' dispatch loop: generation is admitted against
-    ``PARALLEL_STREAMS``, lifecycle tasks run on the dispatch thread, and an
+    ``PARALLEL_STREAMS`` and further requests wait in the loop's queue, oldest
+    first, where a cancelled one is dropped before it reaches the engine;
+    lifecycle tasks run on the dispatch thread, and an
     idle poll asks the adapter for the instance's health so a dead engine ends
     the runner instead of leaving it advertised as ready.
     """
@@ -324,7 +328,18 @@ class Runner(ServedConcurrentDispatch):
         self.setup_start_time = time.time()
         self.cancelled_tasks: set[TaskId] = set()
         self.seen: set[TaskId] = set()
-        self._init_concurrent_dispatch(PARALLEL_STREAMS, "engine-package-gen")
+        # The engine serves PARALLEL_STREAMS at a time, so the rest wait in the
+        # loop's own queue. The queue-less loop would stop reading after the
+        # first waiting request: the worker then blocks on the next one's
+        # acknowledgement, plans nothing, and a client that hangs up while
+        # waiting is answered anyway.
+        self._init_concurrent_dispatch(
+            PARALLEL_STREAMS,
+            "engine-package-gen",
+            queue_admitted=True,
+            max_admitted_queue=MAX_WAITING_REQUESTS,
+            admission_limit_message=WAITING_LIMIT_MESSAGE,
+        )
         self._stack = contextlib.ExitStack()
         self._session: AdapterSession | None = None
         # The control channel carries one exchange at a time. Health comes

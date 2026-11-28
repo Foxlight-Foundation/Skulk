@@ -12,6 +12,7 @@ import os
 import signal
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -30,9 +31,20 @@ from skulk.shared.constants import CONTEXT_LENGTH_EXCEEDED_PREFIX
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk
 from skulk.shared.types.common import CommandId, NodeId
-from skulk.shared.types.events import ChunkGenerated, Event
+from skulk.shared.types.events import (
+    ChunkGenerated,
+    Event,
+    TaskAcknowledged,
+    TaskStatusUpdated,
+)
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.tasks import LoadModel, Task, TaskId, TextGeneration
+from skulk.shared.types.tasks import (
+    LoadModel,
+    Task,
+    TaskId,
+    TaskStatus,
+    TextGeneration,
+)
 from skulk.shared.types.text_generation import (
     InputMessage,
     TextGenerationTaskParams,
@@ -44,6 +56,7 @@ from skulk.utils.channels import MpSender, mp_channel
 from skulk.worker.plan import _retried_on_failure
 from skulk.worker.runner import bootstrap
 from skulk.worker.runner.engine_package import request as request_module
+from skulk.worker.runner.engine_package import runner as runner_module
 from skulk.worker.runner.engine_package.runner import (
     Runner,
     chat_request_body,
@@ -510,6 +523,121 @@ def test_cancel_reaches_the_engine_through_the_adapter(
         isinstance(chunk, TokenChunk) and chunk.finish_reason is None
         for chunk in harness.chunks()
     )
+
+
+def _named(name: str) -> TextGeneration:
+    """A request whose prompt is ``name``, so the engine's record says which ran."""
+    return _generation(input=[InputMessage(role="user", content=name)])
+
+
+def _until(condition: Callable[[], bool], timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.02)
+    return condition()
+
+
+def _prompts_at_the_engine(harness: _Harness) -> list[object]:
+    prompts: list[object] = []
+    for entry in harness.record():
+        request = entry.get("request")
+        if isinstance(request, dict):
+            messages = cast("list[dict[str, object]]", request["messages"])
+            prompts.append(messages[-1]["content"])
+    return prompts
+
+
+def _acknowledged(harness: _Harness, task: TextGeneration) -> bool:
+    return any(
+        isinstance(event, TaskAcknowledged) and event.task_id == task.task_id
+        for event in list(harness.events)
+    )
+
+
+def _has_status(harness: _Harness, task: TextGeneration, status: TaskStatus) -> bool:
+    return any(
+        isinstance(event, TaskStatusUpdated)
+        and event.task_id == task.task_id
+        and event.task_status is status
+        for event in list(harness.events)
+    )
+
+
+def test_a_request_cancelled_while_it_waits_never_reaches_the_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two requests wait behind a running one; the cancelled one is not generated.
+
+    The worker waits for each request's acknowledgement before it plans again.
+    A loop that stops reading while its one slot is busy never acknowledges
+    the second waiting request, so the worker cannot deliver a cancel for the
+    first, and that request is answered for a client that has gone.
+    """
+    harness = _Harness(tmp_path, monkeypatch, "slow")
+    harness.load()
+    running, abandoned, patient = _named("running"), _named("abandoned"), _named("patient")
+    loop = threading.Thread(target=harness.runner.run_dispatch_loop)
+    loop.start()
+    try:
+        harness._task_sender.send(running)
+        assert _until(lambda: bool(harness.chunks())), "the engine never streamed"
+        harness._task_sender.send(abandoned)
+        harness._task_sender.send(patient)
+        assert _until(
+            lambda: _acknowledged(harness, abandoned) and _acknowledged(harness, patient)
+        ), "a waiting request was not acknowledged while another was being answered"
+
+        harness.cancel_sender.send(abandoned.task_id)
+        assert _until(
+            lambda: _has_status(harness, abandoned, TaskStatus.Cancelled)
+        ), "the cancel did not reach the waiting request"
+        assert _prompts_at_the_engine(harness) == ["running"]
+
+        harness.cancel_sender.send(running.task_id)
+        assert _until(lambda: "patient" in _prompts_at_the_engine(harness))
+    finally:
+        harness._task_sender.close()
+        loop.join(timeout=30)
+        harness.cancel_sender.close()
+
+    assert not loop.is_alive()
+    assert _prompts_at_the_engine(harness) == ["running", "patient"]
+    assert not _has_status(harness, abandoned, TaskStatus.Running)
+
+
+def test_a_request_past_the_waiting_limit_fails_at_once_with_its_own_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The queue is bounded, and the refusal names the engine package."""
+    monkeypatch.setattr(runner_module, "MAX_WAITING_REQUESTS", 1)
+    harness = _Harness(tmp_path, monkeypatch, "slow")
+    harness.load()
+    running, waiting, excess = _named("running"), _named("waiting"), _named("excess")
+    loop = threading.Thread(target=harness.runner.run_dispatch_loop)
+    loop.start()
+    try:
+        harness._task_sender.send(running)
+        assert _until(lambda: bool(harness.chunks())), "the engine never streamed"
+        harness._task_sender.send(waiting)
+        harness._task_sender.send(excess)
+        assert _until(lambda: _has_status(harness, excess, TaskStatus.Failed))
+        refusals = [chunk for chunk in harness.chunks() if isinstance(chunk, ErrorChunk)]
+        assert [chunk.error_message for chunk in refusals] == [
+            request_module.WAITING_LIMIT_MESSAGE
+        ]
+        assert not _has_status(harness, waiting, TaskStatus.Failed)
+        harness.cancel_sender.send(waiting.task_id)
+        harness.cancel_sender.send(running.task_id)
+        assert _until(lambda: _has_status(harness, waiting, TaskStatus.Cancelled))
+    finally:
+        harness._task_sender.close()
+        loop.join(timeout=30)
+        harness.cancel_sender.close()
+
+    assert not loop.is_alive()
+    assert _prompts_at_the_engine(harness) == ["running"]
 
 
 @pytest.mark.parametrize(

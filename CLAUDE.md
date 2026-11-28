@@ -1230,7 +1230,11 @@ control protocol version 1; a channel failure ends the session and its process
 group; calls are never replayed), `estimate.py`, `actions.py`,
 `load_results.py`, `order_record.py` and `cli.py` (`skulk engines`). One generic
 runner, `worker/runner/engine_package/`, serves every package: lifecycle on the
-control channel, tokens on the loopback port a load returns.
+control channel, tokens on the loopback port a load returns. The engine is
+loaded for one stream, so the runner uses the queueing dispatch loop
+(`queue_admitted=True`, at most 256 waiting): never the queue-less form at one
+slot, which stops reading after the first waiting request and holds the
+worker's planning loop, so a cancel for a waiting request arrives too late.
 
 A package is eligible for a model when the card names it in
 `placement.compatible_backends` or the registry's signed engine-support list

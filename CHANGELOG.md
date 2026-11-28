@@ -64,6 +64,8 @@ This project records release notes here and mirrors public-facing notes in
   is replaced.
 - The publisher of an add-on engine build can say that the build drafts. Skulk then loads
   models on it with drafting on, so a model that ships with a draft head uses it.
+- An add-on engine answers one request at a time. Further requests wait their turn, and a
+  request whose caller has gone while it waited is no longer generated.
 - A request an add-on engine cannot carry (tools, an image, or per-token log probabilities)
   is refused with a 400 and a message that says what to leave out. Add-on engines serve
   text only.
