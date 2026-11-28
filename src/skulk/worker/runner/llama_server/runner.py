@@ -708,6 +708,8 @@ class Runner(ServedConcurrentDispatch):
     ``ChunkGenerated`` events.
     """
 
+    _teardown_before_pool_drain = True
+
     def __init__(
         self,
         bound_instance: BoundInstance,

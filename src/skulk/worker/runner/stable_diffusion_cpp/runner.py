@@ -75,6 +75,7 @@ class Runner(ServedConcurrentDispatch):
     """Own one exact image model, bounded serial admission, and native job cleanup."""
 
     _generation_kinds = (ImageGeneration, ImageEdits)
+    _teardown_before_pool_drain = True
 
     def __init__(
         self,

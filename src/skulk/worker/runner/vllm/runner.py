@@ -809,6 +809,8 @@ class Runner(ServedConcurrentDispatch):
     (``_generate``, server spawn/liveness/teardown, ``handle_task``).
     """
 
+    _teardown_before_pool_drain = True
+
     def __init__(
         self,
         bound_instance: BoundInstance,

@@ -337,6 +337,8 @@ def _saved_file(outputs: dict[str, Any], node_id: str, output_root: Path) -> Pat
 class Runner(ServedConcurrentDispatch):
     """ComfyUI-backed video runner; same constructor shape as the image runner."""
 
+    _teardown_before_pool_drain = True
+
     def __init__(
         self,
         bound_instance: BoundInstance,

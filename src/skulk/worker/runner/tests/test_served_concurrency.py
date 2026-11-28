@@ -830,11 +830,13 @@ def test_embedding_tasks_reach_the_engine_through_the_loop() -> None:
 
 
 def test_shutdown_tears_down_server_before_joining_blocked_pool() -> None:
-    """Server teardown must run before pool.shutdown(wait=True) so blocked workers unwind."""
+    """External-server runners tear down before pool.shutdown(wait=True) so blocked workers unwind."""
     unblock = threading.Event()
     order: list[str] = []
 
     class _BlockedOnServerHost(_FakeHost):
+        _teardown_before_pool_drain = True
+
         def _generate(self, task: Task) -> None:
             self.started.release()
             assert unblock.wait(5), "worker stayed blocked because teardown did not run first"
@@ -855,6 +857,8 @@ def test_shutdown_tears_down_server_before_joining_blocked_pool() -> None:
         t.join(timeout=5)
         assert not t.is_alive()
         assert order[:2] == ["teardown", "worker_exited"]
+        # Second idempotent teardown runs after pool drain.
+        assert order.count("teardown") >= 2
     finally:
         unblock.set()
         if t.is_alive():
@@ -869,6 +873,8 @@ def test_receiver_closure_marks_shutting_down_before_teardown_so_recovery_does_n
     reloads: list[str] = []
 
     class _RecoveringHost(_FakeHost):
+        _teardown_before_pool_drain = True
+
         def _generate(self, task: Task) -> None:
             self.started.release()
             try:
@@ -897,6 +903,95 @@ def test_receiver_closure_marks_shutting_down_before_teardown_so_recovery_does_n
         assert isinstance(host.current_status, RunnerShuttingDown)
     finally:
         unblock.set()
+        if t.is_alive():
+            t.join(timeout=5)
+
+
+def test_shutdown_tears_down_replacement_server_published_during_pool_drain() -> None:
+    """A server published by an already-running recovery during drain is torn down after drain."""
+    initial_teardown_seen = threading.Event()
+    replacement_live = [False]
+    teardown_calls = [0]
+
+    class _LateReplacementHost(_FakeHost):
+        _teardown_before_pool_drain = True
+
+        def _generate(self, task: Task) -> None:
+            _ = task
+            self.started.release()
+            # Wait until the initial pre-drain teardown saw no server, then
+            # simulate an in-flight recovery publishing a replacement server.
+            assert initial_teardown_seen.wait(5)
+            replacement_live[0] = True
+
+        def _teardown_server(self) -> None:
+            teardown_calls[0] += 1
+            if teardown_calls[0] == 1:
+                initial_teardown_seen.set()
+            else:
+                replacement_live[0] = False
+
+    host = _LateReplacementHost(max_concurrency=1)
+    _load_ready(host)
+    t = host.start()
+    try:
+        host.send(_gen())
+        assert host.started.acquire(timeout=5)
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=5)
+        assert not t.is_alive()
+        assert replacement_live[0] is False
+        assert teardown_calls[0] >= 2
+    finally:
+        initial_teardown_seen.set()
+        if t.is_alive():
+            t.join(timeout=5)
+
+
+def test_shutdown_drains_pool_even_if_initial_teardown_raises() -> None:
+    """An exception in pre-drain teardown must still drain active worker threads and re-teardown."""
+    worker_finished = threading.Event()
+    release_worker = threading.Event()
+    teardown_attempts = [0]
+    caught: list[BaseException] = []
+
+    class _RaisingTeardownHost(_FakeHost):
+        _teardown_before_pool_drain = True
+
+        def _generate(self, task: Task) -> None:
+            _ = task
+            self.started.release()
+            assert release_worker.wait(5)
+            worker_finished.set()
+
+        def _teardown_server(self) -> None:
+            teardown_attempts[0] += 1
+            release_worker.set()
+            if teardown_attempts[0] == 1:
+                raise InterruptedError("simulated signal during initial teardown")
+
+    host = _RaisingTeardownHost(max_concurrency=1)
+    _load_ready(host)
+
+    def _run() -> None:
+        try:
+            host.run_dispatch_loop()
+        except BaseException as exc:  # noqa: BLE001
+            caught.append(exc)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    try:
+        host.send(_gen())
+        assert host.started.acquire(timeout=5)
+        host._task_sender.close()
+        t.join(timeout=5)
+        assert not t.is_alive()
+        assert worker_finished.is_set()
+        assert teardown_attempts[0] >= 2
+        assert any(isinstance(exc, InterruptedError) for exc in caught)
+    finally:
+        release_worker.set()
         if t.is_alive():
             t.join(timeout=5)
 

@@ -310,7 +310,7 @@ class NativeImageServer:
                     # Large BF16 CUDA contexts can take longer than five seconds
                     # to reclaim. Retain ownership until wait confirms exit.
                     process.wait(timeout=30)
-                except subprocess.TimeoutExpired:
+                except (subprocess.TimeoutExpired, InterruptedError):
                     if process.poll() is None:
                         with contextlib.suppress(ProcessLookupError):
                             os.killpg(process.pid, signal.SIGKILL)
