@@ -220,6 +220,7 @@ def _safe_name(name: str) -> bool:
         or path.is_absolute()
         or "\\" in name
         or ":" in name
+        or any(ord(character) < 32 for character in name)
         or any(part in ("", ".", "..") for part in path.parts)
         or str(path) != name
     )
@@ -238,8 +239,12 @@ def read_wheel(path: Path) -> tuple[list[Entry], str]:
     entries: list[Entry] = []
     with zipfile.ZipFile(path) as archive:
         for info in archive.infolist():
-            if not _safe_name(info.filename):
-                raise RefusedError(f"unsafe path in the wheel: {info.filename!r}")
+            # ``orig_filename`` is the name as the archive stores it. Python
+            # turns a backslash into a slash on Windows, and cuts a name at a
+            # NUL byte everywhere, before it fills in ``filename``.
+            stored = info.orig_filename
+            if not _safe_name(stored) or info.filename != stored:
+                raise RefusedError(f"unsafe path in the wheel: {stored!r}")
             entries.append(
                 Entry(
                     name=info.filename,

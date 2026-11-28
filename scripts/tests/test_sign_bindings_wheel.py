@@ -90,6 +90,9 @@ def build_wheel(
     with zipfile.ZipFile(path, "w") as archive:
         for name, data in [*contents.items(), (RECORD, record.encode())]:
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            # Store the name exactly as given: Python would otherwise rewrite
+            # a backslash on Windows and cut the name at a NUL byte.
+            info.filename = name
             info.external_attr = (
                 0o100755 << 16 if name.endswith(".pyd") else 0o100644 << 16
             )
@@ -220,7 +223,16 @@ def test_a_record_row_for_a_missing_file_is_refused(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["../escape.py", "/absolute.py", "a\\b.py", "c:drive.py", "a//b.py", "a/./b.py"],
+    [
+        "../escape.py",
+        "/absolute.py",
+        "a\\b.py",
+        "c:drive.py",
+        "a//b.py",
+        "a/./b.py",
+        "a\x00b.py",
+        "a\nb.py",
+    ],
 )
 def test_an_unsafe_name_is_refused(tmp_path: Path, name: str) -> None:
     with pytest.raises(signing.RefusedError, match="unsafe path"):
