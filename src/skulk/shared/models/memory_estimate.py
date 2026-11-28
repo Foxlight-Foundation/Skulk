@@ -609,12 +609,14 @@ def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
     """Whether a resolved backend allocates weights + KV from DISCRETE GPU VRAM.
 
     A GPU compute tag (``llama_cpp-cuda`` / ``-rocm``, ``llama_server-cuda`` /
-    ``-rocm``, ``vllm-cuda`` / ``-rocm``, ``comfy-cuda`` / ``-rocm``, or
-    ``audio_cpp-cuda`` / ``-rocm`` / ``-vulkan``) offloads to dedicated VRAM.
-    Metal lanes (audio.cpp, llama-server) use Apple unified memory. A ``-cpu`` tag OR a bare engine tag (no compute suffix) does not offload
-    to the GPU and allocates from system RAM, so it does NOT. ``None``
-    (unresolved) is treated as not-VRAM: we cannot confirm VRAM offload, so the
-    caller stays conservative.
+    ``-rocm``, ``vllm-cuda`` / ``-rocm``, ``comfy-cuda`` / ``-rocm``,
+    ``audio_cpp-cuda`` / ``-rocm`` / ``-vulkan``, or
+    ``stable_diffusion_cpp-cuda`` / ``-rocm`` / ``-vulkan``) offloads to
+    dedicated VRAM. Metal lanes (audio.cpp, llama-server, stable-diffusion.cpp)
+    use Apple unified memory. A ``-cpu`` tag OR a bare engine tag (no compute
+    suffix) does not offload to the GPU and allocates from system RAM, so it
+    does NOT. ``None`` (unresolved) is treated as not-VRAM: we cannot confirm
+    VRAM offload, so the caller stays conservative.
     """
     if resolved_backend is None:
         return False
@@ -623,11 +625,19 @@ def backend_offloads_to_vram(resolved_backend: str | None) -> bool:
         # engine tag still lands its model on the GPU.
         return True
     if resolved_backend.endswith("-metal"):
-        # Every Metal lane (audio.cpp, the llama-server embedding lane) uses
-        # Apple unified memory, which placement admits against system RAM.
+        # Every Metal lane (audio.cpp, the llama-server embedding lane,
+        # stable-diffusion.cpp) uses Apple unified memory, which placement
+        # admits against system RAM.
         return False
     return resolved_backend.startswith(
-        ("llama_cpp-", "llama_server-", "vllm-", "comfy-", "audio_cpp-")
+        (
+            "llama_cpp-",
+            "llama_server-",
+            "vllm-",
+            "comfy-",
+            "audio_cpp-",
+            "stable_diffusion_cpp-",
+        )
     ) and not resolved_backend.endswith("-cpu")
 
 

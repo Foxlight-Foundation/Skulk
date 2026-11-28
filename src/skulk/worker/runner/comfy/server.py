@@ -331,9 +331,12 @@ class ComfyServer:
                     _signal_group(process, signal.SIGTERM)
                     try:
                         process.wait(timeout=15)
-                    except subprocess.TimeoutExpired:
+                    except (subprocess.TimeoutExpired, InterruptedError):
                         _signal_group(process, signal.SIGKILL)
-                        process.wait(timeout=5)
+                        with contextlib.suppress(
+                            subprocess.TimeoutExpired, InterruptedError
+                        ):
+                            process.wait(timeout=5)
             except Exception:  # noqa: BLE001 - teardown is best-effort
                 pass
             self.process = None

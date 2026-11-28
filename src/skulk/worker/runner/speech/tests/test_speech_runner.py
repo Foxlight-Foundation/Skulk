@@ -1341,3 +1341,76 @@ def test_audio_transcription_maps_whisper_aliases_without_decode_leak() -> None:
             "decode_options": {"sample_len": 32},
         }
     ]
+
+
+def test_duplicate_speech_task_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A duplicate task_id must be ignored instead of executing twice."""
+    calls: list[str] = []
+
+    class _CountingSpeechModel:
+        sample_rate = 24000
+
+        def generate(
+            self, text: str, *, voice: str | None = None, speed: float = 1.0, stream: bool = False
+        ) -> list[_FakeSpeechResult]:
+            _ = (voice, speed, stream)
+            calls.append(text)
+            return [_FakeSpeechResult(audio=[0.1])]
+
+    runner, _sender = _make_runner()
+    runner.model = _CountingSpeechModel()
+    runner.current_status = RunnerReady()
+    monkeypatch.setattr(speech_runner, "_encode_audio", lambda *_a, **_kw: b"WAV")
+
+    task = SpeechSynthesis(
+        instance_id=InstanceId("speech-instance-1"),
+        command_id=CommandId("dup-cmd"),
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("mlx-community/kokoro-test"),
+            input_text="once",
+            response_format=AudioResponseFormat.Wav,
+        ),
+    )
+    runner.task_receiver = cast("object", _OneShotReceiver([task, task]))  # pyright: ignore[reportAttributeAccessIssue]
+    runner.main()
+
+    assert calls == ["once"]
+
+
+def test_failed_speech_synthesis_emits_error_chunk_and_failed_status() -> None:
+    """Speech errors must report TaskStatus.Failed rather than TaskStatus.Complete."""
+    from skulk.shared.types.chunks import ErrorChunk
+
+    class _FailingSpeechModel:
+        sample_rate = 24000
+
+        def generate(self, *_args: object, **_kwargs: object) -> list[object]:
+            raise RuntimeError("boom")
+
+    runner, sender = _make_runner()
+    runner.model = _FailingSpeechModel()
+    runner.current_status = RunnerReady()
+
+    task = SpeechSynthesis(
+        instance_id=InstanceId("speech-instance-1"),
+        command_id=CommandId("fail-cmd"),
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("mlx-community/kokoro-test"),
+            input_text="hello",
+            response_format=AudioResponseFormat.Wav,
+        ),
+    )
+    runner.task_receiver = cast("object", _OneShotReceiver([task]))  # pyright: ignore[reportAttributeAccessIssue]
+    runner.main()
+
+    assert any(
+        isinstance(event, ChunkGenerated) and isinstance(event.chunk, ErrorChunk)
+        for event in sender.events
+    )
+    terminal_statuses = [
+        event.task_status
+        for event in sender.events
+        if isinstance(event, TaskStatusUpdated) and event.task_id == task.task_id
+    ]
+    assert TaskStatus.Failed in terminal_statuses
+    assert TaskStatus.Complete not in terminal_statuses

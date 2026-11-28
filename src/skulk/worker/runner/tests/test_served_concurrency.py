@@ -827,3 +827,120 @@ def test_embedding_tasks_reach_the_engine_through_the_loop() -> None:
     finally:
         host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
         t.join(timeout=5)
+
+
+def test_shutdown_tears_down_server_before_joining_blocked_pool() -> None:
+    """Server teardown must run before pool.shutdown(wait=True) so blocked workers unwind."""
+    unblock = threading.Event()
+    order: list[str] = []
+
+    class _BlockedOnServerHost(_FakeHost):
+        def _generate(self, task: Task) -> None:
+            self.started.release()
+            assert unblock.wait(5), "worker stayed blocked because teardown did not run first"
+            order.append("worker_exited")
+            self._is_cancelled(task.task_id)
+
+        def _teardown_server(self) -> None:
+            order.append("teardown")
+            unblock.set()
+
+    host = _BlockedOnServerHost(max_concurrency=1)
+    _load_ready(host)
+    t = host.start()
+    try:
+        host.send(_gen())
+        assert host.started.acquire(timeout=5)
+        host.send(Shutdown(instance_id=_iid(), runner_id=host.runner_id))
+        t.join(timeout=5)
+        assert not t.is_alive()
+        assert order[:2] == ["teardown", "worker_exited"]
+    finally:
+        unblock.set()
+        if t.is_alive():
+            t.join(timeout=5)
+
+
+def test_server_teardown_escalates_to_kill_on_interrupted_wait(
+    monkeypatch: Any,
+) -> None:
+    """InterruptedError during graceful wait must escalate to SIGKILL instead of orphaning."""
+    import signal
+
+    from skulk.worker.runner.comfy.server import ComfyServer
+    from skulk.worker.runner.llama_server.runner import Runner as LlamaServerRunner
+    from skulk.worker.runner.vllm.runner import Runner as VllmRunner
+
+    class _FakeProc:
+        pid = 99999
+
+        def __init__(self) -> None:
+            self.terminated = False
+            self.killed = False
+            self.signals: list[int] = []
+            self.wait_calls = 0
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def send_signal(self, sig: int) -> None:
+            self.signals.append(sig)
+
+        def wait(self, timeout: float | None = None) -> int:
+            _ = timeout
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise InterruptedError("SIGTERM during graceful wait")
+            return 0
+
+    def _record_vllm_signal(_proc: object, sig: int) -> None:
+        vllm_signals.append(sig)
+
+    def _record_comfy_signal(_proc: object, sig: int) -> None:
+        comfy_signals.append(sig)
+
+    # llama_server
+    llama_proc = _FakeProc()
+    llama_runner = object.__new__(LlamaServerRunner)
+    llama_runner.server_proc = cast(Any, llama_proc)
+    llama_runner.server_log = None
+    llama_runner._teardown_server()
+    assert llama_proc.terminated is True
+    assert llama_proc.killed is True
+
+    # vllm
+    vllm_proc = _FakeProc()
+    vllm_signals: list[int] = []
+    vllm_runner = object.__new__(VllmRunner)
+    vllm_runner.server_proc = cast(Any, vllm_proc)
+    vllm_runner.server_log = None
+    monkeypatch.setattr(
+        VllmRunner,
+        "_signal_server_group",
+        staticmethod(_record_vllm_signal),
+    )
+    monkeypatch.setattr(
+        "skulk.worker.runner.vllm.runner.sweep_orphaned_vllm_engines",
+        lambda: None,
+    )
+    vllm_runner._teardown_server()
+    assert vllm_signals == [signal.SIGTERM, signal.SIGKILL]
+
+    # comfy
+    comfy_proc = _FakeProc()
+    comfy_signals: list[int] = []
+    comfy_server = object.__new__(ComfyServer)
+    comfy_server.process = cast(Any, comfy_proc)
+    comfy_server._log = None
+    monkeypatch.setattr(
+        "skulk.worker.runner.comfy.server._signal_group",
+        _record_comfy_signal,
+    )
+    comfy_server.teardown()
+    assert comfy_signals == [signal.SIGTERM, signal.SIGKILL]

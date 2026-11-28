@@ -1336,9 +1336,12 @@ class Runner(ServedConcurrentDispatch):
                     proc.terminate()
                     try:
                         proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
+                    except (subprocess.TimeoutExpired, InterruptedError):
                         proc.kill()
-                        proc.wait(timeout=5)
+                        with contextlib.suppress(
+                            subprocess.TimeoutExpired, InterruptedError
+                        ):
+                            proc.wait(timeout=5)
             except Exception:  # noqa: BLE001 - teardown is best-effort
                 pass
             self.server_proc = None

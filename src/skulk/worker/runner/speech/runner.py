@@ -843,6 +843,7 @@ class Runner:
         self.local_model_path: Path | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         self.seen = set[TaskId]()
+        self._task_failed = False
         self.update_status(RunnerIdle())
 
     def update_status(self, status: RunnerStatus) -> None:
@@ -884,13 +885,17 @@ class Runner:
             for task in tasks:
                 if task.task_id in self.seen:
                     logger.warning("repeat speech task - potential error")
+                    continue
                 self.seen.add(task.task_id)
                 self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
+                self._task_failed = False
                 self.send_task_status(task, TaskStatus.Running)
                 self.handle_task(task)
                 was_cancelled = self._is_cancelled(task.task_id)
                 if was_cancelled:
                     self.send_task_status(task, TaskStatus.Cancelled)
+                elif self._task_failed:
+                    self.send_task_status(task, TaskStatus.Failed)
                 else:
                     self.send_task_status(task, TaskStatus.Complete)
                 self.update_status(self.current_status)
@@ -1005,6 +1010,7 @@ class Runner:
                     sample_rate=sample_rate,
                 )
         except Exception as exc:
+            self._task_failed = True
             if task.trace_enabled:
                 record_trace_marker(
                     "error",
@@ -1101,6 +1107,7 @@ class Runner:
                 segments=segments,
             )
         except Exception as exc:
+            self._task_failed = True
             if task.trace_enabled:
                 record_trace_marker(
                     "error",
@@ -1178,6 +1185,7 @@ class Runner:
         model_id = self.shard_metadata.model_card.model_id
         create_session = getattr(self.model, "create_streaming_session", None)
         if not callable(create_session):
+            self._task_failed = True
             self.event_sender.send(
                 ChunkGenerated(
                     command_id=task.command_id,
@@ -1275,6 +1283,7 @@ class Runner:
                         text=text,
                     )
         except Exception as exc:
+            self._task_failed = True
             logger.opt(exception=exc).warning("realtime speech transcription failed")
             self.event_sender.send(
                 ChunkGenerated(

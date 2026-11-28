@@ -397,8 +397,15 @@ class ServedConcurrentDispatch:
                             self.update_status(self.current_status)
                             self._retire_task_id(task.task_id)
         finally:
-            # Drain in-flight generations, then stop the server. Shutdown already
-            # cancels them; this also covers the EndOfStream / crash exits.
+            # Tear down the child GPU server BEFORE waiting on the thread pool:
+            # if a worker thread is blocked on a wedged HTTP read/prefill, waiting
+            # for pool.shutdown(wait=True) first prevents teardown from ever
+            # running before the supervisor SIGKILLs the runner, orphaning the
+            # GPU server and its VRAM. Stopping the server breaks blocked sockets
+            # so worker threads unwind promptly.
+            with self._cancel_lock:
+                self.cancelled_tasks.add(CANCEL_ALL_TASKS)
+            self._teardown_server()
             pool.shutdown(wait=True)
             # Generations still queued when the loop ends on a crash never run:
             # the runner says so itself rather than leaving their terminal to
@@ -410,7 +417,6 @@ class ServedConcurrentDispatch:
                     self.send_task_status(queued, TaskStatus.Failed)
                 self._note_dispatch_waiter_finished()
                 self._retire_task_id(queued.task_id)
-            self._teardown_server()
 
     # --- dispatch -------------------------------------------------------------
 
@@ -679,8 +685,11 @@ class ServedConcurrentDispatch:
                 self.send_task_status(queued, TaskStatus.Cancelled)
             finally:
                 self._note_dispatch_waiter_finished()
-        pool.shutdown(wait=True)
+        # Stop the child server before draining the pool so any worker thread
+        # blocked in an HTTP request against a busy/wedged server unwinds
+        # immediately rather than holding up shutdown until supervisor SIGKILL.
         self._teardown_server()
+        pool.shutdown(wait=True)
         record_runner_phase(
             "shutdown_cleanup",
             event="server_teardown_complete",
