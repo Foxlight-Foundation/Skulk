@@ -102,8 +102,42 @@ from skulk.store.preservation_journal import PreservationHostError
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per streaming chunk
 _SOURCE_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _PROXY_FORWARDING_HEADERS = frozenset(
-    {"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP"}
+    {
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+        "cf-connecting-ip",
+        "true-client-ip",
+    }
 )
+_BROWSER_CSRF_HEADERS = frozenset({"origin", "sec-fetch-site"})
+
+
+def _reject_browser_or_proxy_headers(
+    headers: Mapping[str, str],
+    *,
+    context: str = "store mutations",
+) -> None:
+    """Reject proxy-forwarded or browser-initiated requests on the store port.
+
+    ``ModelStoreServer`` serves no browser UI — only cluster peers and Skulk's
+    own server-side clients talk to port 12415. Rejecting browser ``Origin`` /
+    ``Sec-Fetch-Site`` headers and reverse-proxy forwarding headers blocks
+    drive-by localhost CSRF without affecting ``ModelStoreClient`` traffic.
+    """
+
+    lowered_names = {name.lower() for name in headers}
+    if any(
+        name in _PROXY_FORWARDING_HEADERS or name.startswith("x-forwarded-")
+        for name in lowered_names
+    ):
+        raise web.HTTPForbidden(reason=f"{context} reject proxy forwarding headers")
+    if any(name in _BROWSER_CSRF_HEADERS for name in lowered_names):
+        raise web.HTTPForbidden(
+            reason=f"{context} reject browser cross-origin requests"
+        )
 
 
 def _require_loopback_peer_import(
@@ -112,8 +146,7 @@ def _require_loopback_peer_import(
 ) -> None:
     """Reject peer-import mutations not originating directly on loopback."""
 
-    if any(header in headers for header in _PROXY_FORWARDING_HEADERS):
-        raise web.HTTPForbidden(reason="peer imports reject proxy forwarding headers")
+    _reject_browser_or_proxy_headers(headers, context="peer imports")
     try:
         remote_address = ipaddress.ip_address(remote or "")
     except ValueError as error:
@@ -458,6 +491,13 @@ class ModelStoreServer:
         """``POST /imports`` — pull and commit one capability-bound peer artifact."""
 
         _require_loopback_peer_import(request.remote, request.headers)
+        content_type = (
+            request.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        )
+        if content_type != "application/json":
+            raise web.HTTPUnsupportedMediaType(
+                reason="peer imports require application/json Content-Type"
+            )
         try:
             raw = cast("object", json.loads(await request.text()))
             if not isinstance(raw, dict):
@@ -611,6 +651,7 @@ class ModelStoreServer:
 
     async def _handle_delete_model(self, request: web.Request) -> web.Response:
         """``DELETE /models/{model_id}`` — remove model from store."""
+        _reject_browser_or_proxy_headers(request.headers)
         model_id = _sanitize_model_id(request.match_info["model_id"])
         deleted = await self._store.delete_model_serialized(model_id)
         if not deleted:
@@ -631,6 +672,7 @@ class ModelStoreServer:
         request without it (or a non-JSON body) falls back to the default quant
         preference, no companions, and mutable ``main``.
         """
+        _reject_browser_or_proxy_headers(request.headers)
         model_id = _sanitize_model_id(request.match_info["model_id"])
         pinned_gguf: str | None = None
         extra_pinned_gguf: list[str] | None = None
@@ -918,6 +960,7 @@ class ModelStoreServer:
     async def _handle_download_cancellation(self, request: web.Request) -> web.Response:
         """``DELETE /models/{model_id}/download`` — cancel one store transfer."""
 
+        _reject_browser_or_proxy_headers(request.headers)
         model_id = _sanitize_model_id(request.match_info["model_id"])
         status = await self._store.cancel_download(model_id)
         if status is None:

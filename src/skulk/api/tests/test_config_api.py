@@ -163,7 +163,7 @@ def test_update_config_fills_a_blank_enabled_store(
     config_path = tmp_path / "skulk.yaml"
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put(
         "/config",
@@ -191,7 +191,7 @@ def test_update_config_keeps_a_named_store(tmp_path: Path) -> None:
     config_path = tmp_path / "skulk.yaml"
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put(
         "/config",
@@ -251,7 +251,7 @@ def test_get_config_treats_invalid_skulk_kv_backend_as_default(
 def test_update_config_rejects_non_object_request_body(tmp_path: Path) -> None:
     api = _build_api()
     object.__setattr__(api, "_config_path", tmp_path / "skulk.yaml")
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put("/config", json=["not", "an", "object"])
 
@@ -262,7 +262,7 @@ def test_update_config_rejects_non_object_request_body(tmp_path: Path) -> None:
 def test_update_config_rejects_non_object_config_field(tmp_path: Path) -> None:
     api = _build_api()
     object.__setattr__(api, "_config_path", tmp_path / "skulk.yaml")
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put("/config", json={"config": True})
 
@@ -282,7 +282,7 @@ def test_update_config_preserves_existing_experiments_when_omitted(
     )
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put(
         "/config",
@@ -311,7 +311,7 @@ def test_update_config_preserves_existing_model_trust_when_omitted(
     )
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put(
         "/config",
@@ -353,7 +353,7 @@ def test_update_config_broadcasts_the_token_to_the_fleet(
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)
     broadcasts = _capture_broadcast(api)
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put(
         "/config", json={"config": {"hf_token": "fleet-token"}}
@@ -381,7 +381,7 @@ def test_update_config_broadcasts_the_preserved_local_token(
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)
     broadcasts = _capture_broadcast(api)
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put(
         "/config", json={"config": {"inference": {"kv_cache_backend": "default"}}}
@@ -401,7 +401,7 @@ def test_update_config_never_broadcasts_a_blank_token(
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)
     broadcasts = _capture_broadcast(api)
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put("/config", json={"config": {"hf_token": ""}})
 
@@ -419,7 +419,7 @@ def test_update_config_never_broadcasts_a_whitespace_token(
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)
     broadcasts = _capture_broadcast(api)
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put("/config", json={"config": {"hf_token": "   "}})
 
@@ -444,7 +444,7 @@ def test_update_config_never_broadcasts_model_trust(
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)
     broadcasts = _capture_broadcast(api)
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put(
         "/config", json={"config": {"inference": {"kv_cache_backend": "default"}}}
@@ -480,7 +480,7 @@ def test_update_config_merges_latest_trust_inside_transaction(
         "update_skulk_config_atomic",
         inject_latest_trust,
     )
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
 
     response = client.put(
         "/config",
@@ -640,3 +640,96 @@ async def test_model_trust_decision_timeout_is_actionable(
     assert failure.value.status_code == 503
     assert "retry" in str(failure.value.detail).lower()
     assert not api._model_trust_decision_waiters  # pyright: ignore[reportPrivateUsage]
+
+
+def test_update_config_rejects_untrusted_client_and_external_origin(
+    tmp_path: Path,
+) -> None:
+    """All PUT /config mutations enforce operator boundary, not just model_trust."""
+
+    config_path = tmp_path / "skulk.yaml"
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+
+    # Untrusted / non-fabric client host is rejected before writing config.
+    untrusted_client = TestClient(api.app)
+    res_untrusted = untrusted_client.put(
+        "/config",
+        json={"config": {"hf_token": "attacker-token"}},
+    )
+    assert res_untrusted.status_code == 403
+    assert not config_path.exists()
+
+    # Cross-origin browser request from a public origin is rejected even on loopback.
+    loopback_client = TestClient(api.app, client=("127.0.0.1", 50000))
+    res_cross_origin = loopback_client.put(
+        "/config",
+        json={"config": {"inference": {"kv_cache_backend": "default"}}},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert res_cross_origin.status_code == 403
+    assert not config_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("origin", "allowed"),
+    [
+        ("http://localhost:52415", True),
+        ("http://localhost:5173", True),
+        ("http://127.0.0.1:52415", True),
+        ("http://192.168.0.10:52415", True),
+        ("http://100.68.140.20:52415", True),
+        ("http://mac-studio.local:52415", True),
+        ("https://attacker.unrelated-tailnet.ts.net", False),
+        ("https://evil.example", False),
+        ("https://ts.net.evil.example", False),
+        ("http://100.128.0.1:52415", False),
+    ],
+)
+def test_cors_restricts_browser_origins_without_credentials(
+    origin: str,
+    allowed: bool,
+) -> None:
+    """CORS admits loopback/LAN/CGNAT/mDNS origins and rejects public/unrelated tailnets."""
+
+    api = _build_api()
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
+    response = client.get("/node_id", headers={"Origin": origin})
+
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-credentials") is None
+    if allowed:
+        assert response.headers.get("access-control-allow-origin") == origin
+    else:
+        assert response.headers.get("access-control-allow-origin") is None
+
+
+def test_cors_allows_explicitly_configured_origins_without_wildcarding_tailnets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operators can allowlist an explicit origin without trusting unrelated *.ts.net sites."""
+
+    monkeypatch.setenv(
+        "SKULK_CORS_ALLOWED_ORIGINS",
+        "https://studio.trusted-tailnet.ts.net/",
+    )
+    api = _build_api()
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
+
+    allowed_res = client.get(
+        "/node_id",
+        headers={"Origin": "https://studio.trusted-tailnet.ts.net"},
+    )
+    assert allowed_res.status_code == 200
+    assert (
+        allowed_res.headers.get("access-control-allow-origin")
+        == "https://studio.trusted-tailnet.ts.net"
+    )
+    assert allowed_res.headers.get("access-control-allow-credentials") is None
+
+    rejected_res = client.get(
+        "/node_id",
+        headers={"Origin": "https://attacker.other-tailnet.ts.net"},
+    )
+    assert rejected_res.status_code == 200
+    assert rejected_res.headers.get("access-control-allow-origin") is None

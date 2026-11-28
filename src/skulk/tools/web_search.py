@@ -188,8 +188,11 @@ def _validate_http_url(url: str) -> str:
 def _is_blocked_ip_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return whether one resolved IP should be rejected for browser-tool fetches."""
 
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
     return (
-        address.is_private
+        not address.is_global
+        or address.is_private
         or address.is_loopback
         or address.is_link_local
         or address.is_multicast
@@ -198,8 +201,45 @@ def _is_blocked_ip_address(address: ipaddress.IPv4Address | ipaddress.IPv6Addres
     )
 
 
-async def _validate_public_http_target(url: str) -> str:
-    """Reject loopback and private-network targets before any outbound fetch."""
+async def validate_public_http_target(url: str) -> str:
+    """Validate that ``url`` is an HTTP(S) target resolving only to global IPs.
+
+    Args:
+        url: Candidate outbound HTTP(S) URL.
+
+    Returns:
+        Normalized URL string once every resolved address is verified global.
+
+    Raises:
+        ValueError: If the scheme is unsupported, DNS resolution fails, or any
+            literal/resolved IP is loopback, private, CGNAT/Tailscale,
+            link-local, or otherwise non-global.
+    """
+
+    validated_url, _resolved = await resolve_public_http_target(url)
+    return validated_url
+
+
+async def resolve_public_http_target(
+    url: str,
+) -> tuple[str, tuple[tuple[int, int, str, int], ...]]:
+    """Validate an HTTP(S) URL and return its verified resolved endpoints.
+
+    Returning the exact ``(family, proto, ip, port)`` tuples from the same DNS
+    lookup lets callers pin outbound sockets to the verified addresses and
+    prevent DNS-rebinding TOCTOU races.
+
+    Args:
+        url: Candidate outbound HTTP(S) URL.
+
+    Returns:
+        Tuple of ``(validated_url, resolved_endpoints)`` where every endpoint
+        IP has been verified as globally routable.
+
+    Raises:
+        ValueError: If the scheme is unsupported, DNS resolution fails, or any
+            literal/resolved IP is non-global.
+    """
 
     validated_url = _validate_http_url(url)
     parsed = urlparse(validated_url)
@@ -211,21 +251,28 @@ async def _validate_public_http_target(url: str) -> str:
     if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
         raise ValueError("Private, loopback, and link-local targets are not allowed.")
 
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
     try:
-        direct_address = ipaddress.ip_address(normalized_host)
+        direct_address = ipaddress.ip_address(normalized_host.split("%", 1)[0])
     except ValueError:
         direct_address = None
 
     if direct_address is not None:
         if _is_blocked_ip_address(direct_address):
             raise ValueError("Private, loopback, and link-local targets are not allowed.")
-        return validated_url
+        family = (
+            socket.AF_INET6
+            if isinstance(direct_address, ipaddress.IPv6Address)
+            else socket.AF_INET
+        )
+        return validated_url, ((int(family), 0, str(direct_address), port),)
 
     try:
         address_infos = await asyncio.to_thread(
             socket.getaddrinfo,
             hostname,
-            parsed.port or (443 if parsed.scheme == "https" else 80),
+            port,
             socket.AF_UNSPEC,
             socket.SOCK_STREAM,
         )
@@ -234,15 +281,29 @@ async def _validate_public_http_target(url: str) -> str:
             f"Could not resolve URL host during validation: {hostname}"
         ) from exc
 
-    for family, _, _, _, sockaddr in address_infos:
+    resolved_endpoints: list[tuple[int, int, str, int]] = []
+    for family, _, proto, _, sockaddr in address_infos:
         raw_address = sockaddr[0]
-        if family not in {socket.AF_INET, socket.AF_INET6}:
+        if family not in {socket.AF_INET, socket.AF_INET6} or not isinstance(
+            raw_address, str
+        ):
             continue
-        resolved_address = ipaddress.ip_address(raw_address)
+        resolved_address = ipaddress.ip_address(raw_address.split("%", 1)[0])
         if _is_blocked_ip_address(resolved_address):
             raise ValueError("Private, loopback, and link-local targets are not allowed.")
+        resolved_port = sockaddr[1] if len(sockaddr) > 1 and isinstance(sockaddr[1], int) else port
+        resolved_endpoints.append((int(family), int(proto), raw_address, resolved_port))
 
-    return validated_url
+    if not resolved_endpoints:
+        raise ValueError(f"Could not resolve URL host during validation: {hostname}")
+
+    return validated_url, tuple(resolved_endpoints)
+
+
+async def _validate_public_http_target(url: str) -> str:
+    """Reject loopback and private-network targets before any outbound fetch."""
+
+    return await validate_public_http_target(url)
 
 
 def _decode_body(body: bytes, encoding: str | None) -> str:

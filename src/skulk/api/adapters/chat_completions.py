@@ -1,11 +1,18 @@
 """OpenAI Chat Completions API adapter for converting requests/responses."""
 
 import base64
+import os
 import re
+import socket
+import ssl
 import time
 from collections.abc import AsyncGenerator
-from typing import Any, cast
+from typing import Any, Final, cast
+from urllib.parse import urljoin, urlsplit
 
+import aiohttp
+import certifi
+from aiohttp.abc import AbstractResolver, ResolveResult
 from fastapi import HTTPException
 from loguru import logger
 
@@ -30,7 +37,6 @@ from skulk.api.types import (
     ToolCall,
     Usage,
 )
-from skulk.download.download_utils import create_http_session
 from skulk.shared.constants import (
     CONTEXT_LENGTH_EXCEEDED_PREFIX,
     preferred_env_value,
@@ -95,15 +101,163 @@ def extract_base64_from_data_url(data_url: str) -> str:
     return data_url
 
 
+_MAX_REMOTE_IMAGE_BYTES: Final[int] = 20 * 1024 * 1024
+_MAX_IMAGE_REDIRECTS: Final[int] = 5
+
+
+class _PinnedHostResolver(AbstractResolver):
+    """Resolver pinned to pre-validated endpoints for a single HTTP hop."""
+
+    def __init__(
+        self,
+        expected_host: str,
+        endpoints: tuple[tuple[int, int, str, int], ...],
+    ) -> None:
+        self._expected_host = expected_host.rstrip(".").lower()
+        self._endpoints = endpoints
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: socket.AddressFamily = socket.AF_INET,
+    ) -> list[ResolveResult]:
+        normalized = host.rstrip(".").lower()
+        if normalized != self._expected_host:
+            raise OSError(f"Unexpected host during pinned fetch: {host}")
+        results: list[ResolveResult] = []
+        for ep_family, proto, ip_str, ep_port in self._endpoints:
+            if family not in (0, socket.AF_UNSPEC) and ep_family != family:
+                continue
+            results.append(
+                ResolveResult(
+                    hostname=host,
+                    host=ip_str,
+                    port=port or ep_port,
+                    family=ep_family,
+                    proto=proto,
+                    flags=socket.AI_NUMERICHOST | socket.AI_NUMERICSERV,
+                )
+            )
+        if not results:
+            raise OSError(f"No validated address matched family {family} for {host}")
+        return results
+
+    async def close(self) -> None:
+        return None
+
+
+def _create_pinned_image_session(
+    expected_host: str,
+    endpoints: tuple[tuple[int, int, str, int], ...],
+) -> aiohttp.ClientSession:
+    """Create a short-timeout aiohttp session pinned to validated endpoints.
+
+    Disables environment proxies (``trust_env=False``) and DNS caching so
+    outbound connections can neither re-resolve via DNS rebinding nor bypass
+    validation through proxy-side resolution, while preserving original
+    ``Host`` headers and TLS SNI/certificate hostname verification.
+    """
+    ssl_context = ssl.create_default_context(
+        cafile=os.getenv("SSL_CERT_FILE") or certifi.where()
+    )
+    connector = aiohttp.TCPConnector(
+        ssl=ssl_context,
+        resolver=_PinnedHostResolver(expected_host, endpoints),
+        use_dns_cache=False,
+    )
+    return aiohttp.ClientSession(
+        connector=connector,
+        trust_env=False,
+        timeout=aiohttp.ClientTimeout(
+            total=30,
+            connect=10,
+            sock_read=30,
+            sock_connect=10,
+        ),
+    )
+
+
 async def fetch_image_url(url: str) -> str:
+    """Fetch a remote HTTP(S) image with SSRF validation and bounded size.
+
+    Validates the initial URL and every redirect hop against public-network
+    restrictions, pins each outbound connection to the verified IP addresses
+    without proxy bypass (preserving ``Host`` and TLS SNI verification), and
+    streams the response with a 20 MiB cap to prevent memory exhaustion.
+
+    Args:
+        url: Remote HTTP or HTTPS image URL.
+
+    Returns:
+        Base64-encoded image bytes.
+
+    Raises:
+        HTTPException: 400 if the URL or a redirect target is rejected, or 413
+            if the remote image exceeds the size cap.
+    """
+    from skulk.tools.web_search import resolve_public_http_target
+
     headers = {"User-Agent": "skulk/1.0"}
-    async with (
-        create_http_session(timeout_profile="short") as session,
-        session.get(url, headers=headers) as resp,
-    ):
-        resp.raise_for_status()
-        data = await resp.read()
-        return base64.b64encode(data).decode("ascii")
+    current_url = url
+    for _ in range(_MAX_IMAGE_REDIRECTS + 1):
+        try:
+            validated_url, endpoints = await resolve_public_http_target(current_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        hostname = urlsplit(validated_url).hostname
+        if hostname is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Only absolute http:// and https:// URLs are supported.",
+            )
+        async with (
+            _create_pinned_image_session(hostname, endpoints) as session,
+            session.get(
+                validated_url, headers=headers, allow_redirects=False
+            ) as resp,
+        ):
+            if 300 <= resp.status < 400:
+                location = resp.headers.get("Location")
+                if not location:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Image redirect response missing Location header.",
+                    )
+                current_url = urljoin(validated_url, location)
+                continue
+            resp.raise_for_status()
+            content_length = resp.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    if int(content_length) > _MAX_REMOTE_IMAGE_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(
+                                "Remote image exceeds maximum allowed size "
+                                f"of {_MAX_REMOTE_IMAGE_BYTES} bytes."
+                            ),
+                        )
+                except ValueError:
+                    pass
+            chunks: list[bytes] = []
+            total_bytes = 0
+            async for chunk in resp.content.iter_chunked(65_536):
+                total_bytes += len(chunk)
+                if total_bytes > _MAX_REMOTE_IMAGE_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            "Remote image exceeds maximum allowed size "
+                            f"of {_MAX_REMOTE_IMAGE_BYTES} bytes."
+                        ),
+                    )
+                chunks.append(chunk)
+            return base64.b64encode(b"".join(chunks)).decode("ascii")
+    raise HTTPException(
+        status_code=400,
+        detail="Image URL exceeded maximum redirect limit.",
+    )
 
 
 def _forced_function_name(

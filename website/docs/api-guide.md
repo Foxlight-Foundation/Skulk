@@ -3746,12 +3746,17 @@ not a public model-download API.
 
 Asks the authoritative store to pull and atomically publish one artifact from a
 node cache. This endpoint is internal reconciliation transport and accepts only
-a direct loopback socket peer with no proxy-forwarding headers; remote or
-forwarded callers receive `403`. The JSON body contains:
+a direct loopback socket peer with no proxy-forwarding headers
+(`X-Forwarded-*`, `Forwarded`, `X-Real-IP`) and no browser cross-origin headers
+(`Origin`, `Sec-Fetch-Site`); remote, forwarded, or browser-originated callers
+receive `403`. Requests must send `Content-Type: application/json` (`415`
+otherwise). The JSON body contains:
 
 - `record`: the complete versioned `InstalledCardRecord`, including its full
   card and canonical file manifest.
-- `source_base_url`: the selected source node's internal export URL.
+- `source_base_url`: the selected source node's internal export URL, whose
+  resolved addresses must all belong to loopback or trusted-fabric networks
+  (redirects and proxy overrides are disabled).
 - `capability_token`: the short-lived token issued by that source for this
   manifest and target store node.
 - `target_node_id`: the store node identity bound into the capability.
@@ -3762,13 +3767,15 @@ sidecar, and publishes the new generation and rebuildable registry entry only
 after complete verification. A peer record claiming `registry_verified` is
 also rebound to the store host's independently TUF-verified card: its full
 immutable card payload, alias, repository, revision, selected file, artifact
-role, and companion ownership must agree before any transfer starts. A
-successful response is the resulting store registry entry. Malformed records
-or missing fields return `400`; invalid or expired capabilities, unsafe
-manifest paths, insufficient capacity, source loss, digest mismatch, or signed
-card disagreement fail the import without replacing the active generation.
-Operators do not call this endpoint directly; the reconciler uses it after
-`POST /store/internal/exports` grants a transfer.
+role, and companion ownership must agree before any transfer starts, and a
+non-`registry_verified` peer import cannot overwrite an existing
+`registry_verified` canonical store entry. A successful response is the
+resulting store registry entry. Malformed records or missing fields return
+`400`; invalid or expired capabilities, unsafe manifest paths, untrusted
+`source_base_url` targets, insufficient capacity, source loss, digest mismatch,
+or signed card disagreement fail the import without replacing the active
+generation. Operators do not call this endpoint directly; the reconciler uses
+it after `POST /store/internal/exports` grants a transfer.
 
 ### Store download status
 
@@ -3839,8 +3846,13 @@ The store host also runs a separate HTTP transport on `store_port` (default
 not its generated OpenAPI document. Workers and the store client use them for
 artifact transfer. Applications should use the public `/store/...` routes
 above. Keep the internal listener within the trusted cluster network; it does
-not provide paired-operator authentication. The import route additionally
-requires a direct loopback peer and refuses forwarding headers.
+not provide paired-operator authentication. Mutating internal store routes
+(`POST /models/{model_id}/download`, `DELETE /models/{model_id}/download`,
+`DELETE /models/{model_id}`, and `POST /imports`) reject proxy-forwarding
+headers (`X-Forwarded-*`, `Forwarded`, `X-Real-IP`) and browser cross-origin
+headers (`Origin`, `Sec-Fetch-Site`) with `403`. The import route additionally
+requires a direct loopback peer (`403`) and `Content-Type: application/json`
+(`415`).
 
 For these internal paths, encode the complete repository-style `model_id` as
 one URL component (`org%2Fmodel`). The server also supplies `HEAD` counterparts
@@ -4003,7 +4015,12 @@ them. The dashboard no longer presents a Model trust editor.
 Accepts a JSON configuration object directly, or wrapped as `{"config": {...}}`.
 This is a replacement-style update with the preservation exceptions below;
 send the full desired configuration rather than assuming every omitted field
-is retained. Invalid configuration returns `422`. Important behavior:
+is retained. All `PUT /config` mutations enforce operator-mutation
+authorization: direct loopback or trusted-fabric requests (without
+proxy-forwarding or cross-origin browser headers) are accepted, while public,
+reverse-proxied, or cross-origin browser requests require authenticated
+operator-gateway credentials and otherwise return `403`. Invalid configuration
+returns `422`. Important behavior:
 
 - if you omit `hf_token`, Skulk preserves the existing value
 - if you omit `logging`, Skulk preserves the existing logging config
