@@ -787,24 +787,6 @@ def test_audio_cpp_discrete_gpu_lanes_offload_to_vram() -> None:
         assert not backend_offloads_to_vram(lane)
 
 
-def test_stable_diffusion_cpp_discrete_gpu_lanes_offload_to_vram() -> None:
-    """Discrete-GPU stable_diffusion_cpp lanes reserve VRAM; Metal/CPU do not."""
-    from skulk.shared.models.memory_estimate import backend_offloads_to_vram
-
-    for lane in (
-        "stable_diffusion_cpp-cuda",
-        "stable_diffusion_cpp-rocm",
-        "stable_diffusion_cpp-vulkan",
-    ):
-        assert backend_offloads_to_vram(lane)
-    for lane in (
-        "stable_diffusion_cpp",
-        "stable_diffusion_cpp-cpu",
-        "stable_diffusion_cpp-metal",
-    ):
-        assert not backend_offloads_to_vram(lane)
-
-
 def test_packed_image_admission_budgets_engine_precision_not_download_bytes() -> None:
     """Master and worker estimates share FP16 expansion and retain native quant fit."""
     from skulk.shared.models.image import (

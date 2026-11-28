@@ -861,6 +861,46 @@ def test_shutdown_tears_down_server_before_joining_blocked_pool() -> None:
             t.join(timeout=5)
 
 
+def test_receiver_closure_marks_shutting_down_before_teardown_so_recovery_does_not_restart() -> None:
+    """Unexpected loop exit must set RunnerShuttingDown before teardown so active tasks do not reload."""
+    from skulk.shared.types.worker.runners import RunnerShutdown, RunnerShuttingDown
+
+    unblock = threading.Event()
+    reloads: list[str] = []
+
+    class _RecoveringHost(_FakeHost):
+        def _generate(self, task: Task) -> None:
+            self.started.release()
+            try:
+                assert unblock.wait(5)
+                self._is_cancelled(task.task_id)
+            finally:
+                if not isinstance(
+                    self.current_status, (RunnerShuttingDown, RunnerShutdown)
+                ):
+                    reloads.append("reloaded")
+
+        def _teardown_server(self) -> None:
+            unblock.set()
+
+    host = _RecoveringHost(max_concurrency=1)
+    _load_ready(host)
+    t = host.start()
+    try:
+        host.send(_gen())
+        assert host.started.acquire(timeout=5)
+        # Simulate unexpected receiver closure (EndOfStream) while task is active.
+        host._task_sender.close()
+        t.join(timeout=5)
+        assert not t.is_alive()
+        assert reloads == []
+        assert isinstance(host.current_status, RunnerShuttingDown)
+    finally:
+        unblock.set()
+        if t.is_alive():
+            t.join(timeout=5)
+
+
 def test_server_teardown_escalates_to_kill_on_interrupted_wait(
     monkeypatch: Any,
 ) -> None:

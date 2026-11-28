@@ -397,6 +397,14 @@ class ServedConcurrentDispatch:
                             self.update_status(self.current_status)
                             self._retire_task_id(task.task_id)
         finally:
+            # Mark unexpected exits (receiver closure / dispatch exception) as
+            # shutting down BEFORE tearing down the server so unwinding worker
+            # threads (e.g. audio.cpp's recovery finally block) do not spawn a
+            # replacement GPU server during pool drain.
+            if not isinstance(
+                self.current_status, (RunnerShuttingDown, RunnerShutdown)
+            ):
+                self.current_status = RunnerShuttingDown()
             # Tear down the child GPU server BEFORE waiting on the thread pool:
             # if a worker thread is blocked on a wedged HTTP read/prefill, waiting
             # for pool.shutdown(wait=True) first prevents teardown from ever
