@@ -13,19 +13,39 @@
 # published again.
 #
 # Build runs on pull requests and dev pushes that touch the bindings, the
-# workspace manifests or this workflow, and on manual dispatch without
-# `publish`. Each build smoke-tests its wheel and records the wheel's SHA-256.
+# workspace manifests, this workflow or its scripts, and on manual dispatch
+# without `sign` or `publish`. Each build smoke-tests its wheel and records the
+# wheel's SHA-256. The same run then rehearses signing with a throwaway
+# certificate, so every step of the signing job except Azure is exercised
+# without credentials.
 #
-# PUBLISH never builds. A manual dispatch with publish=true promotes the wheel
-# of an earlier successful run of this workflow, named by `publish_run_id` and
-# `publish_sha256`, so the bytes that were tested are the bytes that ship. The
-# candidate must come from a manual dispatch or a push (a pull-request run
-# builds a merge commit, not the branch), and its Rust sources must be
-# identical to the ref the publication is dispatched from:
+# SIGN never builds. Windows can refuse to load an unsigned library (Smart App
+# Control does), so the wheel's native library is signed as FoxlightAI Inc.
+# with Azure Artifact Signing. A manual dispatch with sign=true takes the wheel
+# of an earlier successful run, named by `sign_run_id` and `sign_sha256`, signs
+# the library, and refuses the result unless Windows calls the signature valid
+# and timestamped and the signed library is the tested library plus a
+# signature and nothing else. It then installs the signed wheel, starts the
+# swarm with it, and records its SHA-256. The job runs in the
+# `windows-signing` environment, which must require a reviewer and be limited
+# to release branches, and signs in to Azure with GitHub OIDC (no stored
+# secret).
+#
+# PUBLISH never builds or signs. A manual dispatch with publish=true promotes
+# the wheel of an earlier successful signing run, named by `publish_run_id` and
+# `publish_sha256`, so the bytes that were tested are the bytes that ship. An
+# unsigned wheel is published only when the dispatch also says
+# publish_unsigned=true, with `publish_run_id` naming the build run.
+#
+# The candidate of a sign or publish dispatch must come from a manual dispatch
+# or a push (a pull-request run builds a merge commit, not the branch), and its
+# Rust sources must be identical to the ref the dispatch runs on:
 #
 #   gh workflow run bindings-wheel.yml --ref <branch>
+#   gh workflow run bindings-wheel.yml --ref <branch> -f sign=true \
+#     -f sign_run_id=<build run> -f sign_sha256=<sha256>
 #   gh workflow run bindings-wheel.yml --ref <branch> -f publish=true \
-#     -f publish_run_id=<run> -f publish_sha256=<sha256>
+#     -f publish_run_id=<signing run> -f publish_sha256=<sha256>
 name: bindings-wheel
 
 permissions:
@@ -34,21 +54,40 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
+      sign:
+        description: "Sign a previously built and tested wheel as FoxlightAI Inc., without rebuilding"
+        type: boolean
+        default: false
+      sign_run_id:
+        description: "Successful bindings-wheel run that built the wheel to sign"
+        type: string
+        default: ""
+      sign_sha256:
+        description: "SHA-256 of that run's wheel"
+        type: string
+        default: ""
       publish:
-        description: "Promote a previously built and tested wheel to the Foxlight R2 index, without rebuilding"
+        description: "Promote a previously signed and tested wheel to the Foxlight R2 index, without rebuilding"
         type: boolean
         default: false
       publish_run_id:
-        description: "Successful bindings-wheel run that built the wheel"
+        description: "Successful bindings-wheel run that signed the wheel (the build run with publish_unsigned)"
         type: string
         default: ""
       publish_sha256:
         description: "SHA-256 of that run's wheel"
         type: string
         default: ""
+      publish_unsigned:
+        description: "Publish the unsigned wheel of a build run (Windows may refuse to load it)"
+        type: boolean
+        default: false
   pull_request:
     paths:
       - ".github/workflows/bindings-wheel.yml"
+      - "scripts/sign_bindings_wheel.py"
+      - "scripts/smoke_bindings_wheel.py"
+      - "scripts/tests/test_sign_bindings_wheel.py"
       - "rust/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -56,13 +95,16 @@ on:
     branches: [dev]
     paths:
       - ".github/workflows/bindings-wheel.yml"
+      - "scripts/sign_bindings_wheel.py"
+      - "scripts/smoke_bindings_wheel.py"
+      - "scripts/tests/test_sign_bindings_wheel.py"
       - "rust/**"
       - "Cargo.toml"
       - "Cargo.lock"
 
 jobs:
   build:
-    if: github.event_name != 'workflow_dispatch' || !inputs.publish
+    if: github.event_name != 'workflow_dispatch' || (!inputs.sign && !inputs.publish)
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
@@ -111,30 +153,7 @@ jobs:
           set -euo pipefail
           uv venv --python "${{ steps.python.outputs.python-path }}" smoke
           uv pip install --python smoke/Scripts/python.exe dist/*.whl
-          smoke/Scripts/python.exe - <<'PY'
-          import asyncio
-
-          import skulk_pyo3_bindings as bindings
-
-
-          async def main() -> None:
-              handle = bindings.NetworkingHandle(bindings.Keypair.generate(), listen_port=0)
-
-              async def read_events() -> None:
-                  # The swarm only processes commands while its event stream
-                  # is being read.
-                  while True:
-                      await handle.recv()
-
-              reader = asyncio.create_task(read_events())
-              addresses = await asyncio.wait_for(handle.listen_addresses(), 30)
-              assert await asyncio.wait_for(handle.gossipsub_subscribe("smoke"), 30)
-              reader.cancel()
-              print("listening on", addresses)
-
-
-          asyncio.run(main())
-          PY
+          smoke/Scripts/python.exe scripts/smoke_bindings_wheel.py
 
       - name: Record the wheel's SHA-256
         shell: bash
@@ -150,26 +169,113 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  publish-index:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
+  rehearse-signing:
+    # Everything the signing job does, except Azure: a certificate made here
+    # and trusted by nobody signs the wheel this run built. That proves the
+    # checks read a real signature (Windows must refuse this one), that the
+    # signed library is the built library plus a signature, and that the
+    # rebuilt wheel installs and runs. The rehearsed wheel is thrown away.
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Test the signing checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --isolated --no-project --python "${{ steps.python.outputs.python-path }}" --with pytest==9.1.1 \
+            pytest -p no:cacheprovider --noconftest --import-mode=importlib scripts/tests/test_sign_bindings_wheel.py
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bindings-wheel-win_amd64
+          path: dist
+
+      - name: Unpack the wheel as the signing job does
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/skulk_pyo3_bindings/pyproject.toml)"
+          wheel="dist/skulk_pyo3_bindings-${version}-cp313-cp313-win_amd64.whl"
+          sha256="$(sha256sum "$wheel" | cut -d' ' -f1)"
+          python scripts/sign_bindings_wheel.py check --wheel "$wheel" --unsigned
+          python scripts/sign_bindings_wheel.py unpack --wheel "$wheel" --sha256 "$sha256" \
+            --version "$version" --target "$RUNNER_TEMP/rehearsal"
+
+      - name: Sign the library with a certificate nobody trusts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'rehearsal'
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw 'signtool.exe was not found on this runner' }
+          $certificate = New-SelfSignedCertificate -Type CodeSigningCert `
+            -Subject 'CN=Skulk signing rehearsal' -CertStoreLocation Cert:\CurrentUser\My `
+            -NotAfter (Get-Date).AddDays(1)
+          foreach ($relative in Get-Content -LiteralPath (Join-Path $root 'signing-catalog.txt')) {
+            & $signtool.FullName sign /fd SHA256 /sha1 $certificate.Thumbprint (Join-Path $root $relative)
+            if ($LASTEXITCODE -ne 0) { throw "signtool could not sign $relative" }
+          }
+
+      - name: Require Windows to refuse that signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python scripts/sign_bindings_wheel.py verify --unpacked "$RUNNER_TEMP/rehearsal" 2> refusal.txt; then
+            echo "the check accepted a signature made with a certificate nobody trusts" >&2
+            exit 1
+          fi
+          cat refusal.txt
+          grep -q 'signature status' refusal.txt
+
+      - name: Rebuild the wheel around the signed library, install it and start the swarm
+        shell: bash
+        env:
+          SKULK_LIBP2P_NAMESPACE: bindings-wheel-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/skulk_pyo3_bindings/pyproject.toml)"
+          name="skulk_pyo3_bindings-${version}-cp313-cp313-win_amd64.whl"
+          python scripts/sign_bindings_wheel.py pack --original "dist/$name" \
+            --unpacked "$RUNNER_TEMP/rehearsal" --output "$RUNNER_TEMP/rehearsed"
+          python scripts/sign_bindings_wheel.py check --wheel "$RUNNER_TEMP/rehearsed/$name"
+          uv venv --python "${{ steps.python.outputs.python-path }}" smoke
+          uv pip install --python smoke/Scripts/python.exe "$RUNNER_TEMP/rehearsed/$name"
+          smoke/Scripts/python.exe scripts/smoke_bindings_wheel.py
+
+  candidate:
+    # A sign or publish dispatch names the run whose wheel it takes. That run
+    # must have succeeded, belong to this workflow, have built a branch, and
+    # have compiled the Rust sources this ref carries.
+    if: github.event_name == 'workflow_dispatch' && (inputs.sign || inputs.publish)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     permissions:
       actions: read
       contents: read
-    # Every wheel workflow regenerates the one shared index from the bucket's
-    # contents, so publications serialize across workflows.
-    concurrency:
-      group: foxlight-engine-wheel-index-publication
-      cancel-in-progress: false
     steps:
+      - name: Refuse a dispatch that asks to sign and publish at once
+        if: inputs.sign && inputs.publish
+        run: |
+          echo "sign and publish are separate dispatches: publish the signing run's wheel" >&2
+          exit 1
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Validate the candidate run and its Rust sources
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN_ID: ${{ inputs.publish_run_id }}
+          SOURCE_RUN_ID: ${{ inputs.sign && inputs.sign_run_id || inputs.publish_run_id }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
@@ -183,22 +289,179 @@ jobs:
           source_sha="$(gh api "$run" --jq '.head_sha')"
           git fetch --no-tags origin "$source_sha"
           # The wheel is compiled from these paths only. They must be the same
-          # at the candidate's commit and at the ref this publication runs on.
+          # at the candidate's commit and at the ref this dispatch runs on.
           for path in rust Cargo.toml Cargo.lock; do
             if [ "$(git rev-parse "$source_sha:$path")" != "$(git rev-parse "HEAD:$path")" ]; then
               echo "$path differs between candidate $source_sha and $GITHUB_SHA" >&2
               exit 1
             fi
           done
+
+  sign:
+    needs: candidate
+    if: github.event_name == 'workflow_dispatch' && inputs.sign && !inputs.publish
+    runs-on: windows-2025
+    environment: windows-signing
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Require the Artifact Signing settings
+        shell: bash
+        env:
+          WINDOWS_SIGNING_AZURE_TENANT_ID: ${{ vars.WINDOWS_SIGNING_AZURE_TENANT_ID }}
+          WINDOWS_SIGNING_AZURE_CLIENT_ID: ${{ vars.WINDOWS_SIGNING_AZURE_CLIENT_ID }}
+          WINDOWS_SIGNING_ENDPOINT: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
+          WINDOWS_SIGNING_ACCOUNT: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
+          WINDOWS_SIGNING_CERTIFICATE_PROFILE: ${{ vars.WINDOWS_SIGNING_CERTIFICATE_PROFILE }}
+        run: python scripts/sign_bindings_wheel.py config
+
       - uses: actions/download-artifact@v4
         with:
           name: bindings-wheel-win_amd64
+          path: dist
+          run-id: ${{ inputs.sign_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Check the tested wheel and unpack it, before signing in to Azure
+        shell: bash
+        env:
+          EXPECTED_SHA256: ${{ inputs.sign_sha256 }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/skulk_pyo3_bindings/pyproject.toml)"
+          test -n "$version"
+          expected="skulk_pyo3_bindings-${version}-cp313-cp313-win_amd64.whl"
+          found="$(cd dist && ls)"
+          if [ "$found" != "$expected" ]; then
+            echo "expected only $expected, found: $found" >&2
+            exit 1
+          fi
+          python scripts/sign_bindings_wheel.py unpack --wheel "dist/$expected" --sha256 "$EXPECTED_SHA256" \
+            --version "$version" --target "$RUNNER_TEMP/signing"
+
+      - name: Sign in to Azure with GitHub OIDC
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.WINDOWS_SIGNING_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.WINDOWS_SIGNING_AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Sign the native library
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.WINDOWS_SIGNING_CERTIFICATE_PROFILE }}
+          files-catalog: ${{ runner.temp }}\signing\signing-catalog.txt
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Skulk networking bindings
+          description-url: https://github.com/Foxlight-Foundation/Skulk
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Sign out of Azure
+        if: always()
+        shell: bash
+        run: az logout || true
+
+      - name: Require a valid, timestamped signature of the publisher
+        shell: bash
+        run: python scripts/sign_bindings_wheel.py verify --unpacked "$RUNNER_TEMP/signing"
+
+      - name: Rebuild the wheel around the signed library
+        id: pack
+        shell: bash
+        env:
+          TESTED_RUN_ID: ${{ inputs.sign_run_id }}
+          TESTED_SHA256: ${{ inputs.sign_sha256 }}
+        run: |
+          set -euo pipefail
+          name="$(cd dist && ls)"
+          sha256="$(python scripts/sign_bindings_wheel.py pack --original "dist/$name" \
+            --unpacked "$RUNNER_TEMP/signing" --output "$RUNNER_TEMP/signed")"
+          python scripts/sign_bindings_wheel.py check --wheel "$RUNNER_TEMP/signed/$name"
+          mkdir signed record
+          cp "$RUNNER_TEMP/signed/$name" signed/
+          cp "$RUNNER_TEMP/signed/signing-record.json" record/
+          printf 'name=%s\n' "$name" >> "$GITHUB_OUTPUT"
+          {
+            printf '## Signed bindings wheel\n\n'
+            printf 'Tested wheel: `%s` from run %s\n\n' "$TESTED_SHA256" "$TESTED_RUN_ID"
+            printf 'Signed wheel: `%s  %s`\n' "$sha256" "$name"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install the signed wheel and start the swarm
+        shell: bash
+        env:
+          SKULK_LIBP2P_NAMESPACE: bindings-wheel-signed-${{ github.run_id }}-${{ github.run_attempt }}
+          WHEEL_NAME: ${{ steps.pack.outputs.name }}
+        run: |
+          set -euo pipefail
+          uv venv --python "${{ steps.python.outputs.python-path }}" smoke
+          uv pip install --python smoke/Scripts/python.exe "signed/$WHEEL_NAME"
+          smoke/Scripts/python.exe scripts/smoke_bindings_wheel.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-wheel-win_amd64-signed
+          path: signed/*.whl
+          if-no-files-found: error
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-wheel-win_amd64-signing-record
+          path: record/signing-record.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-index:
+    needs: candidate
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && !inputs.sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    # Every wheel workflow regenerates the one shared index from the bucket's
+    # contents, so publications serialize across workflows.
+    concurrency:
+      group: foxlight-engine-wheel-index-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.publish_unsigned && 'bindings-wheel-win_amd64' || 'bindings-wheel-win_amd64-signed' }}
           path: dist
           run-id: ${{ inputs.publish_run_id }}
           github-token: ${{ github.token }}
       - name: Verify the selected wheel
         env:
           EXPECTED_SHA256: ${{ inputs.publish_sha256 }}
+          PUBLISH_UNSIGNED: ${{ inputs.publish_unsigned }}
         run: |
           set -euo pipefail
           [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
@@ -211,6 +474,14 @@ jobs:
             exit 1
           fi
           echo "$EXPECTED_SHA256  dist/$expected" | sha256sum --check --strict
+          # A signed wheel carries a signature on its native library; Windows
+          # judged that signature in the signing run. An unsigned wheel is
+          # published only on request and must carry none.
+          if [ "$PUBLISH_UNSIGNED" = true ]; then
+            python3 scripts/sign_bindings_wheel.py check --wheel "dist/$expected" --unsigned
+          else
+            python3 scripts/sign_bindings_wheel.py check --wheel "dist/$expected"
+          fi
       - uses: astral-sh/setup-uv@v6
       - name: Publish the wheel to the Foxlight index
         env:
