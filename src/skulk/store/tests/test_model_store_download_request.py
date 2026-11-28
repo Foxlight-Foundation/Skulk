@@ -358,13 +358,17 @@ async def test_peer_import_rejects_public_source_url_and_verified_downgrade(
     )
     verified_record = build_installed_card_record(artifact, trusted_card)
 
-    with pytest.raises(ValueError, match="loopback or trusted-fabric peer"):
-        await store.import_peer_artifact(
-            verified_record,
-            source_base_url="https://attacker.example",
-            capability_token="tok",
-            target_node_id="store-node",
-        )
+    for untrusted_url in (
+        "https://attacker.example",
+        "http://134744072:52415",
+    ):
+        with pytest.raises(ValueError, match="loopback or trusted-fabric peer"):
+            await store.import_peer_artifact(
+                verified_record,
+                source_base_url=untrusted_url,
+                capability_token="tok",
+                target_node_id="store-node",
+            )
 
     store.register_model(
         str(trusted_card.model_id),
@@ -381,6 +385,54 @@ async def test_peer_import_rejects_public_source_url_and_verified_downgrade(
             capability_token="tok",
             target_node_id="store-node",
         )
+
+
+@pytest.mark.anyio
+async def test_peer_import_disables_redirects_and_env_proxies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Peer import refuses HTTP redirects instead of following them to external hosts."""
+    from aiohttp import web
+
+    import skulk.store.model_store as model_store_module
+    from skulk.store.model_store import ModelStore
+
+    monkeypatch.setattr(model_store_module, "MINIMUM_STAGING_FREE_DISK_BYTES", 0)
+    store_root = tmp_path / "store"
+    store = ModelStore(store_root)
+    trusted_card = _registry_card()
+    source_artifact = tmp_path / "source"
+    source_artifact.mkdir(parents=True)
+    (source_artifact / "model.safetensors").write_bytes(b"weights")
+    (source_artifact / ".skulk-source-revision").write_text(
+        f"{trusted_card.source_revision}\n"
+    )
+    record = build_installed_card_record(source_artifact, trusted_card)
+
+    async def redirect_handler(_request: web.Request) -> web.StreamResponse:
+        raise web.HTTPFound(location="https://attacker.example/weights")
+
+    app = web.Application()
+    app.router.add_get(
+        "/store/internal/exports/{capability_token}/{path:.*}",
+        redirect_handler,
+    )
+    from aiohttp.test_utils import TestServer
+
+    server = TestServer(app, host="127.0.0.1")
+    await server.start_server()
+    try:
+        base_url = str(server.make_url("")).rstrip("/")
+        with pytest.raises(RuntimeError, match="HTTP 302"):
+            await store.import_peer_artifact(
+                record,
+                source_base_url=base_url,
+                capability_token="tok",
+                target_node_id="store-node",
+            )
+    finally:
+        await server.close()
 
 
 @pytest.mark.anyio

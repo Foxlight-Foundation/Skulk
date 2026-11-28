@@ -1914,40 +1914,122 @@ class ModelStore:
         """
 
         import ipaddress
+        import socket
         from urllib.parse import quote, urlsplit
+
+        from aiohttp.abc import AbstractResolver, ResolveResult
+
+        def _is_trusted_peer_ip(
+            addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
+        ) -> bool:
+            if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+                addr = addr.ipv4_mapped
+            if addr.is_multicast or addr.is_unspecified:
+                return False
+            return (
+                addr.is_loopback
+                or addr.is_private
+                or addr.is_link_local
+                or (
+                    isinstance(addr, ipaddress.IPv4Address)
+                    and addr in ipaddress.ip_network("100.64.0.0/10")
+                )
+            )
 
         parsed = urlsplit(source_base_url)
         if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
             raise ValueError("source_base_url must be an HTTP(S) node API")
-        host = parsed.hostname.rstrip(".").lower()
-        trusted_source = False
+        raw_host = parsed.hostname
+        host = raw_host.rstrip(".").lower()
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        pinned_endpoints: list[tuple[int, int, str, int]] = []
+        literal_addr: ipaddress.IPv4Address | ipaddress.IPv6Address | None
         try:
-            addr = ipaddress.ip_address(host)
+            literal_addr = ipaddress.ip_address(host.split("%", 1)[0])
         except ValueError:
-            # Accept localhost, single-label cluster hostnames, mDNS (.local),
-            # and Tailscale MagicDNS (.ts.net); reject external public domains.
-            trusted_source = (
-                host == "localhost"
-                or "." not in host
-                or host.endswith((".local", ".ts.net"))
-            )
-        else:
-            if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-                addr = addr.ipv4_mapped
-            if not (addr.is_multicast or addr.is_unspecified):
-                trusted_source = (
-                    addr.is_loopback
-                    or addr.is_private
-                    or addr.is_link_local
-                    or (
-                        isinstance(addr, ipaddress.IPv4Address)
-                        and addr in ipaddress.ip_network("100.64.0.0/10")
-                    )
+            literal_addr = None
+
+        if literal_addr is not None:
+            if not _is_trusted_peer_ip(literal_addr):
+                raise ValueError(
+                    "source_base_url must target a loopback or trusted-fabric peer"
                 )
-        if not trusted_source:
+            family = (
+                socket.AF_INET6
+                if isinstance(literal_addr, ipaddress.IPv6Address)
+                else socket.AF_INET
+            )
+            pinned_endpoints.append((int(family), 0, str(literal_addr), port))
+        else:
+            try:
+                address_infos = await asyncio.to_thread(
+                    socket.getaddrinfo,
+                    raw_host,
+                    port,
+                    socket.AF_UNSPEC,
+                    socket.SOCK_STREAM,
+                )
+            except socket.gaierror as exc:
+                raise ValueError(
+                    "source_base_url must target a loopback or trusted-fabric peer"
+                ) from exc
+            for family, _, proto, _, sockaddr in address_infos:
+                raw_address = sockaddr[0]
+                if family not in {socket.AF_INET, socket.AF_INET6} or not isinstance(
+                    raw_address, str
+                ):
+                    continue
+                resolved = ipaddress.ip_address(raw_address.split("%", 1)[0])
+                if not _is_trusted_peer_ip(resolved):
+                    raise ValueError(
+                        "source_base_url must target a loopback or trusted-fabric peer"
+                    )
+                resolved_port = (
+                    sockaddr[1]
+                    if len(sockaddr) > 1 and isinstance(sockaddr[1], int)
+                    else port
+                )
+                pinned_endpoints.append(
+                    (int(family), int(proto), raw_address, resolved_port)
+                )
+        if not pinned_endpoints:
             raise ValueError(
                 "source_base_url must target a loopback or trusted-fabric peer"
             )
+
+        expected_host = host
+
+        class _PinnedPeerResolver(AbstractResolver):
+            async def resolve(
+                self,
+                host: str,
+                port: int = 0,
+                family: socket.AddressFamily = socket.AF_INET,
+            ) -> list[ResolveResult]:
+                if host.rstrip(".").lower() != expected_host:
+                    raise OSError(f"Unexpected peer export host: {host}")
+                results: list[ResolveResult] = []
+                for ep_family, proto, ip_str, ep_port in pinned_endpoints:
+                    if family not in (0, socket.AF_UNSPEC) and ep_family != family:
+                        continue
+                    results.append(
+                        ResolveResult(
+                            hostname=host,
+                            host=ip_str,
+                            port=port or ep_port,
+                            family=ep_family,
+                            proto=proto,
+                            flags=socket.AI_NUMERICHOST | socket.AI_NUMERICSERV,
+                        )
+                    )
+                if not results:
+                    raise OSError(
+                        f"No validated peer address matched family {family}"
+                    )
+                return results
+
+            async def close(self) -> None:
+                return None
         async with self._download_transfer_lock:
             tombstones = read_reconciliation_tombstones(self._store_path)
             if record.artifact_model_id in tombstones or (
@@ -2032,7 +2114,15 @@ class ModelStore:
                     )
             headers = {"X-Skulk-Store-Node": target_node_id}
             timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=120)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            connector = aiohttp.TCPConnector(
+                resolver=_PinnedPeerResolver(),
+                use_dns_cache=False,
+            )
+            async with aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+                trust_env=False,
+            ) as session:
                 for manifest_entry in record.files:
                     destination = temporary / manifest_entry.path
                     await aios.makedirs(str(destination.parent), exist_ok=True)
@@ -2058,7 +2148,9 @@ class ModelStore:
                         f"{source_base_url.rstrip('/')}/store/internal/exports/"
                         f"{capability_token}/{relative}"
                     )
-                    async with session.get(url, headers=request_headers) as response:
+                    async with session.get(
+                        url, headers=request_headers, allow_redirects=False
+                    ) as response:
                         if response.status not in ({206} if offset else {200, 206}):
                             raise RuntimeError(
                                 f"peer export returned HTTP {response.status}"

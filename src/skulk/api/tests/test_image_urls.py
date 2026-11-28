@@ -99,16 +99,62 @@ async def test_fetch_image_url_rejects_oversized_responses(
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-    async def _allow_public(url: str) -> str:
-        return url
+    async def _allow_public(
+        url: str,
+    ) -> tuple[str, tuple[tuple[int, int, str, int], ...]]:
+        import socket
 
-    def _fake_session(**_kw: object) -> _FakeSession:
+        return url, ((int(socket.AF_INET), 0, "93.184.216.34", 443),)
+
+    captured_pin: list[tuple[str, tuple[tuple[int, int, str, int], ...]]] = []
+
+    def _fake_session(
+        expected_host: str,
+        endpoints: tuple[tuple[int, int, str, int], ...],
+    ) -> _FakeSession:
+        captured_pin.append((expected_host, endpoints))
         return _FakeSession()
 
-    mp.setattr("skulk.tools.web_search.validate_public_http_target", _allow_public)
-    mp.setattr(adapter, "create_http_session", _fake_session)
+    mp.setattr("skulk.tools.web_search.resolve_public_http_target", _allow_public)
+    mp.setattr(adapter, "_create_pinned_image_session", _fake_session)
     mp.setattr(adapter, "_MAX_REMOTE_IMAGE_BYTES", 100)
 
     with pytest.raises(HTTPException) as exc_info:
         await adapter.fetch_image_url("https://93.184.216.34/big.png")
     assert exc_info.value.status_code == 413
+    assert captured_pin == [
+        ("93.184.216.34", ((2, 0, "93.184.216.34", 443),))
+    ]
+
+
+async def test_pinned_host_resolver_and_session_disable_proxy_and_rebinding() -> None:
+    """Image fetch session pins validated IPs and disables proxy/DNS cache."""
+    import socket
+
+    import aiohttp
+    import pytest
+
+    import skulk.api.adapters.chat_completions as adapter
+
+    resolver = adapter._PinnedHostResolver(
+        "images.example",
+        ((int(socket.AF_INET), 0, "93.184.216.34", 443),),
+    )
+    resolved = await resolver.resolve("images.example", 443, socket.AF_INET)
+    assert len(resolved) == 1
+    assert resolved[0]["host"] == "93.184.216.34"
+    assert resolved[0]["hostname"] == "images.example"
+
+    with pytest.raises(OSError, match="Unexpected host"):
+        await resolver.resolve("127.0.0.1", 443, socket.AF_INET)
+
+    session = adapter._create_pinned_image_session(
+        "images.example",
+        ((int(socket.AF_INET), 0, "93.184.216.34", 443),),
+    )
+    try:
+        assert session._trust_env is False
+        assert isinstance(session.connector, aiohttp.TCPConnector)
+        assert session.connector._use_dns_cache is False
+    finally:
+        await session.close()
