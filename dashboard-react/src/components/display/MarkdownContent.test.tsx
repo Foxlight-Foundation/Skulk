@@ -76,12 +76,15 @@ describe('MarkdownContent', () => {
       '[bad-md](javascript:window.__skulkXss=5)',
       '<a href="javascript:window.__skulkXss=6">bad-html</a>',
       '<a href="data:text/html,<script>window.__skulkXss=7</script>">bad-data</a>',
+      '<a href="https://foxlight.ai" style="position:fixed;inset:0;z-index:2147483647">styled-overlay</a>',
     ].join('\n\n');
 
     const el = await renderMarkdown(payload);
 
     expect((window as unknown as Record<string, unknown>).__skulkXss).toBeUndefined();
     expect(el.querySelector('script, iframe, style, form, input, foreignObject')).toBeNull();
+    const styledLink = [...el.querySelectorAll('a')].find((a) => a.textContent === 'styled-overlay');
+    expect(styledLink?.getAttribute('style')).toBeNull();
     for (const node of el.querySelectorAll('*')) {
       for (const attr of [...node.attributes]) {
         expect(attr.name.toLowerCase().startsWith('on')).toBe(false);

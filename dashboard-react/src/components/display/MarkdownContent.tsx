@@ -36,6 +36,16 @@ const MARKDOWN_SANITIZE_CONFIG = {
   ALLOWED_URI_REGEXP: SAFE_MARKDOWN_URI_REGEXP,
 };
 
+/**
+ * Strip inline `style` attributes from untrusted Markdown HTML before KaTeX
+ * renders so assistant output cannot inject overlay positioning (`position:fixed`),
+ * while the post-KaTeX pass preserves KaTeX's own layout styles.
+ */
+const INITIAL_MARKDOWN_SANITIZE_CONFIG = {
+  ...MARKDOWN_SANITIZE_CONFIG,
+  FORBID_ATTR: [...MARKDOWN_SANITIZE_CONFIG.FORBID_ATTR, 'style'],
+};
+
 export interface MarkdownContentProps {
   content: string;
   className?: string;
@@ -134,7 +144,7 @@ function processMarkdown(content: string, t: SkulkTranslate): ProcessedMarkdown 
   const preprocessed = preprocessLaTeX(content);
   let html = DOMPurify.sanitize(
     marked.parse(preprocessed) as string,
-    MARKDOWN_SANITIZE_CONFIG,
+    INITIAL_MARKDOWN_SANITIZE_CONFIG,
   );
 
   // Render math expressions
