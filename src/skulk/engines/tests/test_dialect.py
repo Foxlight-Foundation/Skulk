@@ -1,5 +1,7 @@
 """The engine-package chat dialect's limits, as the API and the runner both read them."""
 
+from typing import Any
+
 import pytest
 
 from skulk.engines.dialect import (
@@ -16,7 +18,10 @@ from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 
 _MODEL = ModelId("org/chat")
-_TOOL = {"type": "function", "function": {"name": "get_time", "parameters": {}}}
+_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {"name": "get_time", "parameters": {}},
+}
 
 
 def _params(**fields: object) -> TextGenerationTaskParams:

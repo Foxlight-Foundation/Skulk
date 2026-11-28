@@ -7,6 +7,8 @@ dispatch point therefore refuses first, and only when nothing but engine
 packages serves the model.
 """
 
+from typing import Any
+
 import pytest
 from fastapi import HTTPException
 
@@ -30,7 +32,10 @@ from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import Receiver, channel
 
 _MODEL = ModelId("org/chat")
-_TOOL = {"type": "function", "function": {"name": "get_time", "parameters": {}}}
+_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {"name": "get_time", "parameters": {}},
+}
 
 
 def _instance(name: str, backend: str | None) -> MlxRingInstance:
