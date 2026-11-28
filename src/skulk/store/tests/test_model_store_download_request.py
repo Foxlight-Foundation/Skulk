@@ -279,10 +279,107 @@ def test_peer_import_loopback_guard_rejects_forwarding_headers() -> None:
             "127.0.0.1",
             {"X-Forwarded-For": "203.0.113.10"},
         )
+    with pytest.raises(web.HTTPForbidden, match="proxy forwarding"):
+        model_store_server_module._require_loopback_peer_import(
+            "127.0.0.1",
+            {"x-forwarded-proto": "https"},
+        )
+    with pytest.raises(web.HTTPForbidden, match="browser cross-origin"):
+        model_store_server_module._require_loopback_peer_import(
+            "127.0.0.1",
+            {"Origin": "https://evil.example"},
+        )
+    with pytest.raises(web.HTTPForbidden, match="browser cross-origin"):
+        model_store_server_module._require_loopback_peer_import(
+            "127.0.0.1",
+            {"Sec-Fetch-Site": "cross-site"},
+        )
     with pytest.raises(web.HTTPForbidden, match="loopback-only"):
         model_store_server_module._require_loopback_peer_import(
             "203.0.113.10",
             {},
+        )
+
+
+@pytest.mark.anyio
+async def test_store_server_mutating_routes_reject_browser_csrf_and_non_json_imports(
+    tmp_path: Path,
+) -> None:
+    """Mutating store endpoints reject browser headers and non-JSON /imports."""
+    from aiohttp.test_utils import make_mocked_request
+
+    from skulk.store.model_store import ModelStore
+
+    store = ModelStore(tmp_path / "store")
+    server = ModelStoreServer(store, host="127.0.0.1", port=0)
+
+    non_json_import = make_mocked_request(
+        "POST",
+        "/imports",
+        headers={"Content-Type": "text/plain"},
+    ).clone(remote="127.0.0.1")
+    with pytest.raises(web.HTTPUnsupportedMediaType, match="application/json"):
+        await server._handle_peer_import(non_json_import)
+
+    for handler, method, path in (
+        (server._handle_delete_model, "DELETE", "/models/org%2Fmodel"),
+        (server._handle_download_request, "POST", "/models/org%2Fmodel/download"),
+        (
+            server._handle_download_cancellation,
+            "DELETE",
+            "/models/org%2Fmodel/download",
+        ),
+    ):
+        req = make_mocked_request(
+            method,
+            path,
+            headers={"Origin": "https://evil.example"},
+            match_info={"model_id": "org/model"},
+        )
+        with pytest.raises(web.HTTPForbidden, match="browser cross-origin"):
+            await handler(req)
+
+
+@pytest.mark.anyio
+async def test_peer_import_rejects_public_source_url_and_verified_downgrade(
+    tmp_path: Path,
+) -> None:
+    """Peer import refuses public hosts and cannot downgrade verified canonical entries."""
+    from skulk.store.model_store import ModelStore
+
+    store_root = tmp_path / "store"
+    store = ModelStore(store_root)
+    trusted_card = _registry_card()
+    artifact = store_root / "org--model"
+    artifact.mkdir(parents=True)
+    (artifact / "model.safetensors").write_bytes(b"weights")
+    (artifact / ".skulk-source-revision").write_text(
+        f"{trusted_card.source_revision}\n"
+    )
+    verified_record = build_installed_card_record(artifact, trusted_card)
+
+    with pytest.raises(ValueError, match="loopback or trusted-fabric peer"):
+        await store.import_peer_artifact(
+            verified_record,
+            source_base_url="https://attacker.example",
+            capability_token="tok",
+            target_node_id="store-node",
+        )
+
+    store.register_model(
+        str(trusted_card.model_id),
+        artifact,
+        ["model.safetensors"],
+        7,
+        installed_card=verified_record,
+    )
+    custom_record = verified_record.model_copy(update={"verification": "custom"})
+    with pytest.raises(ValueError, match="cannot overwrite a registry-verified"):
+        await store.import_peer_artifact(
+            custom_record,
+            source_base_url="http://127.0.0.1:52415",
+            capability_token="tok",
+            target_node_id="store-node",
         )
 
 

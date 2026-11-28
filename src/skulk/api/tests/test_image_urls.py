@@ -36,3 +36,79 @@ def test_build_image_url_matches_the_registered_route() -> None:
 def test_build_image_url_preserves_https() -> None:
     url = API._build_image_url(_fake_api(), _fake_request(scheme="https"), Id("img-9"))
     assert url.startswith("https://")
+
+
+async def test_fetch_image_url_rejects_loopback_and_tailscale_targets() -> None:
+    """Remote image fetching refuses loopback and Tailscale/CGNAT SSRF targets."""
+    import pytest
+    from fastapi import HTTPException
+
+    from skulk.api.adapters.chat_completions import fetch_image_url
+
+    for blocked in (
+        "http://127.0.0.1:52415/state",
+        "http://100.68.140.20:52415/state",
+        "file:///etc/passwd",
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await fetch_image_url(blocked)
+        assert exc_info.value.status_code == 400
+
+
+async def test_fetch_image_url_rejects_oversized_responses(
+    monkeypatch: object,
+) -> None:
+    """Remote image fetching enforces a hard byte cap while streaming."""
+    import pytest
+    from fastapi import HTTPException
+
+    import skulk.api.adapters.chat_completions as adapter
+
+    mp = cast("pytest.MonkeyPatch", monkeypatch)
+
+    class _FakeContent:
+        async def iter_chunked(self, _size: int):
+            yield b"a" * 64
+            yield b"b" * 64
+
+    class _FakeResponse:
+        status = 200
+        headers: dict[str, str] = {}
+        content = _FakeContent()
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def __aenter__(self) -> "_FakeResponse":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class _FakeSession:
+        def get(
+            self, _url: str, *, headers: dict[str, str], allow_redirects: bool
+        ) -> _FakeResponse:
+            assert allow_redirects is False
+            assert "User-Agent" in headers
+            return _FakeResponse()
+
+        async def __aenter__(self) -> "_FakeSession":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    async def _allow_public(url: str) -> str:
+        return url
+
+    def _fake_session(**_kw: object) -> _FakeSession:
+        return _FakeSession()
+
+    mp.setattr("skulk.tools.web_search.validate_public_http_target", _allow_public)
+    mp.setattr(adapter, "create_http_session", _fake_session)
+    mp.setattr(adapter, "_MAX_REMOTE_IMAGE_BYTES", 100)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await adapter.fetch_image_url("https://93.184.216.34/big.png")
+    assert exc_info.value.status_code == 413

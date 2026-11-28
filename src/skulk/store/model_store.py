@@ -1913,11 +1913,41 @@ class ModelStore:
         caches are read-only from this operation and are never evicted.
         """
 
+        import ipaddress
         from urllib.parse import quote, urlsplit
 
         parsed = urlsplit(source_base_url)
         if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
             raise ValueError("source_base_url must be an HTTP(S) node API")
+        host = parsed.hostname.rstrip(".").lower()
+        trusted_source = False
+        try:
+            addr = ipaddress.ip_address(host)
+        except ValueError:
+            # Accept localhost, single-label cluster hostnames, mDNS (.local),
+            # and Tailscale MagicDNS (.ts.net); reject external public domains.
+            trusted_source = (
+                host == "localhost"
+                or "." not in host
+                or host.endswith((".local", ".ts.net"))
+            )
+        else:
+            if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+                addr = addr.ipv4_mapped
+            if not (addr.is_multicast or addr.is_unspecified):
+                trusted_source = (
+                    addr.is_loopback
+                    or addr.is_private
+                    or addr.is_link_local
+                    or (
+                        isinstance(addr, ipaddress.IPv4Address)
+                        and addr in ipaddress.ip_network("100.64.0.0/10")
+                    )
+                )
+        if not trusted_source:
+            raise ValueError(
+                "source_base_url must target a loopback or trusted-fabric peer"
+            )
         async with self._download_transfer_lock:
             tombstones = read_reconciliation_tombstones(self._store_path)
             if record.artifact_model_id in tombstones or (
@@ -1929,6 +1959,16 @@ class ModelStore:
                     f"for {record.owner_model_id or record.artifact_model_id}"
                 )
             existing = self.get_entry(record.artifact_model_id)
+            if (
+                existing is not None
+                and existing.installed_card is not None
+                and existing.installed_card.verification == "registry_verified"
+                and record.verification != "registry_verified"
+            ):
+                raise ValueError(
+                    "peer import cannot overwrite a registry-verified canonical "
+                    f"model with verification={record.verification!r}"
+                )
             existing_path = (
                 _resolve_store_child_path(self._store_path, existing.store_path)
                 if existing is not None

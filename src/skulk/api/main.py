@@ -2642,11 +2642,28 @@ class API:
             headers=exc.headers,
         )
 
+    # Allow browser CORS only for loopback, RFC 1918 private LAN, Tailscale
+    # CGNAT (100.64.0.0/10), Tailscale MagicDNS (*.ts.net), and mDNS (*.local)
+    # origins. Non-browser API clients (Scout, SDK, CLI, test harness, relay
+    # gateway) send no Origin header and are unaffected.
+    _TRUSTED_CORS_ORIGIN_REGEX: Final[str] = (
+        r"^https?://("
+        r"localhost"
+        r"|127(?:\.\d{1,3}){3}"
+        r"|\[::1\]"
+        r"|10(?:\.\d{1,3}){3}"
+        r"|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}"
+        r"|192\.168(?:\.\d{1,3}){2}"
+        r"|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.\d{1,3}){2}"
+        r"|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:ts\.net|local)"
+        r")(?::\d{1,5})?$"
+    )
+
     def _setup_cors(self) -> None:
         self.app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
+            allow_origin_regex=self._TRUSTED_CORS_ORIGIN_REGEX,
+            allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],
             expose_headers=[
@@ -17033,6 +17050,7 @@ class API:
         )
 
     async def update_config(self, request: Request) -> JSONResponse:
+        self._require_operator_mutation(request)
         body = await _read_request_json_object(request)
         if "config" in body:
             raw_config = body["config"]
@@ -17045,7 +17063,6 @@ class API:
         else:
             config_data = dict(body)
         if "model_trust" in config_data:
-            self._require_operator_mutation(request)
             raise HTTPException(
                 status_code=409,
                 detail=(

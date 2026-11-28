@@ -316,3 +316,25 @@ async def test_fetch_url_rejects_private_redirect_targets(
         await provider.open_url("https://example.com/start")
 
     assert fake_client.requested_urls == ["https://example.com/start"]
+
+
+@pytest.mark.parametrize(
+    "blocked_url",
+    [
+        "http://100.64.0.1:52415/state",
+        "http://100.100.100.100/latest",
+        "http://[::ffff:100.64.0.1]:52415/state",
+        "http://[::ffff:127.0.0.1]:52415/state",
+    ],
+)
+@pytest.mark.anyio
+async def test_validate_public_http_target_blocks_cgnat_and_mapped_ipv6(
+    blocked_url: str,
+) -> None:
+    """Tailscale/CGNAT and IPv4-mapped IPv6 targets must be rejected for SSRF."""
+    from skulk.tools.web_search import validate_public_http_target
+
+    with pytest.raises(
+        ValueError, match="Private, loopback, and link-local targets"
+    ):
+        await validate_public_http_target(blocked_url)

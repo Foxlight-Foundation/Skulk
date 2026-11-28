@@ -188,14 +188,35 @@ def _validate_http_url(url: str) -> str:
 def _is_blocked_ip_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return whether one resolved IP should be rejected for browser-tool fetches."""
 
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
     return (
-        address.is_private
+        not address.is_global
+        or address.is_private
         or address.is_loopback
         or address.is_link_local
         or address.is_multicast
         or address.is_reserved
         or address.is_unspecified
     )
+
+
+async def validate_public_http_target(url: str) -> str:
+    """Validate that ``url`` is an HTTP(S) target resolving only to global IPs.
+
+    Args:
+        url: Candidate outbound HTTP(S) URL.
+
+    Returns:
+        Normalized URL string once every resolved address is verified global.
+
+    Raises:
+        ValueError: If the scheme is unsupported, DNS resolution fails, or any
+            literal/resolved IP is loopback, private, CGNAT/Tailscale,
+            link-local, or otherwise non-global.
+    """
+
+    return await _validate_public_http_target(url)
 
 
 async def _validate_public_http_target(url: str) -> str:

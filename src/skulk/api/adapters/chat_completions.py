@@ -4,7 +4,8 @@ import base64
 import re
 import time
 from collections.abc import AsyncGenerator
-from typing import Any, cast
+from typing import Any, Final, cast
+from urllib.parse import urljoin
 
 from fastapi import HTTPException
 from loguru import logger
@@ -95,15 +96,81 @@ def extract_base64_from_data_url(data_url: str) -> str:
     return data_url
 
 
+_MAX_REMOTE_IMAGE_BYTES: Final[int] = 20 * 1024 * 1024
+_MAX_IMAGE_REDIRECTS: Final[int] = 5
+
+
 async def fetch_image_url(url: str) -> str:
+    """Fetch a remote HTTP(S) image with SSRF validation and bounded size.
+
+    Validates the initial URL and every redirect hop against public-network
+    restrictions so callers cannot probe loopback, LAN, or Tailscale hosts, and
+    streams the response with a 20 MiB cap to prevent memory exhaustion.
+
+    Args:
+        url: Remote HTTP or HTTPS image URL.
+
+    Returns:
+        Base64-encoded image bytes.
+
+    Raises:
+        HTTPException: 400 if the URL or a redirect target is rejected, or 413
+            if the remote image exceeds the size cap.
+    """
+    from skulk.tools.web_search import validate_public_http_target
+
     headers = {"User-Agent": "skulk/1.0"}
-    async with (
-        create_http_session(timeout_profile="short") as session,
-        session.get(url, headers=headers) as resp,
-    ):
-        resp.raise_for_status()
-        data = await resp.read()
-        return base64.b64encode(data).decode("ascii")
+    current_url = url
+    async with create_http_session(timeout_profile="short") as session:
+        for _ in range(_MAX_IMAGE_REDIRECTS + 1):
+            try:
+                validated_url = await validate_public_http_target(current_url)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            async with session.get(
+                validated_url, headers=headers, allow_redirects=False
+            ) as resp:
+                if 300 <= resp.status < 400:
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Image redirect response missing Location header.",
+                        )
+                    current_url = urljoin(validated_url, location)
+                    continue
+                resp.raise_for_status()
+                content_length = resp.headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        if int(content_length) > _MAX_REMOTE_IMAGE_BYTES:
+                            raise HTTPException(
+                                status_code=413,
+                                detail=(
+                                    "Remote image exceeds maximum allowed size "
+                                    f"of {_MAX_REMOTE_IMAGE_BYTES} bytes."
+                                ),
+                            )
+                    except ValueError:
+                        pass
+                chunks: list[bytes] = []
+                total_bytes = 0
+                async for chunk in resp.content.iter_chunked(65_536):
+                    total_bytes += len(chunk)
+                    if total_bytes > _MAX_REMOTE_IMAGE_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(
+                                "Remote image exceeds maximum allowed size "
+                                f"of {_MAX_REMOTE_IMAGE_BYTES} bytes."
+                            ),
+                        )
+                    chunks.append(chunk)
+                return base64.b64encode(b"".join(chunks)).decode("ascii")
+        raise HTTPException(
+            status_code=400,
+            detail="Image URL exceeded maximum redirect limit.",
+        )
 
 
 def _forced_function_name(
