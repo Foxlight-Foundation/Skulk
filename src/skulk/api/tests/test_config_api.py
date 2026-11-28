@@ -679,8 +679,8 @@ def test_update_config_rejects_untrusted_client_and_external_origin(
         ("http://127.0.0.1:52415", True),
         ("http://192.168.0.10:52415", True),
         ("http://100.68.140.20:52415", True),
-        ("https://node.tail53540a.ts.net", True),
         ("http://mac-studio.local:52415", True),
+        ("https://attacker.unrelated-tailnet.ts.net", False),
         ("https://evil.example", False),
         ("https://ts.net.evil.example", False),
         ("http://100.128.0.1:52415", False),
@@ -690,7 +690,7 @@ def test_cors_restricts_browser_origins_without_credentials(
     origin: str,
     allowed: bool,
 ) -> None:
-    """CORS admits loopback/LAN/Tailscale origins without credential reflection."""
+    """CORS admits loopback/LAN/CGNAT/mDNS origins and rejects public/unrelated tailnets."""
 
     api = _build_api()
     client = TestClient(api.app, client=("127.0.0.1", 50000))
@@ -702,3 +702,34 @@ def test_cors_restricts_browser_origins_without_credentials(
         assert response.headers.get("access-control-allow-origin") == origin
     else:
         assert response.headers.get("access-control-allow-origin") is None
+
+
+def test_cors_allows_explicitly_configured_origins_without_wildcarding_tailnets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operators can allowlist an explicit origin without trusting unrelated *.ts.net sites."""
+
+    monkeypatch.setenv(
+        "SKULK_CORS_ALLOWED_ORIGINS",
+        "https://studio.trusted-tailnet.ts.net/",
+    )
+    api = _build_api()
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
+
+    allowed_res = client.get(
+        "/node_id",
+        headers={"Origin": "https://studio.trusted-tailnet.ts.net"},
+    )
+    assert allowed_res.status_code == 200
+    assert (
+        allowed_res.headers.get("access-control-allow-origin")
+        == "https://studio.trusted-tailnet.ts.net"
+    )
+    assert allowed_res.headers.get("access-control-allow-credentials") is None
+
+    rejected_res = client.get(
+        "/node_id",
+        headers={"Origin": "https://attacker.other-tailnet.ts.net"},
+    )
+    assert rejected_res.status_code == 200
+    assert rejected_res.headers.get("access-control-allow-origin") is None

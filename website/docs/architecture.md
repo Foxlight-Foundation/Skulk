@@ -3000,6 +3000,8 @@ The dashboard's main surfaces:
 - **Observability panel**: right-side resizable dock for live cluster health, per-node diagnostics, trace browsing (work in progress)
 - **Settings**: cluster config (model store, KV cache backend, logging, tracing), plus a gated Experiments section on nodes running with `SKULK_ENABLE_EXPERIMENTAL_MODE`
 
+Browser CORS on the API allows loopback, RFC 1918 LAN, Tailscale CGNAT IP (`100.64.0.0/10`), and `.local` origins without credentials (`allow_credentials=False`). Unrelated `*.ts.net` hosts are not wildcard-trusted (because Tailscale Funnel publishes public pages under `*.ts.net`); same-origin MagicDNS dashboard access works without CORS, and operators needing a specific cross-origin browser frontend can allowlist exact origins via `SKULK_CORS_ALLOWED_ORIGINS`.
+
 ## Trade-offs and constraints
 
 The shape of Skulk reflects deliberate trade-offs. Knowing which ones helps explain why some things are the way they are:

@@ -2643,9 +2643,13 @@ class API:
         )
 
     # Allow browser CORS only for loopback, RFC 1918 private LAN, Tailscale
-    # CGNAT (100.64.0.0/10), Tailscale MagicDNS (*.ts.net), and mDNS (*.local)
-    # origins. Non-browser API clients (Scout, SDK, CLI, test harness, relay
-    # gateway) send no Origin header and are unaffected.
+    # CGNAT IP (100.64.0.0/10), and mDNS (*.local) origins. Do NOT wildcard
+    # *.ts.net because Tailscale Funnel lets unrelated third parties publish
+    # public HTTPS sites under *.ts.net; same-origin MagicDNS dashboard calls
+    # do not require CORS, and operators needing a specific cross-origin
+    # MagicDNS/custom frontend can allowlist exact origins via
+    # SKULK_CORS_ALLOWED_ORIGINS. Non-browser API clients (Scout, SDK, CLI,
+    # test harness, relay gateway) send no Origin header and are unaffected.
     _TRUSTED_CORS_ORIGIN_REGEX: Final[str] = (
         r"^https?://("
         r"localhost"
@@ -2655,13 +2659,20 @@ class API:
         r"|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}"
         r"|192\.168(?:\.\d{1,3}){2}"
         r"|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.\d{1,3}){2}"
-        r"|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:ts\.net|local)"
+        r"|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.local"
         r")(?::\d{1,5})?$"
     )
 
     def _setup_cors(self) -> None:
+        raw_extra = os.environ.get("SKULK_CORS_ALLOWED_ORIGINS", "")
+        extra_origins = [
+            origin.strip().rstrip("/")
+            for origin in raw_extra.split(",")
+            if origin.strip()
+        ]
         self.app.add_middleware(
             CORSMiddleware,
+            allow_origins=extra_origins,
             allow_origin_regex=self._TRUSTED_CORS_ORIGIN_REGEX,
             allow_credentials=False,
             allow_methods=["*"],
