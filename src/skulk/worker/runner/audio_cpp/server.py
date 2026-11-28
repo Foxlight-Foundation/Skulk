@@ -260,12 +260,12 @@ class AudioCppServer:
         if process is not None and process.poll() is None:
             with contextlib.suppress(OSError):
                 os.killpg(process.pid, signal.SIGTERM)
-            with contextlib.suppress(subprocess.TimeoutExpired):
+            with contextlib.suppress(subprocess.TimeoutExpired, InterruptedError):
                 process.wait(timeout=5)
             if process.poll() is None:
                 with contextlib.suppress(OSError):
                     os.killpg(process.pid, signal.SIGKILL)
-                with contextlib.suppress(subprocess.TimeoutExpired):
+                with contextlib.suppress(subprocess.TimeoutExpired, InterruptedError):
                     process.wait(timeout=5)
         log = self._log
         self._log = None

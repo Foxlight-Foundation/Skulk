@@ -809,6 +809,8 @@ class Runner(ServedConcurrentDispatch):
     (``_generate``, server spawn/liveness/teardown, ``handle_task``).
     """
 
+    _teardown_before_pool_drain = True
+
     def __init__(
         self,
         bound_instance: BoundInstance,
@@ -1191,9 +1193,12 @@ class Runner(ServedConcurrentDispatch):
                     self._signal_server_group(proc, signal.SIGTERM)
                     try:
                         proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
+                    except (subprocess.TimeoutExpired, InterruptedError):
                         self._signal_server_group(proc, signal.SIGKILL)
-                        proc.wait(timeout=5)
+                        with contextlib.suppress(
+                            subprocess.TimeoutExpired, InterruptedError
+                        ):
+                            proc.wait(timeout=5)
                 # The leader being gone (whether it exited just now or died
                 # BEFORE teardown ran: a startup crash observed by
                 # _await_health, an unexpected server exit) does not prove

@@ -101,6 +101,11 @@ class ServedConcurrentDispatch:
     """
 
     _generation_kinds: tuple[type[GenerationTask], ...] = (TextGeneration,)
+    # Subprocess-backed HTTP server runners set this True so shutdown tears down
+    # the child server before draining worker threads (breaking wedged HTTP
+    # reads), then tears down again after draining. In-process / workspace-owning
+    # runners leave this False so active threads finish before model/file cleanup.
+    _teardown_before_pool_drain: bool = False
 
     # --- supplied by the concrete runner --------------------------------------
     event_sender: MpSender[Event]
@@ -397,9 +402,18 @@ class ServedConcurrentDispatch:
                             self.update_status(self.current_status)
                             self._retire_task_id(task.task_id)
         finally:
-            # Drain in-flight generations, then stop the server. Shutdown already
-            # cancels them; this also covers the EndOfStream / crash exits.
-            pool.shutdown(wait=True)
+            # Mark unexpected exits (receiver closure / dispatch exception) as
+            # shutting down BEFORE teardown/drain so unwinding worker threads
+            # (e.g. audio.cpp's recovery finally block) do not spawn a
+            # replacement GPU server during pool drain.
+            if not isinstance(
+                self.current_status, (RunnerShuttingDown, RunnerShutdown)
+            ):
+                self.current_status = RunnerShuttingDown()
+            if self._teardown_before_pool_drain:
+                with self._cancel_lock:
+                    self.cancelled_tasks.add(CANCEL_ALL_TASKS)
+            self._drain_and_teardown(pool)
             # Generations still queued when the loop ends on a crash never run:
             # the runner says so itself rather than leaving their terminal to
             # the supervisor's sweep of everything it acknowledged. A sender
@@ -410,7 +424,6 @@ class ServedConcurrentDispatch:
                     self.send_task_status(queued, TaskStatus.Failed)
                 self._note_dispatch_waiter_finished()
                 self._retire_task_id(queued.task_id)
-            self._teardown_server()
 
     # --- dispatch -------------------------------------------------------------
 
@@ -656,8 +669,35 @@ class ServedConcurrentDispatch:
             }
         )
 
+    def _drain_and_teardown(self, pool: ThreadPoolExecutor) -> None:
+        """Drain the worker pool and guarantee server/model teardown.
+
+        External-server runners (``_teardown_before_pool_drain = True``) tear
+        down the child server before ``pool.shutdown(wait=True)`` so worker
+        threads blocked on a hung HTTP request unwind immediately, then tear
+        down a second time after the pool drains so a recovery path that had
+        already started loading a replacement server cannot leave it behind.
+        ``pool.shutdown(wait=True)`` runs inside ``finally`` so an exception
+        during the initial teardown never skips draining active threads.
+
+        In-process runners (``_teardown_before_pool_drain = False``) drain the
+        pool first and then release their in-process model/workspace so active
+        threads never lose state mid-generation.
+        """
+        if self._teardown_before_pool_drain:
+            try:
+                self._teardown_server()
+            finally:
+                pool.shutdown(wait=True)
+                self._teardown_server()
+        else:
+            try:
+                pool.shutdown(wait=True)
+            finally:
+                self._teardown_server()
+
     def _handle_shutdown(self, task: Task, pool: ThreadPoolExecutor) -> None:
-        """Cancel in-flight generations, drain the pool, then tear down the server."""
+        """Cancel in-flight generations, drain the pool, and tear down the server."""
         logger.info("served runner shutting down")
         # Emit Running before the terminal Complete: the worker's task-lifecycle
         # contract expects Running -> Complete for every task, shutdown included.
@@ -679,8 +719,7 @@ class ServedConcurrentDispatch:
                 self.send_task_status(queued, TaskStatus.Cancelled)
             finally:
                 self._note_dispatch_waiter_finished()
-        pool.shutdown(wait=True)
-        self._teardown_server()
+        self._drain_and_teardown(pool)
         record_runner_phase(
             "shutdown_cleanup",
             event="server_teardown_complete",

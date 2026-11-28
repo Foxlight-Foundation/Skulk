@@ -133,6 +133,7 @@ class Runner(ServedConcurrentDispatch):
     """Serve one music model with strict serial generation and cancel teardown."""
 
     _generation_kinds = (MusicGeneration,)
+    _teardown_before_pool_drain = True
 
     def __init__(
         self,

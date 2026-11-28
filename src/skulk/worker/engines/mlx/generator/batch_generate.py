@@ -577,6 +577,11 @@ class SkulkBatchGenerator:
             )
 
             if is_done:
+                if response.finish_reason is None:
+                    # A user-supplied stop sequence ended this task before MLX
+                    # hit EOS or max_tokens; remove the UID from BatchGenerator
+                    # so its Metal KV cache and decode slot are released now.
+                    self._mlx_gen.remove([response.uid])
                 del self._active_tasks[response.uid]
             elif (
                 max_stop_len > 0
