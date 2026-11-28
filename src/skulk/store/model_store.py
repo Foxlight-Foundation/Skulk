@@ -1917,7 +1917,20 @@ class ModelStore:
         import socket
         from urllib.parse import quote, urlsplit
 
+        import yarl
         from aiohttp.abc import AbstractResolver, ResolveResult
+
+        def _normalize_pinned_peer_host(value: str) -> str:
+            stripped = value.strip().rstrip(".")
+            if not stripped:
+                return ""
+            try:
+                encoded = yarl.URL.build(scheme="http", host=stripped).raw_host
+                if encoded is not None:
+                    return encoded.rstrip(".").lower()
+            except ValueError:
+                pass
+            return stripped.lower()
 
         def _is_trusted_peer_ip(
             addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
@@ -1939,8 +1952,7 @@ class ModelStore:
         parsed = urlsplit(source_base_url)
         if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
             raise ValueError("source_base_url must be an HTTP(S) node API")
-        raw_host = parsed.hostname
-        host = raw_host.rstrip(".").lower()
+        host = _normalize_pinned_peer_host(parsed.hostname)
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         pinned_endpoints: list[tuple[int, int, str, int]] = []
         literal_addr: ipaddress.IPv4Address | ipaddress.IPv6Address | None
@@ -1964,7 +1976,7 @@ class ModelStore:
             try:
                 address_infos = await asyncio.to_thread(
                     socket.getaddrinfo,
-                    raw_host,
+                    host,
                     port,
                     socket.AF_UNSPEC,
                     socket.SOCK_STREAM,
@@ -2006,7 +2018,7 @@ class ModelStore:
                 port: int = 0,
                 family: socket.AddressFamily = socket.AF_INET,
             ) -> list[ResolveResult]:
-                if host.rstrip(".").lower() != expected_host:
+                if _normalize_pinned_peer_host(host) != expected_host:
                     raise OSError(f"Unexpected peer export host: {host}")
                 results: list[ResolveResult] = []
                 for ep_family, proto, ip_str, ep_port in pinned_endpoints:

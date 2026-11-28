@@ -105,6 +105,29 @@ _MAX_REMOTE_IMAGE_BYTES: Final[int] = 20 * 1024 * 1024
 _MAX_IMAGE_REDIRECTS: Final[int] = 5
 
 
+def _normalize_pinned_hostname(host: str) -> str:
+    """Normalize a hostname or IP literal using yarl's IDNA2008 encoding.
+
+    ``urllib.parse.urlsplit`` preserves Unicode hostnames and Python's stdlib
+    ``idna`` codec uses IDNA2003 (mapping ``ß`` to ``ss``), whereas ``aiohttp``
+    uses ``yarl``'s IDNA2008 ``raw_host`` (mapping ``faß.example`` to
+    ``xn--fa-hia.example``). Using ``yarl`` keeps DNS validation and pinned
+    resolution byte-for-byte identical to ``aiohttp``.
+    """
+    import yarl
+
+    stripped = host.strip().rstrip(".")
+    if not stripped:
+        return ""
+    try:
+        encoded = yarl.URL.build(scheme="http", host=stripped).raw_host
+        if encoded is not None:
+            return encoded.rstrip(".").lower()
+    except ValueError:
+        pass
+    return stripped.lower()
+
+
 class _PinnedHostResolver(AbstractResolver):
     """Resolver pinned to pre-validated endpoints for a single HTTP hop."""
 
@@ -113,7 +136,7 @@ class _PinnedHostResolver(AbstractResolver):
         expected_host: str,
         endpoints: tuple[tuple[int, int, str, int], ...],
     ) -> None:
-        self._expected_host = expected_host.rstrip(".").lower()
+        self._expected_host = _normalize_pinned_hostname(expected_host)
         self._endpoints = endpoints
 
     async def resolve(
@@ -122,7 +145,7 @@ class _PinnedHostResolver(AbstractResolver):
         port: int = 0,
         family: socket.AddressFamily = socket.AF_INET,
     ) -> list[ResolveResult]:
-        normalized = host.rstrip(".").lower()
+        normalized = _normalize_pinned_hostname(host)
         if normalized != self._expected_host:
             raise OSError(f"Unexpected host during pinned fetch: {host}")
         results: list[ResolveResult] = []

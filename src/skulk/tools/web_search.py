@@ -241,13 +241,19 @@ async def resolve_public_http_target(
             literal/resolved IP is non-global.
     """
 
+    import yarl
+
     validated_url = _validate_http_url(url)
     parsed = urlparse(validated_url)
     hostname = parsed.hostname
     if hostname is None:
         raise ValueError("Only absolute http:// and https:// URLs are supported.")
 
-    normalized_host = hostname.rstrip(".").lower()
+    try:
+        canonical_host = yarl.URL(validated_url).raw_host or hostname
+    except ValueError:
+        canonical_host = hostname
+    normalized_host = canonical_host.rstrip(".").lower()
     if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
         raise ValueError("Private, loopback, and link-local targets are not allowed.")
 
@@ -271,7 +277,7 @@ async def resolve_public_http_target(
     try:
         address_infos = await asyncio.to_thread(
             socket.getaddrinfo,
-            hostname,
+            normalized_host,
             port,
             socket.AF_UNSPEC,
             socket.SOCK_STREAM,
