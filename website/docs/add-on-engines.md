@@ -204,6 +204,7 @@ engine:
   or video.
 - A request that carries tools or images is refused when the model runs on an
   add-on engine, even when the model itself supports them. The reply says so.
+  A chat model that understands images can still run there and answer text.
   For the same reason the model behind [Talk to Skulk](steward.md), which
   works through tools, is never placed on an add-on engine.
 - What a machine has learned about a build (its last load results and the

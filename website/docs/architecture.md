@@ -2252,7 +2252,10 @@ curated architecture has an architecture that is its own identity, so an entry
 for it covers that card and no other. A system placement, which today is the
 steward, is never put on a package whichever way the package became eligible:
 the steward runs every turn with tools, and the chat dialect of a package
-carries none.
+carries none. A chat model that also understands images stays eligible: the
+package serves its text, and a request that carries an image is refused when
+it arrives. A card for another operation (music, image, video, speech,
+embeddings, source separation) is never offered a package.
 
 **A launch on a package.** Admission counts the model's weights plus the memory
 the build declares. If the chosen node only offers the build, the worker's

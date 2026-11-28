@@ -19,6 +19,7 @@ from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
     PlacementCardConfig,
+    VisionCardConfig,
 )
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import ModelId, NodeId
@@ -111,6 +112,29 @@ def test_a_package_is_not_offered_to_a_card_that_is_not_text_generation() -> Non
                 engine_builds={PACKAGE_TAG: PACKAGE_BUILD},
             ),
         )
+
+
+def test_a_text_card_with_a_vision_section_is_still_offered_the_package() -> None:
+    """Vision on a chat card does not keep it off a package.
+
+    The package serves the card's text and its runner refuses an image request
+    when one arrives. Most signed chat cards have a vision section, so treating
+    one as a non-text card left them with no add-on engine at all.
+    """
+    card = _card("tensorfold").model_copy(
+        update={"vision": VisionCardConfig(image_token_id=7, model_type="qwen3_5")}
+    )
+
+    shard = _place(
+        card,
+        NodeResources(
+            backends=frozenset({PACKAGE_TAG}),
+            engine_builds={PACKAGE_TAG: PACKAGE_BUILD},
+        ),
+    )
+
+    assert shard.resolved_backend == PACKAGE_TAG
+    assert shard.resolved_engine_build == PACKAGE_BUILD
 
 
 BUILT_IN_NODE = NodeId("node-built-in")
