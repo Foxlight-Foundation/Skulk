@@ -51,7 +51,9 @@ CATALOG = "signing-catalog.txt"
 RECORD_SCHEMA = "skulk.bindings-wheel-signing.v1"
 SIGNATURES_PS1 = r"""
 $ErrorActionPreference = 'Stop'
-$result = foreach ($path in Get-Content -LiteralPath $args[0] -Encoding UTF8) {
+# ReadAllLines, not Get-Content: Get-Content decorates each line, and
+# ConvertTo-Json would then write the path as an object, not as a string.
+$result = foreach ($path in [System.IO.File]::ReadAllLines($args[0])) {
     $signature = Get-AuthenticodeSignature -LiteralPath $path
     [pscustomobject]@{
         path = $path
@@ -403,7 +405,16 @@ def read_signatures(paths: list[Path]) -> dict[str, dict[str, object]]:
             capture_output=True,
             text=True,
         ).stdout
-    return {str(item["path"]): item for item in json.loads(output)}
+    readings = {
+        item["path"]: item
+        for item in json.loads(output)
+        if isinstance(item["path"], str)
+    }
+    if set(readings) != {str(path) for path in paths}:
+        raise RefusedError(
+            "Windows did not report on exactly the files it was asked about"
+        )
+    return readings
 
 
 def common_name(subject: object) -> str:

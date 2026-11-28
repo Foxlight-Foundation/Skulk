@@ -490,9 +490,13 @@ def test_verify_is_refused_where_windows_cannot_be_asked(tmp_path: Path) -> None
 def test_windows_does_not_call_an_unsigned_file_valid(tmp_path: Path) -> None:
     _, target = unpacked(tmp_path)
 
-    readings = signing.read_signatures(signing._catalog_paths(target))
+    paths = signing._catalog_paths(target)
 
-    assert [item["status"] for item in readings.values()] != ["Valid"]
+    readings = signing.read_signatures(paths)
+
+    assert list(readings) == [str(path) for path in paths]
+    assert readings[str(paths[0])]["status"] == "NotSigned"
+    assert readings[str(paths[0])]["timestamped"] is False
     with pytest.raises(signing.RefusedError, match="signature check failed"):
         signing.verify(target)
 
